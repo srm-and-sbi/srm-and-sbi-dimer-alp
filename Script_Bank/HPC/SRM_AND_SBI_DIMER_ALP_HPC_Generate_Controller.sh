@@ -40,6 +40,12 @@
 # =============================================================================
 set -uo pipefail
 
+# Per-machine HPC config (gitignored; copy from hpc_local.env.example): sets
+# MACHINE_PROFILE / PART / ACCT / MON_OUT / USER_ME / etc. so this generic
+# controller runs unchanged on any cluster. Falls back to the defaults below if absent.
+HPC_ENV="${HPC_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hpc_local.env}"
+if [ -f "$HPC_ENV" ]; then . "$HPC_ENV"; fi
+
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"   # self-derived: this script lives at REPO/Script_Bank/HPC/
 SIM="${SIM:-$REPO/Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Simulation.sh}"
 USER_ME="${USER_ME:-$USER}"

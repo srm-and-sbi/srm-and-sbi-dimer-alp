@@ -23,6 +23,12 @@
 
 set -eo pipefail
 
+# Per-machine HPC config (gitignored; copy from hpc_local.env.example): sets
+# MACHINE_PROFILE / CONDA_SETUP / etc. so this generic script runs unchanged
+# on any cluster. Falls back to the defaults below if absent.
+HPC_ENV="${HPC_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hpc_local.env}"
+if [ -f "$HPC_ENV" ]; then . "$HPC_ENV"; fi
+
 source "${CONDA_SETUP:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 conda activate SRM_AND_SBI_ENVY_V0
 export MACHINE_PROFILE="${MACHINE_PROFILE:?set MACHINE_PROFILE to the profile name in your machine_profiles.toml}"
