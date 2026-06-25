@@ -1,0 +1,470 @@
+"""Entry-point script: evaluate a trained posterior by MAP recovery on the EVAL set.
+
+Loads the trained posterior and the held-out EVAL namespace (videos with known
+ground-truth theta), estimates the MAP parameter vector for each EVAL video via
+the seed-then-optimize procedure in ``evaluation.MAPEstimate``, and reports how
+well the inferred parameters recover the truth.
+
+The EVAL namespace is physically separate from TRAIN/TEST (distinct ``_EVAL``
+filename suffix and an independent generation seed), so the recovery number is
+leak-free by construction: the posterior has never seen these videos for
+gradient updates or model selection.
+
+Outputs (under ``<data_bank>/<posit_subdir>/<project_alias>_{timing_label}_MAP_Recovery/``):
+    report.md                    -- recovery report (per-parameter error table +
+                                     legend + embedded figures).
+    figures/recovery_<KEY>.png   -- inferred-vs-true scatter (log10), per parameter.
+    figures/error_<KEY>.png      -- residual-error view (log10), per parameter.
+    <...>_MAP_Recovery.npz       -- saved arrays: true_log10, inferred_log10, scores.
+
+Usage:
+    MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Evaluation.py \\
+        --total-time-seconds 2.0 --eval-tasks 1
+"""
+
+import argparse
+import random
+import shutil
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch._dynamo
+
+from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
+from srm_and_sbi_dimer_alp.evaluation import (
+    MAPEstimate,
+    posterior_coverage_table,
+    posterior_summary,
+    recovery_table,
+    _theta_repr,
+)
+from srm_and_sbi_dimer_alp.inference_support import get_device, load_posterior
+from srm_and_sbi_dimer_alp.io import load_data
+from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming
+from srm_and_sbi_dimer_alp.utils import console_log_context
+from srm_and_sbi_dimer_alp.visualization_inference import figure_recovery_combined
+
+
+def main(args: argparse.Namespace) -> None:
+    """Run the full MAP-recovery evaluation per the CLI args."""
+    timing = RunTiming(
+        total_time_seconds=args.total_time_seconds, frames=PARAMETERS.simulation.timing,
+    )
+    data_bank_root = PARAMETERS.machine.data_bank_root
+    compress = True  # EVAL video/theta sets are read from .zarr, as in inference
+    paths = PARAMETERS.paths
+    eval_cfg = PARAMETERS.inference.evaluation
+
+    # ---- Global RNG / precision settings ---------------------------------
+    if args.seed is not None:   # None -> non-deterministic (consistent with generation)
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+    torch.set_float32_matmul_precision("high")
+    torch._dynamo.config.suppress_errors = True
+
+    timing_label = timing.label
+    posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    recovery_dir = paths.map_recovery_dir(data_bank_root, timing_label)
+    recovery_array_path = paths.map_recovery_array_path(data_bank_root, timing_label)
+
+    # Resolve effective hyperparameters (None -> config default).
+    lr = (args.learning_rate if args.learning_rate is not None
+          else eval_cfg.learning_rate_minimum * eval_cfg.learning_rate_maximum_factor)
+    tolerance = eval_cfg.learning_rate_minimum * eval_cfg.tolerance_factor
+    theta_prex_size = args.theta_prex_size or eval_cfg.theta_prex_size
+    elite_prex_size = args.elite_prex_size or eval_cfg.elite_prex_size
+    numb_steps = args.numb_steps or eval_cfg.numb_steps
+    show_progress_steps = args.show_progress_steps or eval_cfg.show_progress_steps
+    pool_mode = args.pool_mode or eval_cfg.pool_mode
+
+    # Verbosity tiers (the show / verbose flags):
+    #   --verbose    -> show: rich per-stage/per-step console diagnostics.
+    #   --debug      -> show + deep verbose: sbi sampling progress bars + optimizer
+    #                   config on the console, and per-video / per-step detail in
+    #                   progress.log.
+    #   --debug-dump -> implies --debug; additionally tees the full console
+    #                   transcript to Labor/Debug/<run>/Evaluation/console.log
+    #                   (handled by the console_log_context wrapper in __main__).
+    show = args.verbose or args.debug or args.debug_dump
+    verbose_deep = args.debug or args.debug_dump
+    debug_log = args.debug or args.debug_dump   # write per-step/theta detail to progress.log
+
+    # Summary views (View A = MAP-point figures; View B = posterior-credible figures).
+    do_map = args.summary in ("map", "both")
+    do_posterior = args.summary in ("posterior", "both")
+    bin_mode = args.bin_mode
+    posterior_samples = args.posterior_samples or eval_cfg.posterior_samples
+    n_bins = args.n_bins or eval_cfg.quantile_bins
+    min_count = args.min_count or eval_cfg.quantile_min_count
+
+    # ---- Pre-run banner --------------------------------------------------
+    machine = PARAMETERS.machine
+    div = "=" * 72
+    print(div)
+    print(f" {paths.project_alias} — Evaluation (MAP recovery)")
+    print(f" Started at  : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(div)
+    print("\nMachine profile:")
+    print(f"  name              : {machine.name}")
+    print(f"  compute_backend   : {machine.compute_backend}")
+    print("\nRun configuration (CLI args):")
+    print(f"  --total-time-seconds : {args.total_time_seconds}")
+    print(f"  --eval-tasks         : {args.eval_tasks}        (EVAL-namespace tasks; held out)")
+    print(f"  --max-sims           : {args.max_sims}        (per task; 0 = all)")
+    print(f"  --seed               : {args.seed}")
+    print(f"  verbosity            : "
+          f"{'debug-dump' if args.debug_dump else ('debug' if args.debug else ('verbose' if args.verbose else 'normal'))}")
+    print("\nMAP estimate hyperparameters (effective):")
+    print(f"  pool_mode            : {pool_mode}   "
+          f"({'rejection within prior' if pool_mode == 'bounded' else 'flow direct, no rejection'})")
+    print(f"  theta_prex_size      : {theta_prex_size}")
+    print(f"  elite_prex_size      : {elite_prex_size}")
+    print(f"  numb_steps           : {numb_steps}")
+    print(f"  learning_rate        : {lr:.3e}   tolerance: {tolerance:.3e}")
+    print(f"  --summary            : {args.summary}   (View A map={do_map}, View B posterior={do_posterior})")
+    print(f"  --bin-mode           : {bin_mode}")
+    if do_posterior:
+        print(f"  --posterior-samples  : {posterior_samples}")
+    progress_path = recovery_dir / "progress.log"
+    print("\nOutput destinations:")
+    print(f"  reads posterior : {posterior_path}")
+    print(f"  reads EVAL      : <data_bank>/{paths.video_subdir}/"
+          f"{paths.project_alias}_{timing_label}_Video_Set_TASK_{{0..{args.eval_tasks - 1}}}_EVAL.zarr")
+    print(f"  writes report   : {recovery_dir}")
+    print(f"  live progress   : {progress_path}   (tail -f to monitor)")
+    print(f"\n{div}\n")
+
+    run_start = time.time()
+
+    # ---- Diagnostics reporter (the recovery report is the deliverable) ----
+    reporter = DiagnosticReporter(
+        stage="Evaluation", enabled=True, dump=True, dump_dir=recovery_dir,
+        run_label=f"{paths.project_alias}_{timing_label}",
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    )
+
+    reporter.check_file("posterior", posterior_path)
+
+    device = get_device()
+    vista_device = torch.device("cpu")
+    posterior = load_posterior(posterior_path)
+    posterior.posterior_estimator.to(device)
+    if device.type == "cuda":
+        # Use the device-resident prior for bounded rejection sampling.
+        posterior.prior = posterior._prior
+
+    # ---- Probe the EVAL namespace for the total recovery workload --------
+    # (counts only, so the live progress log can report "k/total" and an ETA.)
+    per_task_sims = []
+    for task in range(args.eval_tasks):
+        theta_set = load_data(
+            paths.theta_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
+        n_sims = theta_set.shape[0]
+        per_task_sims.append(min(n_sims, args.max_sims) if args.max_sims > 0 else n_sims)
+    total_sims = int(sum(per_task_sims))
+
+    # ---- Live progress log (so a long MAP run can be monitored) ----------
+    # One flushed line per recovered video: a `tail -f`-able trail showing the
+    # algorithm is advancing (count, score, elapsed, average, ETA).
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    # Clear stale figures from a previous run so the report is self-contained
+    # (figure filenames can change between runs; report.md / .npz are overwritten).
+    shutil.rmtree(recovery_dir / "figures", ignore_errors=True)
+
+    def log_progress(progress_fh, message: str) -> None:
+        """Append a timestamped line to the progress log and flush immediately."""
+        stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        line = f"[{stamp}] {message}"
+        print(line, flush=True)
+        if progress_fh is not None:
+            progress_fh.write(line + "\n")
+            progress_fh.flush()
+
+    def log_file_only(progress_fh, message: str) -> None:
+        """Write a line to the progress log only (console already has it via --debug)."""
+        if progress_fh is not None:
+            progress_fh.write(f"           {message}\n")
+            progress_fh.flush()
+
+    try:
+        progress_fh = open(progress_path, "w", encoding="utf-8")
+    except OSError as exc:
+        print(f"WARNING: cannot open progress log {progress_path} ({exc}); "
+              f"continuing without it.", flush=True)
+        progress_fh = None
+
+    # In debug, stream per-step optimization progress + the stop line into the
+    # progress log live (None otherwise, so normal/verbose runs keep it compact).
+    step_log = (lambda m: log_file_only(progress_fh, m)) if debug_log else None
+
+    # ---- MAP estimate over the EVAL namespace ----------------------------
+    scores, inferred_log10, true_log10, post_quantiles = [], [], [], []
+    log_progress(progress_fh,
+                 f"START MAP recovery: {args.eval_tasks} EVAL tasks, "
+                 f"{total_sims} videos total (pool={theta_prex_size}, "
+                 f"elites={elite_prex_size}, steps={numb_steps}; "
+                 f"summary={args.summary}).")
+    loop_start = time.time()
+    done = 0
+    try:
+        for task in range(args.eval_tasks):
+            video_set = load_data(
+                paths.video_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
+            theta_set = load_data(
+                paths.theta_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
+            task_start = time.time()
+            for sim in range(per_task_sims[task]):
+                video_chunk = np.asarray(video_set[sim])
+                if show:
+                    print(f"\n######## MAP estimate: task {task} sim {sim} ########",
+                          flush=True)
+                if debug_log:
+                    log_file_only(progress_fh, f"-- task {task} sim {sim} --")
+                score, theta_log = MAPEstimate(
+                    posterior, video_chunk, device, vista_device,
+                    theta_prex_size, eval_cfg.theta_prex_batch_size,
+                    eval_cfg.score_prex_batch_size, elite_prex_size,
+                    numb_steps, eval_cfg.optimizer_patience,
+                    eval_cfg.scheduler_patience, show_progress_steps,
+                    eval_cfg.learning_rate_minimum, eval_cfg.learning_rate_factor,
+                    lr, tolerance, pool_mode=pool_mode, show=show, verbose=verbose_deep,
+                    log_fn=step_log,
+                )
+                true_log = np.log10(np.asarray(theta_set[sim], dtype=float))
+                scores.append(score)
+                inferred_log10.append(theta_log)
+                true_log10.append(true_log)
+                if do_posterior:
+                    # View B: posterior credible summary for this video (median + IQR).
+                    post_quantiles.append(posterior_summary(
+                        posterior, video_chunk, device, vista_device,
+                        posterior_samples, eval_cfg.theta_prex_batch_size,
+                        pool_mode=pool_mode))
+                if show:
+                    # Per-video ground-truth comparison (console).
+                    print(f"          original theta [LOG] {_theta_repr(true_log)}",
+                          flush=True)
+                    print(f"          original theta [ABS] "
+                          f"{_theta_repr(np.power(10.0, true_log))}", flush=True)
+                done += 1
+                elapsed = time.time() - loop_start
+                avg = elapsed / done
+                eta = avg * (total_sims - done)
+                log_progress(
+                    progress_fh,
+                    f"task {task} sim {sim} | {done}/{total_sims} | "
+                    f"log_prob={score:+.3f} | elapsed={elapsed:.1f}s | "
+                    f"avg={avg:.1f}s/video | ETA={eta:.0f}s")
+                if debug_log:
+                    # More info in the progress file: per-video theta detail.
+                    log_file_only(progress_fh,
+                                  f"inferred [LOG] {_theta_repr(theta_log)}")
+                    log_file_only(progress_fh,
+                                  f"original [LOG] {_theta_repr(true_log)}")
+            log_progress(progress_fh,
+                         f"task {task} complete ({per_task_sims[task]} videos in "
+                         f"{time.time() - task_start:.1f}s).")
+        log_progress(progress_fh,
+                     f"DONE: {done}/{total_sims} videos in "
+                     f"{time.time() - loop_start:.1f}s.")
+    finally:
+        if progress_fh is not None:
+            progress_fh.close()
+
+    scores = np.asarray(scores)
+    inferred_log10 = np.asarray(inferred_log10)
+    true_log10 = np.asarray(true_log10)
+    n_samples = inferred_log10.shape[0]
+    # (N, D, 5) posterior quantiles [Q05,Q25,Q50,Q75,Q95] when View B was requested.
+    post_q = np.asarray(post_quantiles) if (do_posterior and post_quantiles) else None
+
+    # ---- Save the recovery arrays ----------------------------------------
+    save_arrays = dict(true_log10=true_log10, inferred_log10=inferred_log10, scores=scores)
+    if post_q is not None:
+        save_arrays["posterior_quantiles"] = post_q   # [Q05,Q25,Q50,Q75,Q95]
+    np.savez_compressed(str(recovery_array_path), **save_arrays)
+    print(f"\nRecovery arrays saved to {recovery_array_path}")
+
+    # ---- Recovery report -------------------------------------------------
+    guide = eval_cfg.error_guide
+    reporter.check("eval_set_nonempty", n_samples > 0,
+                   f"{n_samples} EVAL samples recovered",
+                   note="the held-out EVAL namespace yielded at least one "
+                        "MAP-recovery sample.")
+    reporter.check_no_nan_inf("true_log10", true_log10)
+    reporter.stat("eval_tasks", args.eval_tasks)
+    reporter.stat("eval_samples", n_samples,
+                  note="number of held-out videos whose parameters were recovered.")
+    reporter.stat("mean_log_prob", float(np.mean(scores)),
+                  note="mean MAP log-density at the optimized mode -- the objective "
+                       "the seed-then-optimize step maximizes (larger = sharper "
+                       "peak). Computed in the estimator's z-scored space, so its "
+                       "absolute scale is a relative optimization diagnostic, not a "
+                       "calibration/quality metric; the per-parameter recovery error "
+                       "table below is the quality measure.")
+    if n_samples < eval_cfg.quantile_min_count:
+        reporter.stat(
+            "quantile_bands", "sparse",
+            note=f"fewer than {eval_cfg.quantile_min_count} samples per bin: the "
+                 "report shows the scatter and the error table; conditional "
+                 "quantile bands populate only with a larger EVAL set.")
+
+    headers, rows = recovery_table(PARAMETERIZATION, true_log10, inferred_log10, guide)
+    reporter.table(
+        "MAP recovery (per parameter, log10 units)", headers, rows,
+        note=f"error = inferred - true in log10 units; 'within +/-{guide:g}' is the "
+             "fraction of EVAL videos recovered inside the guide band.")
+
+    # View B: posterior calibration (coverage of truth by credible intervals).
+    if post_q is not None:
+        reporter.stat("posterior_samples", posterior_samples,
+                      note="samples per video used to summarize the posterior (View B).")
+        cov_headers, cov_rows = posterior_coverage_table(PARAMETERIZATION, true_log10, post_q)
+        reporter.table(
+            "Posterior calibration (per parameter)", cov_headers, cov_rows,
+            note="View B: fraction of truths inside the per-video posterior credible "
+                 "intervals; a calibrated posterior covers ~50% (IQR) and ~90%.")
+
+    if reporter.dump:
+        for i, para in enumerate(PARAMETERIZATION):
+            key = para["KEY"]
+            label = para.get("LABEL") or key
+            prior_range = para["PRIOR_RANGE"]
+            reporter.save_figure(
+                f"recovery_{key}",
+                figure_recovery_combined(
+                    true_log10[:, i], inferred_log10[:, i],
+                    (post_q[:, i, :] if post_q is not None else None),
+                    prior_range, label, n_bins=n_bins, min_count=min_count,
+                    error_guide=guide, error_ylim_floor=eval_cfg.error_ylim_floor,
+                    error_ylim_quantile=eval_cfg.error_ylim_quantile, bin_mode=bin_mode,
+                    show_map=do_map, show_posterior=(post_q is not None)),
+                caption=f"{key} ({label}). View A (MAP): panels 1-2 show inferred-vs-true "
+                        f"and residual error of the MAP point estimate, with "
+                        f"{bin_mode}-binned conditional-quantile bands (drawn where a "
+                        f"bin has >= {min_count} points). View B (posterior, panel 3): "
+                        f"true vs. posterior median with IQR error bars (per-video "
+                        f"credible width). A panel stamped 'not computed' marks a view "
+                        f"the --summary option omitted.",
+            )
+
+    reporter.summary()
+    reporter.write_report()
+
+    print(f"\nTotal elapsed: {time.time() - run_start:.1f}s")
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    """Construct the CLI parser and parse argv."""
+    eval_cfg = PARAMETERS.inference.evaluation
+    parser = argparse.ArgumentParser(
+        description="Evaluate a trained posterior by MAP recovery on the EVAL namespace.",
+    )
+    parser.add_argument(
+        "--total-time-seconds", type=float,
+        required=True,
+        help="Video duration in seconds; must match the trained posterior's runs.",
+    )
+    parser.add_argument(
+        "--eval-tasks", type=int, required=True,
+        help="Number of EVAL-namespace tasks to recover (held-out data).",
+    )
+    parser.add_argument(
+        "--max-sims", type=int, default=0,
+        help="Cap on simulations recovered per EVAL task (0 = all; useful for "
+             "quick checks).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Master RNG seed (PyTorch + numpy + Python random). Default None "
+             "-> non-deterministic (consistent with generation); pass an int for a "
+             "reproducible run.",
+    )
+    parser.add_argument(
+        "--pool-mode", choices=("bounded", "unrestricted"), default=None,
+        help="Candidate-pool sampler: 'bounded' (rejection-sample within the "
+             "prior; correct for a trained posterior) or 'unrestricted' (sample "
+             "the flow directly, no rejection; for smoke tests / undertrained "
+             f"posteriors that would stall). Default: {eval_cfg.pool_mode}.",
+    )
+    parser.add_argument(
+        "--summary", choices=("map", "posterior", "both"), default="map",
+        help="Which summary views to render: 'map' (View A: MAP-point recovery; "
+             "default), 'posterior' (View B: posterior credible intervals + "
+             "calibration), or 'both'. View B draws --posterior-samples per video.",
+    )
+    parser.add_argument(
+        "--bin-mode", choices=("prior", "quantile"), default="quantile",
+        help="Bin edges for the View A conditional-quantile bands: 'quantile' "
+             "(equal-count data-quantile bins; default) or 'prior' (equal-width "
+             "bins across the prior range).",
+    )
+    parser.add_argument(
+        "--posterior-samples", type=int, default=None,
+        help=f"Samples per video for View B posterior summary "
+             f"(default: {eval_cfg.posterior_samples}).",
+    )
+    parser.add_argument(
+        "--n-bins", type=int, default=None,
+        help=f"Number of bins for the View A conditional-quantile bands "
+             f"(default: {eval_cfg.quantile_bins}). Lower it for a small smoke set.",
+    )
+    parser.add_argument(
+        "--min-count", type=int, default=None,
+        help=f"Minimum points per bin to draw a View A band "
+             f"(default: {eval_cfg.quantile_min_count}). Set to 1 to force bands "
+             f"on a minimal smoke set.",
+    )
+    parser.add_argument(
+        "--theta-prex-size", type=int, default=None,
+        help=f"Candidate-pool size per video (default: {eval_cfg.theta_prex_size}).",
+    )
+    parser.add_argument(
+        "--elite-prex-size", type=int, default=None,
+        help=f"Number of optimization seeds / top-K (default: {eval_cfg.elite_prex_size}).",
+    )
+    parser.add_argument(
+        "--numb-steps", type=int, default=None,
+        help=f"Max gradient-ascent steps (default: {eval_cfg.numb_steps}). The "
+             "optimization may stop earlier via the patience criterion.",
+    )
+    parser.add_argument(
+        "--show-progress-steps", type=int, default=None,
+        help="Cadence (in steps) for the per-step log-prob progress line "
+             f"(default: {eval_cfg.show_progress_steps}). Lower = more frequent.",
+    )
+    parser.add_argument(
+        "--learning-rate", type=float, default=None,
+        help="Adam learning rate for the MAP optimization. Default: "
+             "learning_rate_minimum * learning_rate_maximum_factor.",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Rich per-video console diagnostics: per-stage shapes/timings, "
+             "per-step optimization progress, stopping reason, and the optimal "
+             "vs. original theta in log10 and physical units.",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Implies --verbose, and goes deeper (the 'verbose' "
+             "level): sbi sampling progress bars + optimizer-config on the "
+             "console, plus per-video / per-step detail written into progress.log.",
+    )
+    parser.add_argument(
+        "--debug-dump", action="store_true",
+        help="Implies --debug; additionally tees the full console transcript to "
+             "<data_bank>/Labor/Debug/<run>/Evaluation/console.log (the recovery "
+             "report itself always lands in Posit/).",
+    )
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    cli_args = parse_args(sys.argv[1:])
+    with console_log_context(cli_args, "Evaluation"):
+        main(cli_args)

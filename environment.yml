@@ -1,0 +1,35 @@
+# Conda environment for srm-and-sbi-dimer-alp — SRM_AND_SBI_ENVY_V0 (Python 3.13).
+#
+# This file pins the conda-forge scientific layer. PyTorch is NOT pinned here because
+# the build is hardware-specific (ROCm / CUDA / CPU); install it, sbi, and this package
+# per env_snapshots/README.md (the canonical install guide). In brief, after creating
+# this env:
+#     pip install "torch==<backend>" sbi==0.26.1 nflows==0.14 zuko==1.6.0 --index-url <backend index>
+#     pip install -e . --no-deps
+name: srm-and-sbi-dimer-alp
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.13
+  - readdy=2.0.14
+  - numpy=2.4.6
+  - scipy=1.17.1
+  - scikit-image=0.26.0
+  - zarr=2.18.7
+  - numcodecs
+  - h5py
+  - pandas
+  - matplotlib
+  - seaborn
+  - einops
+  - tifffile
+  - tqdm
+  - scikit-learn
+  - statsmodels
+  - imageio
+  - networkx
+  - pillow
+  - psutil
+  - ipython
+  - pip

@@ -1,0 +1,59 @@
+# Per-machine configuration (gitignored; copy from machine_profiles.example.toml)
+machine_profiles.toml
+
+# Per-machine convenience launcher (hard-codes a specific remote host)
+launch_remote_viewer.sh
+
+# Python build and packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.pyc
+__pycache__/
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Conda environments
+srm-and-sbi-dimer-alp/
+
+# Data (large scientific outputs)
+*.h5
+*.hdf5
+*.zarr
+*.pkl
+*.pth
+
+# Jupyter runtime artifacts (autosave checkpoints, JupyterLab virtual docs)
+.ipynb_checkpoints/
+.virtual_documents/
+
+# Logs
+*.log
+
+# Per-machine environment snapshots (carry personal absolute paths and
+# machine-named filenames; kept locally for reference only — README.md is tracked)
+env_snapshots/*.yml
+env_snapshots/*.explicit.txt
+
+# Internal session-orientation file (stays local, unpublished)
+CLAUDE.md
+
+# Conda environment directory trees (the *.zarr file pattern above covers files)
+*.zarr/
+
+# Local data bank (large scientific outputs)
+Data_Bank/
