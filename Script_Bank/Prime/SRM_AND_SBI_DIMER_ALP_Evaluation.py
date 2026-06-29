@@ -42,11 +42,174 @@ from srm_and_sbi_dimer_alp.evaluation import (
     recovery_table,
     _theta_repr,
 )
-from srm_and_sbi_dimer_alp.inference_support import get_device, load_posterior
+from srm_and_sbi_dimer_alp.inference_support import get_device, load_posterior, resolve_topology
 from srm_and_sbi_dimer_alp.io import load_data
-from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming
+from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming, build_prior
 from srm_and_sbi_dimer_alp.utils import console_log_context
 from srm_and_sbi_dimer_alp.visualization_inference import figure_recovery_combined
+
+
+def _shard_array_path(recovery_dir: Path, rank: int, world_size: int) -> Path:
+    """Path of one worker's partial recovery arrays in a multi-GPU sharded run."""
+    return recovery_dir / f"_shard_{rank:02d}_of_{world_size:02d}.npz"
+
+
+def write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path: Path,
+                           scores, inferred_log10, true_log10, post_quantiles,
+                           run_start) -> None:
+    """Save the recovery arrays and write the report + figures.
+
+    Shared by the single-process recovery path and the ``--merge`` combine step,
+    so both emit an identical report. ``post_quantiles`` may be a list (built by
+    the recovery loop) or an array (concatenated by a merge); both are handled.
+    """
+    do_map = args.summary in ("map", "both")
+    do_posterior = args.summary in ("posterior", "both")
+    bin_mode = args.bin_mode
+    posterior_samples = args.posterior_samples or eval_cfg.posterior_samples
+    n_bins = args.n_bins or eval_cfg.quantile_bins
+    min_count = args.min_count or eval_cfg.quantile_min_count
+
+    scores = np.asarray(scores)
+    inferred_log10 = np.asarray(inferred_log10)
+    true_log10 = np.asarray(true_log10)
+    n_samples = inferred_log10.shape[0]
+    post_arr = np.asarray(post_quantiles)
+    post_q = post_arr if (do_posterior and post_arr.size > 0) else None
+
+    # ---- Save the recovery arrays ----------------------------------------
+    save_arrays = dict(true_log10=true_log10, inferred_log10=inferred_log10, scores=scores)
+    if post_q is not None:
+        save_arrays["posterior_quantiles"] = post_q   # [Q05,Q25,Q50,Q75,Q95]
+    np.savez_compressed(str(recovery_array_path), **save_arrays)
+    print(f"\nRecovery arrays saved to {recovery_array_path}")
+
+    # ---- Recovery report -------------------------------------------------
+    guide = eval_cfg.error_guide
+    reporter.check("eval_set_nonempty", n_samples > 0,
+                   f"{n_samples} EVAL samples recovered",
+                   note="the held-out EVAL namespace yielded at least one "
+                        "MAP-recovery sample.")
+    reporter.check_no_nan_inf("true_log10", true_log10)
+    reporter.stat("eval_tasks", args.eval_tasks)
+    reporter.stat("eval_samples", n_samples,
+                  note="number of held-out videos whose parameters were recovered.")
+    reporter.stat("mean_log_prob", float(np.mean(scores)),
+                  note="mean MAP log-density at the optimized mode -- the objective "
+                       "the seed-then-optimize step maximizes (larger = sharper "
+                       "peak). Computed in the estimator's z-scored space, so its "
+                       "absolute scale is a relative optimization diagnostic, not a "
+                       "calibration/quality metric; the per-parameter recovery error "
+                       "table below is the quality measure.")
+    if n_samples < eval_cfg.quantile_min_count:
+        reporter.stat(
+            "quantile_bands", "sparse",
+            note=f"fewer than {eval_cfg.quantile_min_count} samples per bin: the "
+                 "report shows the scatter and the error table; conditional "
+                 "quantile bands populate only with a larger EVAL set.")
+
+    headers, rows = recovery_table(PARAMETERIZATION, true_log10, inferred_log10, guide)
+    reporter.table(
+        "MAP recovery (per parameter, log10 units)", headers, rows,
+        note=f"error = inferred - true in log10 units; 'within +/-{guide:g}' is the "
+             "fraction of EVAL videos recovered inside the guide band.")
+
+    # View B: posterior calibration (coverage of truth by credible intervals).
+    if post_q is not None:
+        reporter.stat("posterior_samples", posterior_samples,
+                      note="samples per video used to summarize the posterior (View B).")
+        cov_headers, cov_rows = posterior_coverage_table(PARAMETERIZATION, true_log10, post_q)
+        reporter.table(
+            "Posterior calibration (per parameter)", cov_headers, cov_rows,
+            note="View B: fraction of truths inside the per-video posterior credible "
+                 "intervals; a calibrated posterior covers ~50% (IQR) and ~90%.")
+
+    if reporter.dump:
+        for i, para in enumerate(PARAMETERIZATION):
+            key = para["KEY"]
+            label = para.get("LABEL") or key
+            prior_range = para["PRIOR_RANGE"]
+            reporter.save_figure(
+                f"recovery_{key}",
+                figure_recovery_combined(
+                    true_log10[:, i], inferred_log10[:, i],
+                    (post_q[:, i, :] if post_q is not None else None),
+                    prior_range, label, n_bins=n_bins, min_count=min_count,
+                    error_guide=guide, error_ylim_floor=eval_cfg.error_ylim_floor,
+                    error_ylim_quantile=eval_cfg.error_ylim_quantile, bin_mode=bin_mode,
+                    show_map=do_map, show_posterior=(post_q is not None)),
+                caption=f"{key} ({label}). View A (MAP): panels 1-2 show inferred-vs-true "
+                        f"and residual error of the MAP point estimate, with "
+                        f"{bin_mode}-binned conditional-quantile bands (drawn where a "
+                        f"bin has >= {min_count} points). View B (posterior, panel 3): "
+                        f"true vs. posterior median with IQR error bars (per-video "
+                        f"credible width). A panel stamped 'not computed' marks a view "
+                        f"the --summary option omitted.",
+            )
+
+    reporter.summary()
+    reporter.write_report()
+
+    print(f"\nTotal elapsed: {time.time() - run_start:.1f}s")
+
+
+def _save_shard(reporter, topo, recovery_dir: Path,
+                scores, inferred_log10, true_log10, post_quantiles, run_start) -> None:
+    """Write this worker's partial recovery arrays (multi-GPU sharded run).
+
+    The report is produced later by the ``--merge`` step, once every shard
+    exists; this function does no report generation.
+    """
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    arrays = dict(
+        scores=np.asarray(scores),
+        inferred_log10=np.asarray(inferred_log10),
+        true_log10=np.asarray(true_log10),
+    )
+    if post_quantiles:
+        arrays["posterior_quantiles"] = np.asarray(post_quantiles)
+    path = _shard_array_path(recovery_dir, topo.rank, topo.world_size)
+    np.savez_compressed(str(path), **arrays)
+    print(f"\n[rank {topo.rank}/{topo.world_size}] shard saved: {path} "
+          f"({arrays['scores'].shape[0]} videos) in {time.time() - run_start:.1f}s. "
+          f"Run the --merge step once all shards finish.", flush=True)
+
+
+def _merge_shards(reporter, args, eval_cfg, recovery_dir: Path,
+                  recovery_array_path: Path, run_start) -> None:
+    """Combine all per-shard recovery arrays into the final report (no recovery).
+
+    Reads every ``_shard_*_of_*.npz`` in the recovery directory, concatenates the
+    arrays (order-independent -- the recovery metrics are aggregates over videos),
+    writes the final report + figures + combined ``.npz`` via
+    :func:`write_recovery_outputs`, then removes the shard files.
+    """
+    shard_paths = sorted(recovery_dir.glob("_shard_*_of_*.npz"))
+    if not shard_paths:
+        raise SystemExit(
+            f"--merge: no shard files (_shard_*_of_*.npz) found in {recovery_dir}")
+    print(f"Merging {len(shard_paths)} shard file(s) from {recovery_dir}", flush=True)
+    scores, inferred, true, quant = [], [], [], []
+    have_quant = True
+    for shard_path in shard_paths:
+        with np.load(str(shard_path)) as data:
+            scores.append(data["scores"])
+            inferred.append(data["inferred_log10"])
+            true.append(data["true_log10"])
+            if "posterior_quantiles" in data:
+                quant.append(data["posterior_quantiles"])
+            else:
+                have_quant = False
+    scores = np.concatenate(scores, axis=0)
+    inferred = np.concatenate(inferred, axis=0)
+    true = np.concatenate(true, axis=0)
+    post_quantiles = np.concatenate(quant, axis=0) if (have_quant and quant) else np.asarray([])
+    print(f"Merged {scores.shape[0]} videos from {len(shard_paths)} shards.", flush=True)
+    write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path,
+                           scores, inferred, true, post_quantiles, run_start)
+    for shard_path in shard_paths:
+        shard_path.unlink()
+    print(f"Removed {len(shard_paths)} shard file(s).", flush=True)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -148,25 +311,42 @@ def main(args: argparse.Namespace) -> None:
         timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     )
 
+    # --merge: combine the per-shard arrays from a multi-GPU sharded run into the
+    # final report, then exit (no recovery work, no GPU, no posterior needed).
+    if args.merge:
+        _merge_shards(reporter, args, eval_cfg, recovery_dir, recovery_array_path, run_start)
+        return
+
     reporter.check_file("posterior", posterior_path)
 
-    device = get_device()
+    topo = resolve_topology()
+    device = topo.device
     vista_device = torch.device("cpu")
     posterior = load_posterior(posterior_path)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
-        # Use the device-resident prior for bounded rejection sampling.
-        posterior.prior = posterior._prior
+        # Rebuild the prior on THIS worker's device for bounded rejection sampling.
+        # The pickled posterior's _prior lives on the single-GPU save device (cuda:0);
+        # under multi-GPU sharding each rank binds its own cuda:local_rank, so reusing
+        # _prior directly would mix devices (cuda:0 vs cuda:r). Rebuilding is equivalent
+        # on the single-GPU path (raw build_prior on the same device as _prior).
+        posterior.prior = build_prior(device=str(device))
 
-    # ---- Probe the EVAL namespace for the total recovery workload --------
+    # ---- This worker's task shard ----------------------------------------
+    # Tasks split across workers by rank (round-robin); a single worker
+    # (world_size == 1) takes them all. Recovery metrics are aggregates over
+    # videos, so the per-shard results merge order-independently afterward.
+    my_tasks = [t for t in range(args.eval_tasks) if t % topo.world_size == topo.rank]
+
+    # ---- Probe the EVAL namespace for this shard's recovery workload -----
     # (counts only, so the live progress log can report "k/total" and an ETA.)
-    per_task_sims = []
-    for task in range(args.eval_tasks):
+    per_task_sims = {}
+    for task in my_tasks:
         theta_set = load_data(
             paths.theta_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
         n_sims = theta_set.shape[0]
-        per_task_sims.append(min(n_sims, args.max_sims) if args.max_sims > 0 else n_sims)
-    total_sims = int(sum(per_task_sims))
+        per_task_sims[task] = min(n_sims, args.max_sims) if args.max_sims > 0 else n_sims
+    total_sims = int(sum(per_task_sims.values()))
 
     # ---- Live progress log (so a long MAP run can be monitored) ----------
     # One flushed line per recovered video: a `tail -f`-able trail showing the
@@ -204,15 +384,17 @@ def main(args: argparse.Namespace) -> None:
 
     # ---- MAP estimate over the EVAL namespace ----------------------------
     scores, inferred_log10, true_log10, post_quantiles = [], [], [], []
+    shard_note = (f" [shard rank {topo.rank}/{topo.world_size}: {len(my_tasks)} of "
+                  f"{args.eval_tasks} tasks]" if topo.is_distributed else "")
     log_progress(progress_fh,
-                 f"START MAP recovery: {args.eval_tasks} EVAL tasks, "
+                 f"START MAP recovery: {len(my_tasks)} EVAL task(s){shard_note}, "
                  f"{total_sims} videos total (pool={theta_prex_size}, "
                  f"elites={elite_prex_size}, steps={numb_steps}; "
                  f"summary={args.summary}).")
     loop_start = time.time()
     done = 0
     try:
-        for task in range(args.eval_tasks):
+        for task in my_tasks:
             video_set = load_data(
                 paths.video_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
             theta_set = load_data(
@@ -276,87 +458,17 @@ def main(args: argparse.Namespace) -> None:
         if progress_fh is not None:
             progress_fh.close()
 
-    scores = np.asarray(scores)
-    inferred_log10 = np.asarray(inferred_log10)
-    true_log10 = np.asarray(true_log10)
-    n_samples = inferred_log10.shape[0]
-    # (N, D, 5) posterior quantiles [Q05,Q25,Q50,Q75,Q95] when View B was requested.
-    post_q = np.asarray(post_quantiles) if (do_posterior and post_quantiles) else None
-
-    # ---- Save the recovery arrays ----------------------------------------
-    save_arrays = dict(true_log10=true_log10, inferred_log10=inferred_log10, scores=scores)
-    if post_q is not None:
-        save_arrays["posterior_quantiles"] = post_q   # [Q05,Q25,Q50,Q75,Q95]
-    np.savez_compressed(str(recovery_array_path), **save_arrays)
-    print(f"\nRecovery arrays saved to {recovery_array_path}")
-
-    # ---- Recovery report -------------------------------------------------
-    guide = eval_cfg.error_guide
-    reporter.check("eval_set_nonempty", n_samples > 0,
-                   f"{n_samples} EVAL samples recovered",
-                   note="the held-out EVAL namespace yielded at least one "
-                        "MAP-recovery sample.")
-    reporter.check_no_nan_inf("true_log10", true_log10)
-    reporter.stat("eval_tasks", args.eval_tasks)
-    reporter.stat("eval_samples", n_samples,
-                  note="number of held-out videos whose parameters were recovered.")
-    reporter.stat("mean_log_prob", float(np.mean(scores)),
-                  note="mean MAP log-density at the optimized mode -- the objective "
-                       "the seed-then-optimize step maximizes (larger = sharper "
-                       "peak). Computed in the estimator's z-scored space, so its "
-                       "absolute scale is a relative optimization diagnostic, not a "
-                       "calibration/quality metric; the per-parameter recovery error "
-                       "table below is the quality measure.")
-    if n_samples < eval_cfg.quantile_min_count:
-        reporter.stat(
-            "quantile_bands", "sparse",
-            note=f"fewer than {eval_cfg.quantile_min_count} samples per bin: the "
-                 "report shows the scatter and the error table; conditional "
-                 "quantile bands populate only with a larger EVAL set.")
-
-    headers, rows = recovery_table(PARAMETERIZATION, true_log10, inferred_log10, guide)
-    reporter.table(
-        "MAP recovery (per parameter, log10 units)", headers, rows,
-        note=f"error = inferred - true in log10 units; 'within +/-{guide:g}' is the "
-             "fraction of EVAL videos recovered inside the guide band.")
-
-    # View B: posterior calibration (coverage of truth by credible intervals).
-    if post_q is not None:
-        reporter.stat("posterior_samples", posterior_samples,
-                      note="samples per video used to summarize the posterior (View B).")
-        cov_headers, cov_rows = posterior_coverage_table(PARAMETERIZATION, true_log10, post_q)
-        reporter.table(
-            "Posterior calibration (per parameter)", cov_headers, cov_rows,
-            note="View B: fraction of truths inside the per-video posterior credible "
-                 "intervals; a calibrated posterior covers ~50% (IQR) and ~90%.")
-
-    if reporter.dump:
-        for i, para in enumerate(PARAMETERIZATION):
-            key = para["KEY"]
-            label = para.get("LABEL") or key
-            prior_range = para["PRIOR_RANGE"]
-            reporter.save_figure(
-                f"recovery_{key}",
-                figure_recovery_combined(
-                    true_log10[:, i], inferred_log10[:, i],
-                    (post_q[:, i, :] if post_q is not None else None),
-                    prior_range, label, n_bins=n_bins, min_count=min_count,
-                    error_guide=guide, error_ylim_floor=eval_cfg.error_ylim_floor,
-                    error_ylim_quantile=eval_cfg.error_ylim_quantile, bin_mode=bin_mode,
-                    show_map=do_map, show_posterior=(post_q is not None)),
-                caption=f"{key} ({label}). View A (MAP): panels 1-2 show inferred-vs-true "
-                        f"and residual error of the MAP point estimate, with "
-                        f"{bin_mode}-binned conditional-quantile bands (drawn where a "
-                        f"bin has >= {min_count} points). View B (posterior, panel 3): "
-                        f"true vs. posterior median with IQR error bars (per-video "
-                        f"credible width). A panel stamped 'not computed' marks a view "
-                        f"the --summary option omitted.",
-            )
-
-    reporter.summary()
-    reporter.write_report()
-
-    print(f"\nTotal elapsed: {time.time() - run_start:.1f}s")
+    # ---- Write outputs ---------------------------------------------------
+    # One worker (world_size == 1) writes the final report directly. Multiple
+    # workers each write their partial arrays; the separate ``--merge`` step,
+    # run by the launcher once all shards finish, combines them into the report.
+    if topo.is_distributed:
+        _save_shard(reporter, topo, recovery_dir,
+                    scores, inferred_log10, true_log10, post_quantiles, run_start)
+    else:
+        write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path,
+                               scores, inferred_log10, true_log10, post_quantiles,
+                               run_start)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -378,6 +490,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--max-sims", type=int, default=0,
         help="Cap on simulations recovered per EVAL task (0 = all; useful for "
              "quick checks).",
+    )
+    parser.add_argument(
+        "--merge", action="store_true",
+        help="Combine-only mode: read the per-shard recovery .npz files written by "
+             "a multi-GPU sharded run (in this run's MAP_Recovery directory), "
+             "concatenate them, and write the final report + figures + combined "
+             ".npz, then exit. Does no recovery and needs no GPU; the launcher runs "
+             "it once after the sharded workers finish. Single-GPU runs never use it.",
     )
     parser.add_argument(
         "--seed", type=int, default=None,

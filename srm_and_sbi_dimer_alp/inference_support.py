@@ -34,6 +34,7 @@ NPE training with a masked autoregressive flow (MAF) density estimator
 conditioned on the Complex3DCNN embedding of the input video.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 import os
 import pickle
@@ -178,18 +179,108 @@ class VideoDataset(Dataset):
 # Setup
 # =============================================================================
 
-def get_device() -> torch.device:
-    """Return the torch.device specified by the active machine profile.
+@dataclass(frozen=True)
+class Topology:
+    """Parallel-launch layout for a stage run, shared by inference (DDP) and
+    evaluation (independent sharding).
 
-    Reads `PARAMETERS.machine.compute_backend` and `gpu_device_index`. Falls
-    back to CPU if CUDA is requested but unavailable (printing a warning).
+    ``world_size == 1`` is the single-GPU (or CPU) case and reproduces the
+    original, non-distributed behavior exactly. ``world_size > 1`` means the
+    process is one of several launched together (one per GPU): inference uses
+    ``(world_size, rank)`` to drive DistributedDataParallel; evaluation uses
+    them to take an independent ``videos[rank::world_size]`` shard.
+
+    Attributes:
+        world_size: Total number of parallel worker processes (= GPUs in use).
+        rank: Global rank of this process in ``[0, world_size)``.
+        local_rank: Rank within this node; the local GPU index this process binds.
+        device: The torch device this process uses.
+        backend: ``"GPU"`` or ``"CPU"``.
+    """
+    world_size: int
+    rank: int
+    local_rank: int
+    device: torch.device
+    backend: str
+
+    @property
+    def is_distributed(self) -> bool:
+        """True when more than one worker was launched (DDP / sharding active)."""
+        return self.world_size > 1
+
+    @property
+    def is_main(self) -> bool:
+        """True on the coordinating rank (rank 0). Only this rank should write
+        shared outputs (checkpoint, posterior, merged evaluation report)."""
+        return self.rank == 0
+
+
+def _env_int(*names: str, default: Optional[int] = None) -> Optional[int]:
+    """Return the first parseable integer among the named environment variables."""
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return default
+
+
+def resolve_topology() -> "Topology":
+    """Discover the parallel-launch topology for the current process.
+
+    A single discovery path serves both stages, so their multi-GPU interface is
+    identical. Sources are read in priority order:
+
+    1. ``torchrun`` / ``torch.distributed``: ``WORLD_SIZE``, ``RANK``, ``LOCAL_RANK``.
+    2. Slurm: ``SLURM_NTASKS``, ``SLURM_PROCID``, ``SLURM_LOCALID``.
+    3. Single-process fallback → ``world_size = 1`` (the original behavior).
+
+    The worker count (``world_size``) is set at launch — by
+    ``torchrun --nproc_per_node`` or the Slurm task count — which is how a run
+    adapts to the allocated hardware; the launcher may cap it (e.g. from a
+    ``SRM_AND_SBI_GPUS`` setting) before starting the processes. This function
+    only reports what was launched; it does not start a process group (the
+    inference stage does that itself when ``is_distributed``).
+
+    Device binding: with multiple workers each binds its own ``cuda:local_rank``;
+    a single worker honors the machine profile's ``gpu_device_index`` (so the
+    non-distributed path is byte-for-byte unchanged). Falls back to CPU when
+    CUDA is unavailable or the profile requests CPU.
     """
     machine = PARAMETERS.machine
-    if machine.compute_backend == "GPU":
-        if torch.cuda.is_available():
-            return torch.device(f"cuda:{machine.gpu_device_index or 0}")
-        print("WARNING: machine profile requests GPU but CUDA is unavailable; falling back to CPU.")
-    return torch.device("cpu")
+    gpu_backend = machine.compute_backend == "GPU" and torch.cuda.is_available()
+
+    world_size = _env_int("WORLD_SIZE", "SLURM_NTASKS", default=1) or 1
+    rank = _env_int("RANK", "SLURM_PROCID", default=0) or 0
+    local_rank = _env_int("LOCAL_RANK", "SLURM_LOCALID", default=0) or 0
+
+    if gpu_backend:
+        index = local_rank if world_size > 1 else (machine.gpu_device_index or 0)
+        torch.cuda.set_device(index)   # bind this process's default CUDA device to its own GPU
+        device = torch.device(f"cuda:{index}")
+        backend = "GPU"
+    else:
+        if machine.compute_backend == "GPU":
+            print("WARNING: machine profile requests GPU but CUDA is unavailable; "
+                  "falling back to CPU.")
+        device = torch.device("cpu")
+        backend = "CPU"
+
+    return Topology(world_size=world_size, rank=rank, local_rank=local_rank,
+                    device=device, backend=backend)
+
+
+def get_device() -> torch.device:
+    """Return the torch.device for this process.
+
+    Thin wrapper over :func:`resolve_topology`; preserves the original
+    single-process behavior (honors the machine profile's ``gpu_device_index``,
+    with a CPU fallback + warning). Multi-GPU callers use ``resolve_topology()``
+    directly for the full ``(world_size, rank, local_rank, device)`` layout.
+    """
+    return resolve_topology().device
 
 
 def build_datasets(train_tasks: int,
