@@ -161,6 +161,14 @@ def _save_shard(reporter, topo, recovery_dir: Path,
     exists; this function does no report generation.
     """
     recovery_dir.mkdir(parents=True, exist_ok=True)
+    if len(scores) == 0:
+        # This worker drew no tasks (launched workers > eval_tasks): write no shard
+        # at all, so --merge simply sees fewer files. Avoids a (0,)-shaped array
+        # that would break the concatenate in _merge_shards, and avoids omitting
+        # the posterior_quantiles key (which would drop View B from the report).
+        print(f"\n[rank {topo.rank}/{topo.world_size}] no tasks assigned -- "
+              f"no shard written.", flush=True)
+        return
     arrays = dict(
         scores=np.asarray(scores),
         inferred_log10=np.asarray(inferred_log10),
@@ -191,20 +199,27 @@ def _merge_shards(reporter, args, eval_cfg, recovery_dir: Path,
     print(f"Merging {len(shard_paths)} shard file(s) from {recovery_dir}", flush=True)
     scores, inferred, true, quant = [], [], [], []
     have_quant = True
+    n_used = 0
     for shard_path in shard_paths:
         with np.load(str(shard_path)) as data:
+            if data["scores"].shape[0] == 0:
+                continue   # defensive: a zero-video shard contributes nothing
+            n_used += 1
             scores.append(data["scores"])
             inferred.append(data["inferred_log10"])
             true.append(data["true_log10"])
             if "posterior_quantiles" in data:
                 quant.append(data["posterior_quantiles"])
             else:
-                have_quant = False
+                have_quant = False   # a populated shard genuinely computed no View B
+    if not scores:
+        raise SystemExit(
+            f"--merge: every shard in {recovery_dir} was empty (no recovered videos)")
     scores = np.concatenate(scores, axis=0)
     inferred = np.concatenate(inferred, axis=0)
     true = np.concatenate(true, axis=0)
     post_quantiles = np.concatenate(quant, axis=0) if (have_quant and quant) else np.asarray([])
-    print(f"Merged {scores.shape[0]} videos from {len(shard_paths)} shards.", flush=True)
+    print(f"Merged {scores.shape[0]} videos from {n_used} shard(s).", flush=True)
     write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path,
                            scores, inferred, true, post_quantiles, run_start)
     for shard_path in shard_paths:
@@ -354,7 +369,9 @@ def main(args: argparse.Namespace) -> None:
     recovery_dir.mkdir(parents=True, exist_ok=True)
     # Clear stale figures from a previous run so the report is self-contained
     # (figure filenames can change between runs; report.md / .npz are overwritten).
-    shutil.rmtree(recovery_dir / "figures", ignore_errors=True)
+    # Only rank 0 / a single worker touches the shared figures dir (avoid a race).
+    if topo.is_main:
+        shutil.rmtree(recovery_dir / "figures", ignore_errors=True)
 
     def log_progress(progress_fh, message: str) -> None:
         """Append a timestamped line to the progress log and flush immediately."""
@@ -371,12 +388,18 @@ def main(args: argparse.Namespace) -> None:
             progress_fh.write(f"           {message}\n")
             progress_fh.flush()
 
-    try:
-        progress_fh = open(progress_path, "w", encoding="utf-8")
-    except OSError as exc:
-        print(f"WARNING: cannot open progress log {progress_path} ({exc}); "
-              f"continuing without it.", flush=True)
+    # Under sharding all workers share recovery_dir; only rank 0 writes the
+    # progress log (concurrent truncating writers would clobber each other). Other
+    # ranks still echo progress to their own stdout (captured in the Slurm log).
+    if topo.is_distributed and not topo.is_main:
         progress_fh = None
+    else:
+        try:
+            progress_fh = open(progress_path, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"WARNING: cannot open progress log {progress_path} ({exc}); "
+                  f"continuing without it.", flush=True)
+            progress_fh = None
 
     # In debug, stream per-step optimization progress + the stop line into the
     # progress log live (None otherwise, so normal/verbose runs keep it compact).

@@ -260,7 +260,7 @@ def resolve_topology() -> "Topology":
 
     if gpu_backend:
         index = local_rank if world_size > 1 else (machine.gpu_device_index or 0)
-        torch.cuda.set_device(index)   # bind this process's default CUDA device to its own GPU
+        torch.cuda.set_device(index)   # bind this process's default CUDA device to its own GPU (no-op for the usual index 0)
         device = torch.device(f"cuda:{index}")
         backend = "GPU"
     else:
@@ -315,6 +315,11 @@ def init_distributed(topo) -> None:
     """
     import torch.distributed as dist
     if topo.is_distributed and not dist.is_initialized():
+        if "MASTER_ADDR" not in os.environ:
+            raise RuntimeError(
+                "Multi-process launch detected (world_size > 1) but no torch "
+                "rendezvous is set (MASTER_ADDR unset). Launch multi-GPU inference "
+                "via torchrun, not bare srun.")
         dist.init_process_group(backend="nccl")
 
 
@@ -488,7 +493,12 @@ def setup_training(estimator: nn.Module,
     # per-epoch selection loss is computed in parallel (each rank measures its
     # shard, then train_loop all-reduces the per-rank means) instead of rank 0
     # alone running the whole TEST set serially. shuffle=False -> a fixed,
-    # balanced split; drop_last=False matches the TRAIN sampler.
+    # balanced split. drop_last=False pads each rank to ceil(N/world_size) samples
+    # so every rank has the SAME batch count -- which is exactly the condition
+    # under which train_loop's unweighted all-reduce-mean of per-rank means equals
+    # the single-process value (it divides evenly at production scale, e.g.
+    # 25000/8=3125, so there is no padding; padding only duplicates a few boundary
+    # samples for the awkward smoke-test counts where N is not a multiple of GPUs).
     val_loader = None
     if test_dataset is not None:
         val_sampler = (DistributedSampler(test_dataset, num_replicas=topo.world_size,
@@ -645,14 +655,6 @@ def train_loop(estimator: nn.Module,
         t = torch.tensor([value], device=device, dtype=torch.float64)
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
         return float((t / topo.world_size).item())
-
-    def _broadcast(value: float) -> float:
-        """Broadcast rank-0's scalar to all ranks (identity when not distributed)."""
-        if not distributed:
-            return value
-        t = torch.tensor([value], device=device, dtype=torch.float64)
-        dist.broadcast(t, src=0)
-        return float(t.item())
 
     optimum_loss_test = float("inf")
     if resurrect:

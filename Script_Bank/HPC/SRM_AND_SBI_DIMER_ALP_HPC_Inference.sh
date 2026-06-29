@@ -7,7 +7,8 @@
 # original single-GPU path. The `gpu` partition allocates a whole node (8 GPUs).
 # Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
 #   HEARTBEAT (within-epoch progress: a line every N batches; default ~4/epoch),
-#   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated).
+#   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated; set 1 to force
+#     the original single-GPU path even on a multi-GPU allocation).
 # Also honored from the environment (read directly by the Python):
 #   SRM_AND_SBI_NO_SYNC_BN=1 -> skip SyncBatchNorm under DDP (each rank keeps its
 #     own local batch statistics). DEFAULT (unset) keeps SyncBatchNorm ON, which
