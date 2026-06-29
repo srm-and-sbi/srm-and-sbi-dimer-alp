@@ -2,9 +2,11 @@
 # =============================================================================
 # Slurm HPC training submitter: train the posterior on TRAIN, select on TEST.
 # =============================================================================
-# Single GPU node. The `gpu` partition allocates a whole node (8 GPUs); our code
-# uses one GPU (gpu_device_index=0 in the active machine profile).
-# Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH.
+# Adapts to the allocated GPUs: with >1 GPU it trains data-parallel via
+# DistributedDataParallel (torchrun, one process per GPU); with 1 GPU it is the
+# original single-GPU path. The `gpu` partition allocates a whole node (8 GPUs).
+# Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
+#   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated).
 # BATCH is optional: leave unset to use the script default (PARAMETERS batch_size,
 # 32). Long videos (e.g. 10 s = 500 frames) need a smaller batch -- one early
 # conv3d activation is batch * ~1 GiB at 500 frames, so batch 32 OOMs a 64 GB GPU.
@@ -48,10 +50,20 @@ BATCH="${BATCH:-}"   # empty -> script default (PARAMETERS batch_size, 32)
 BATCH_ARG=()
 [ -n "$BATCH" ] && BATCH_ARG=(--batch-size "$BATCH")
 
-echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} seed=None | node $(hostname) ==="
+# GPU count for data-parallel training: SRM_AND_SBI_GPUS override, else allocated, else 1.
+GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
+INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py"
+INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
+             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" )
 
-python -u "$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py" \
-    --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS" \
-    --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}"
+echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} gpus=${GPUS} seed=None | node $(hostname) ==="
+
+if [ "${GPUS:-1}" -gt 1 ]; then
+    # Data-parallel: one worker per GPU (DistributedDataParallel via torchrun).
+    torchrun --standalone --nproc_per_node="$GPUS" "$INFER_PY" "${INFER_ARGS[@]}"
+else
+    # Single GPU: the original path.
+    python -u "$INFER_PY" "${INFER_ARGS[@]}"
+fi
 
 echo "=== Inference complete ==="

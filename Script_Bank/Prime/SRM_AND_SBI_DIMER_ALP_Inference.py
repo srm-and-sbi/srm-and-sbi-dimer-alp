@@ -40,7 +40,9 @@ from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.inference_network import Complex3DCNN
 from srm_and_sbi_dimer_alp.inference_support import (
     build_datasets,
-    get_device,
+    cleanup_distributed,
+    init_distributed,
+    resolve_topology,
     save_posterior,
     setup_training,
     train_loop,
@@ -180,7 +182,9 @@ def main(args: argparse.Namespace) -> None:
 
     run_start = time.time()
 
-    device = get_device()
+    topo = resolve_topology()
+    device = topo.device
+    init_distributed(topo)   # no-op on a single worker; sets up the DDP process group otherwise
 
     # ---- Dummy batch for MAF shape inference -----------------------------
     # build_maf needs a representative (batch_x, batch_y) pair to compute output dims.
@@ -274,12 +278,15 @@ def main(args: argparse.Namespace) -> None:
 
     losses_train, losses_test, losses_replay = train_loop(
         estimator=training_setup["estimator"],
+        model=training_setup["model"],
         train_loader=training_setup["train_loader"],
         val_loader=training_setup["val_loader"],
         optimizer=training_setup["optimizer"],
         scheduler=training_setup["scheduler"],
         device=training_setup["device"],
+        topo=training_setup["topo"],
         checkpoint_path=checkpoint_path,
+        train_sampler=training_setup["train_sampler"],
         epochs=args.epochs,
         resurrect=args.resurrect,
         replay_loss=args.replay_loss,
@@ -300,15 +307,18 @@ def main(args: argparse.Namespace) -> None:
                           note="selection (TEST) loss at the last epoch; the "
                                "model-selection criterion.")
 
-    # ---- Build and save the posterior ------------------------------------
-    prior_cpu = build_prior(device="cpu")
-    prior_cpu, _, _ = process_prior(prior_cpu)
-    posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
+    # ---- Build and save the posterior (rank 0 only) ----------------------
+    # Every rank reloaded the best-on-TEST estimator in train_loop, so rank 0's
+    # copy is the selected model; only it writes the shared posterior file.
+    if topo.is_main:
+        prior_cpu = build_prior(device="cpu")
+        prior_cpu, _, _ = process_prior(prior_cpu)
+        posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
 
-    prior_device = build_prior(device=str(device))
-    posterior_path.parent.mkdir(parents=True, exist_ok=True)
-    save_posterior(posterior, prior_device, posterior_path)
-    print(f"Posterior saved to {posterior_path}")
+        prior_device = build_prior(device=str(device))
+        posterior_path.parent.mkdir(parents=True, exist_ok=True)
+        save_posterior(posterior, prior_device, posterior_path)
+        print(f"Posterior saved to {posterior_path}")
 
     # ---- Diagnostics: confirm outputs written, figure, summary ----------
     if reporter.enabled:
@@ -335,6 +345,9 @@ def main(args: argparse.Namespace) -> None:
         # Lazy import so HPC headless runs don't pay the matplotlib cost.
         from srm_and_sbi_dimer_alp.visualization_inference import plot_loss_curves
         plot_loss_curves(losses_train, losses_test, losses_replay)
+
+    # Tear down the DDP process group (no-op on a single worker).
+    cleanup_distributed()
 
 
 def parse_args(argv=None) -> argparse.Namespace:
