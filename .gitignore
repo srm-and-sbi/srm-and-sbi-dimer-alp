@@ -60,3 +60,6 @@ Data_Bank/
 
 # Per-machine HPC settings (sourced by Script_Bank/HPC/*.sh; copy from hpc_local.env.example)
 Script_Bank/HPC/hpc_local.env
+
+# Local recovery-codes signpost (points to ~/.config/recovery-codes/; contains NO codes; stays local)
+RECOVERY_CODES.md

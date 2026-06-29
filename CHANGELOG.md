@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 - 2026-06-29
+
+Multi-GPU support for the compute-heavy inference and evaluation stages, enabling
+data-parallel training and sharded evaluation across the GPUs of a single node.
+Single-GPU behavior is unchanged: every distributed path collapses to the original
+code when one worker is launched.
+
+### Added
+
+- Data-parallel posterior training across one worker per GPU (launched via
+  `torchrun`): the TRAIN set is sharded across workers, gradients are synchronized
+  each step, and batch-normalization statistics are synchronized across workers.
+  Per-epoch model selection on the TEST set is likewise sharded and combined, so the
+  selection metric matches the single-GPU computation; checkpoint and posterior
+  writing remain on the lead worker.
+- Sharded evaluation: MAP-recovery work is partitioned across GPU workers by task,
+  then combined into one report by a separate merge step. The recovery metrics are
+  aggregates over videos, so the per-worker results merge order-independently.
+- A within-epoch progress-cadence control (`--heartbeat`) for finer monitoring of
+  the long epochs of a large run.
+- An opt-out for cross-worker batch-normalization synchronization
+  (`SRM_AND_SBI_NO_SYNC_BN`), off by default.
+
+### Changed
+
+- The HPC submission scripts adapt to the allocated GPUs: more than one selects the
+  data-parallel path, one preserves the original single-GPU path. The worker count
+  is overridable, and evaluation never launches more workers than it has tasks.
+
 ## 0.1.0 - 2026-06-25
 
 First public release of `srm-and-sbi-dimer-alp`: an end-to-end simulation-based

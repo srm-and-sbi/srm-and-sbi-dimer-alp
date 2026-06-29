@@ -34,6 +34,7 @@ NPE training with a masked autoregressive flow (MAF) density estimator
 conditioned on the Complex3DCNN embedding of the input video.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 import os
 import pickle
@@ -45,6 +46,8 @@ import numpy as np
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel
 
 from .io import load_data
 from .parameterization import PARAMETERS
@@ -178,18 +181,153 @@ class VideoDataset(Dataset):
 # Setup
 # =============================================================================
 
-def get_device() -> torch.device:
-    """Return the torch.device specified by the active machine profile.
+@dataclass(frozen=True)
+class Topology:
+    """Parallel-launch layout for a stage run, shared by inference (DDP) and
+    evaluation (independent sharding).
 
-    Reads `PARAMETERS.machine.compute_backend` and `gpu_device_index`. Falls
-    back to CPU if CUDA is requested but unavailable (printing a warning).
+    ``world_size == 1`` is the single-GPU (or CPU) case and reproduces the
+    original, non-distributed behavior exactly. ``world_size > 1`` means the
+    process is one of several launched together (one per GPU): inference uses
+    ``(world_size, rank)`` to drive DistributedDataParallel; evaluation uses
+    them to take an independent ``videos[rank::world_size]`` shard.
+
+    Attributes:
+        world_size: Total number of parallel worker processes (= GPUs in use).
+        rank: Global rank of this process in ``[0, world_size)``.
+        local_rank: Rank within this node; the local GPU index this process binds.
+        device: The torch device this process uses.
+        backend: ``"GPU"`` or ``"CPU"``.
+    """
+    world_size: int
+    rank: int
+    local_rank: int
+    device: torch.device
+    backend: str
+
+    @property
+    def is_distributed(self) -> bool:
+        """True when more than one worker was launched (DDP / sharding active)."""
+        return self.world_size > 1
+
+    @property
+    def is_main(self) -> bool:
+        """True on the coordinating rank (rank 0). Only this rank should write
+        shared outputs (checkpoint, posterior, merged evaluation report)."""
+        return self.rank == 0
+
+
+def _env_int(*names: str, default: Optional[int] = None) -> Optional[int]:
+    """Return the first parseable integer among the named environment variables."""
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return default
+
+
+def resolve_topology() -> "Topology":
+    """Discover the parallel-launch topology for the current process.
+
+    A single discovery path serves both stages, so their multi-GPU interface is
+    identical. Sources are read in priority order:
+
+    1. ``torchrun`` / ``torch.distributed``: ``WORLD_SIZE``, ``RANK``, ``LOCAL_RANK``.
+    2. Slurm: ``SLURM_NTASKS``, ``SLURM_PROCID``, ``SLURM_LOCALID``.
+    3. Single-process fallback → ``world_size = 1`` (the original behavior).
+
+    The worker count (``world_size``) is set at launch — by
+    ``torchrun --nproc_per_node`` or the Slurm task count — which is how a run
+    adapts to the allocated hardware; the launcher may cap it (e.g. from a
+    ``SRM_AND_SBI_GPUS`` setting) before starting the processes. This function
+    only reports what was launched; it does not start a process group (the
+    inference stage does that itself when ``is_distributed``).
+
+    Device binding: with multiple workers each binds its own ``cuda:local_rank``;
+    a single worker honors the machine profile's ``gpu_device_index`` (so the
+    non-distributed path is byte-for-byte unchanged). Falls back to CPU when
+    CUDA is unavailable or the profile requests CPU.
     """
     machine = PARAMETERS.machine
-    if machine.compute_backend == "GPU":
-        if torch.cuda.is_available():
-            return torch.device(f"cuda:{machine.gpu_device_index or 0}")
-        print("WARNING: machine profile requests GPU but CUDA is unavailable; falling back to CPU.")
-    return torch.device("cpu")
+    gpu_backend = machine.compute_backend == "GPU" and torch.cuda.is_available()
+
+    world_size = _env_int("WORLD_SIZE", "SLURM_NTASKS", default=1) or 1
+    rank = _env_int("RANK", "SLURM_PROCID", default=0) or 0
+    local_rank = _env_int("LOCAL_RANK", "SLURM_LOCALID", default=0) or 0
+
+    if gpu_backend:
+        index = local_rank if world_size > 1 else (machine.gpu_device_index or 0)
+        torch.cuda.set_device(index)   # bind this process's default CUDA device to its own GPU (no-op for the usual index 0)
+        device = torch.device(f"cuda:{index}")
+        backend = "GPU"
+    else:
+        if machine.compute_backend == "GPU":
+            print("WARNING: machine profile requests GPU but CUDA is unavailable; "
+                  "falling back to CPU.")
+        device = torch.device("cpu")
+        backend = "CPU"
+
+    return Topology(world_size=world_size, rank=rank, local_rank=local_rank,
+                    device=device, backend=backend)
+
+
+def get_device() -> torch.device:
+    """Return the torch.device for this process.
+
+    Thin wrapper over :func:`resolve_topology`; preserves the original
+    single-process behavior (honors the machine profile's ``gpu_device_index``,
+    with a CPU fallback + warning). Multi-GPU callers use ``resolve_topology()``
+    directly for the full ``(world_size, rank, local_rank, device)`` layout.
+    """
+    return resolve_topology().device
+
+
+class _LossModule(nn.Module):
+    """Adapt an sbi estimator for DistributedDataParallel.
+
+    sbi's ``NFlowsFlow.forward`` returns ``None``; the trainable entry point is
+    ``estimator.loss(input, condition)``. DDP synchronizes gradients by hooking
+    the wrapped module's ``forward``, so this thin module makes ``forward`` *be*
+    the per-sample loss. ``DDP(_LossModule(estimator))`` therefore all-reduces
+    the estimator's gradients on ``backward``. Used unwrapped on a single GPU,
+    its ``forward`` equals the original ``estimator.loss(...)`` call, so the
+    non-distributed training path is unchanged.
+    """
+
+    def __init__(self, estimator: nn.Module):
+        super().__init__()
+        self.estimator = estimator
+
+    def forward(self, theta: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        return self.estimator.loss(theta, condition=condition)
+
+
+def init_distributed(topo) -> None:
+    """Initialize the default process group for DDP when launched distributed.
+
+    No-op for a single worker (``world_size == 1``). ``torchrun`` provides
+    ``MASTER_ADDR``/``MASTER_PORT``/``RANK``/``WORLD_SIZE``; ``resolve_topology``
+    has already bound this process's local GPU. Uses the NCCL backend (RCCL on
+    ROCm exposes the same name).
+    """
+    import torch.distributed as dist
+    if topo.is_distributed and not dist.is_initialized():
+        if "MASTER_ADDR" not in os.environ:
+            raise RuntimeError(
+                "Multi-process launch detected (world_size > 1) but no torch "
+                "rendezvous is set (MASTER_ADDR unset). Launch multi-GPU inference "
+                "via torchrun, not bare srun.")
+        dist.init_process_group(backend="nccl")
+
+
+def cleanup_distributed() -> None:
+    """Tear down the default process group if one was initialized."""
+    import torch.distributed as dist
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def build_datasets(train_tasks: int,
@@ -275,18 +413,51 @@ def setup_training(estimator: nn.Module,
             0 → no selection set; `val_loader` is None and the train loop
             keeps the last-epoch checkpoint.
 
+    Multi-GPU: when launched distributed (``resolve_topology().world_size > 1``)
+    the estimator's BatchNorm layers are converted to SyncBatchNorm and the model
+    is wrapped in DistributedDataParallel via ``_LossModule`` (sbi's estimator is
+    trained through ``.loss``, not ``.forward``), and the TRAIN loader is sharded
+    with a DistributedSampler. On a single worker the model is the bare
+    ``_LossModule`` and the loader shuffles directly -- the non-distributed path
+    is unchanged.
+
     Returns:
-        Dict with keys: `estimator`, `train_loader`, `val_loader`,
-        `optimizer`, `scheduler`, `device`. `val_loader` is None when
-        `test_tasks == 0`. Ready to be passed to `train_loop`.
+        Dict with keys: `estimator` (the underlying estimator, for checkpoint /
+        posterior), `model` (the loss-computing module, DDP-wrapped when
+        distributed), `train_loader`, `train_sampler` (None unless distributed),
+        `val_loader`, `optimizer`, `scheduler`, `device`, `topo`. `val_loader` is
+        None when `test_tasks == 0`. Ready to be passed to `train_loop`.
     """
     training_cfg = PARAMETERS.inference.training
     batch_size = batch_size or training_cfg.batch_size
     if learning_rate is None:
         learning_rate = training_cfg.learning_rate_minimum * training_cfg.learning_rate_maximum_factor
 
-    device = get_device()
+    topo = resolve_topology()
+    device = topo.device
     estimator = estimator.to(device)
+
+    # Wrap so the module's forward computes the per-sample loss (sbi's NFlowsFlow
+    # forward returns None). Distributed -> SyncBatchNorm + DDP so gradients
+    # all-reduce; single worker -> the bare module (forward == estimator.loss).
+    model: nn.Module = _LossModule(estimator)
+    if topo.is_distributed:
+        # SyncBatchNorm shares the BatchNorm statistics across ranks so every
+        # replica normalizes against the full effective batch (matching the
+        # single-GPU large-batch behavior). It is ON BY DEFAULT and is the
+        # correct, validated choice. It adds a per-step collective measured at
+        # ~12-16% of a 4-GPU/5s epoch -- a minor cost, not the dominant one.
+        # Opt out with SRM_AND_SBI_NO_SYNC_BN=1: each rank then keeps its OWN
+        # local batch statistics, which is faster but changes the statistics, so
+        # re-validate posterior recovery before relying on it.
+        use_sync_bn = os.environ.get("SRM_AND_SBI_NO_SYNC_BN") != "1"
+        if use_sync_bn:
+            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        if topo.is_main:
+            state = "ENABLED (default)" if use_sync_bn else "DISABLED (SRM_AND_SBI_NO_SYNC_BN=1)"
+            print(f"  SyncBatchNorm: {state}", flush=True)
+        model = DistributedDataParallel(model, device_ids=[topo.local_rank],
+                                        output_device=topo.local_rank)
 
     train_dataset, test_dataset = build_datasets(
         train_tasks=train_tasks, data_bank_root=data_bank_root,
@@ -301,16 +472,45 @@ def setup_training(estimator: nn.Module,
     # persistent_workers keeps the worker pool alive across epochs (avoids the
     # per-epoch re-spawn + stack re-import that otherwise dominates each epoch).
     persistent = num_workers > 0
-    print(f"  DataLoader: num_workers={num_workers} (persistent_workers={persistent})", flush=True)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True,
-                              persistent_workers=persistent)
+    if topo.is_main:
+        print(f"  DataLoader: num_workers={num_workers} (persistent_workers={persistent})", flush=True)
+
+    # Distributed -> shard TRAIN across ranks with a DistributedSampler (it owns
+    # the shuffle, so `shuffle` is not passed); single worker -> shuffle directly.
+    train_sampler = None
+    if topo.is_distributed:
+        train_sampler = DistributedSampler(
+            train_dataset, num_replicas=topo.world_size, rank=topo.rank,
+            shuffle=True, drop_last=False)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler,
+                                  num_workers=num_workers, pin_memory=True,
+                                  persistent_workers=persistent)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=True,
+                                  persistent_workers=persistent)
+    # Distributed -> shard TEST across ranks too (DistributedSampler), so the
+    # per-epoch selection loss is computed in parallel (each rank measures its
+    # shard, then train_loop all-reduces the per-rank means) instead of rank 0
+    # alone running the whole TEST set serially. shuffle=False -> a fixed,
+    # balanced split. drop_last=False pads each rank to ceil(N/world_size) samples
+    # so every rank has the SAME batch count -- which is exactly the condition
+    # under which train_loop's unweighted all-reduce-mean of per-rank means equals
+    # the single-process value (it divides evenly at production scale, e.g.
+    # 25000/8=3125, so there is no padding; padding only duplicates a few boundary
+    # samples for the awkward smoke-test counts where N is not a multiple of GPUs).
     val_loader = None
     if test_dataset is not None:
+        val_sampler = (DistributedSampler(test_dataset, num_replicas=topo.world_size,
+                                          rank=topo.rank, shuffle=False, drop_last=False)
+                       if topo.is_distributed else None)
         val_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True,
-                                persistent_workers=persistent)
+                                sampler=val_sampler, num_workers=num_workers,
+                                pin_memory=True, persistent_workers=persistent)
 
+    # Optimizer on the underlying estimator's parameters (DDP wraps the same
+    # tensors and all-reduces their gradients in backward); created after the
+    # SyncBatchNorm conversion so it sees the converted parameters.
     optimizer = optim.AdamW(list(estimator.parameters()), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer=optimizer,
@@ -324,11 +524,14 @@ def setup_training(estimator: nn.Module,
 
     return {
         "estimator": estimator,
+        "model": model,
         "train_loader": train_loader,
+        "train_sampler": train_sampler,
         "val_loader": val_loader,
         "optimizer": optimizer,
         "scheduler": scheduler,
         "device": device,
+        "topo": topo,
     }
 
 
@@ -385,41 +588,55 @@ def compute_validation_loss(estimator: nn.Module,
 # =============================================================================
 
 def train_loop(estimator: nn.Module,
+               model: nn.Module,
                train_loader: DataLoader,
                val_loader: DataLoader,
                optimizer: optim.Optimizer,
                scheduler,
                device: torch.device,
+               topo,
                checkpoint_path: Path,
+               train_sampler=None,
                epochs: Optional[int] = None,
                resurrect: bool = False,
                replay_loss: bool = False,
+               heartbeat_every: Optional[int] = None,
                verbose: bool = False) -> tuple:
     """Run the training loop with optimum-checkpoint tracking and optional RESURRECT.
 
     Args:
-        estimator: The posterior estimator to train.
-        train_loader, val_loader: DataLoaders for train and validation splits.
+        estimator: The underlying posterior estimator -- used for checkpointing,
+            the eval-mode TEST/replay loss, and resurrect loading.
+        model: The loss-computing module driven each batch (``_LossModule``,
+            DDP-wrapped when distributed); its forward returns the per-sample loss.
+        train_loader, val_loader: DataLoaders for the TRAIN and TEST splits.
         optimizer: Already-constructed optimiser (e.g. AdamW).
-        scheduler: Learning-rate scheduler with `.step(metric)` method
-            (e.g. ReduceLROnPlateau on validation loss).
-        device: Device to move batches and the estimator to.
-        checkpoint_path: Path where the best-so-far estimator checkpoint is
-            saved (and, in resurrect mode, loaded from). Built by the
-            entry-point as ``PARAMETERS.paths.checkpoint_path(data_bank_root,
-            timing.label)`` so the path encodes the active simulation timing.
+        scheduler: Learning-rate scheduler with `.step(metric)` (ReduceLROnPlateau).
+        device: Device to move batches to.
+        topo: The launch Topology (rank / world_size / is_main / is_distributed).
+        checkpoint_path: Path where the best-so-far estimator checkpoint is saved
+            (and, in resurrect mode, loaded from). Built by the entry point as
+            ``PARAMETERS.paths.checkpoint_path(data_bank_root, timing.label)``.
+        train_sampler: The DistributedSampler when distributed (its `set_epoch` is
+            called each epoch to reshuffle the shard); None on a single worker.
         epochs: Number of epochs. Defaults to `PARAMETERS.inference.training.epochs`.
-        resurrect: If True, load the checkpoint at `checkpoint_path` BEFORE
-            training begins and report its replay validation loss as the
-            starting baseline. Training then continues from those weights.
-            The new optimum overwrites the same path.
-        verbose: If True, print per-batch progress; otherwise only per-epoch summary.
+        resurrect: If True, load the checkpoint before training and continue.
+        replay_loss: If True, compute the per-epoch eval-mode TRAIN loss.
+        heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
+            only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
+        verbose: If True, print per-batch progress.
+
+    Distributed: TRAIN and TEST are both sharded across ranks (DistributedSampler)
+    and their per-rank mean losses are all-reduced, so every rank's scheduler +
+    model selection stay in lockstep on values computed in parallel; only rank 0
+    writes the checkpoint and prints. On a single worker every collective is the
+    identity and the path matches the original.
 
     Returns:
-        (losses_train, losses_test, losses_replay) — three 1D arrays of
-        length `epochs` with per-epoch mean train, validation, and replay
-        loss (replay = train loss recomputed with augmentation disabled).
+        (losses_train, losses_test, losses_replay) -- three 1D arrays of length
+        `epochs` (per-epoch mean train, test, and replay loss).
     """
+    import torch.distributed as dist
     if epochs is None:
         epochs = PARAMETERS.inference.training.epochs
 
@@ -427,73 +644,86 @@ def train_loop(estimator: nn.Module,
     losses_test = np.full(shape=epochs, fill_value=np.nan)
     losses_replay = np.full(shape=epochs, fill_value=np.nan)
 
-    has_val = val_loader is not None   # TEST namespace present → model selection
+    has_val = val_loader is not None   # TEST namespace present -> model selection
+    distributed = topo.is_distributed
+    is_main = topo.is_main
+
+    def _reduce_mean(value: float) -> float:
+        """Mean of a scalar across ranks (identity when not distributed)."""
+        if not distributed:
+            return value
+        t = torch.tensor([value], device=device, dtype=torch.float64)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        return float((t / topo.world_size).item())
+
     optimum_loss_test = float("inf")
     if resurrect:
+        # All ranks load the same checkpoint so the replicas stay identical.
         estimator.load_state_dict(torch.load(str(checkpoint_path), weights_only=True))
         if has_val:
-            optimum_loss_test = compute_validation_loss(
-                estimator, val_loader, device, verbose=verbose)
-            print(f"RESURRECT: loaded checkpoint from {checkpoint_path}; "
-                  f"baseline test loss = {optimum_loss_test:.5f}")
-        else:
+            # Sharded TEST loss across ranks (see the per-epoch block below).
+            optimum_loss_test = _reduce_mean(
+                compute_validation_loss(estimator, val_loader, device, verbose=verbose))
+            if is_main:
+                print(f"RESURRECT: loaded checkpoint from {checkpoint_path}; "
+                      f"baseline test loss = {optimum_loss_test:.5f}")
+        elif is_main:
             print(f"RESURRECT: loaded checkpoint from {checkpoint_path} "
                   f"(no test set; last-epoch checkpointing).")
 
     n_batches = len(train_loader)
-    heartbeat = max(1, n_batches // 4)   # ~4 within-epoch progress lines per epoch
+    # Within-epoch progress cadence: a line every `heartbeat` batches. Default
+    # (heartbeat_every unset) is ~4 lines/epoch; pass a smaller N (--heartbeat)
+    # for finer progress on the long epochs of a production run.
+    heartbeat = (heartbeat_every if (heartbeat_every and heartbeat_every > 0)
+                 else max(1, n_batches // 4))
     n_train_videos = len(train_loader.dataset)
     n_test_videos = len(val_loader.dataset) if has_val else 0
-    print(
-        f"Training: {n_train_videos} train / {n_test_videos} test videos, "
-        f"{n_batches} batch(es)/epoch, {epochs} epoch(s) on {device}. "
-        f"The first batch triggers model compilation -- expect a delay before the first heartbeat.",
-        flush=True,
-    )
+    if is_main:
+        where = f"{topo.world_size} GPUs (DDP)" if distributed else f"{device}"
+        print(
+            f"Training: {n_train_videos} train / {n_test_videos} test videos, "
+            f"{n_batches} batch(es)/epoch/rank, {epochs} epoch(s) on {where}. "
+            f"The first batch triggers model compilation -- expect a delay before the first heartbeat.",
+            flush=True,
+        )
 
     loop_start = time.time()
     for epoch in range(epochs):
         epoch_start = time.time()
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)   # reshuffle this rank's shard each epoch
         # ---- Training pass ------------------------------------------------
-        estimator.train()
+        model.train()
         batch_train_losses = []
         for b, (video_batch, theta_batch) in enumerate(train_loader, start=1):
             video_batch = video_batch.to(device)
             theta_batch = theta_batch.to(device)
             optimizer.zero_grad()
-            loss = torch.mean(estimator.loss(theta_batch, condition=video_batch))
+            loss = torch.mean(model(theta_batch, condition=video_batch))
             loss.backward()
             optimizer.step()
             batch_train_losses.append(loss.item())
-            # Always-on within-epoch heartbeat (~4/epoch) so long epochs are not
-            # silent on the HPC console; flush so it appears live in the .out.
-            if b % heartbeat == 0 or b == n_batches:
+            # Always-on within-epoch heartbeat (~4/epoch), rank 0 only.
+            if is_main and (b % heartbeat == 0 or b == n_batches):
                 print(f"  epoch {epoch + 1}/{epochs}: batch {b}/{n_batches}  "
                       f"running train_loss={float(np.mean(batch_train_losses)):.5f}",
                       flush=True)
 
-        # ---- Evaluation pass (model-selection signal; TEST namespace) -----
-        epoch_train = float(np.mean(batch_train_losses))
+        # ---- Losses (TRAIN + TEST both sharded across ranks, then all-reduced) ----
+        epoch_train = _reduce_mean(float(np.mean(batch_train_losses)))
         if has_val:
-            estimator.eval()
-            batch_test_losses = []
-            with torch.no_grad():
-                for video_batch, theta_batch in val_loader:
-                    video_batch = video_batch.to(device)
-                    theta_batch = theta_batch.to(device)
-                    loss = torch.mean(estimator.loss(theta_batch, condition=video_batch))
-                    batch_test_losses.append(loss.item())
-            epoch_test = float(np.mean(batch_test_losses))
+            # TEST loss in eval mode. Distributed -> each rank measures its shard
+            # of the (DistributedSampler-sharded) TEST set and the per-rank means
+            # are all-reduced, so every rank gets the same selection metric,
+            # computed in parallel instead of serially on rank 0. Single worker
+            # -> _reduce_mean is the identity over the full set (unchanged).
+            epoch_test = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
         else:
             epoch_test = float("nan")
-        # Replay loss = the TRAIN-set loss recomputed under the SAME conditions
-        # as the test loss -- model in eval mode (dropout disabled, batch-norm
-        # running stats) and data augmentation disabled -- so train and test are
-        # directly comparable (a clean overfitting / generalization signal; the
-        # per-epoch "train" loss above is measured in train mode, so it is not).
-        # Opt-in: a full extra pass over TRAIN every epoch, expensive on large
-        # datasets, so skipped unless replay_loss=True.
-        epoch_replay = (compute_validation_loss(estimator, train_loader, device, verbose=False)
+        # Replay loss = eval-mode TRAIN loss (augmentation off), opt-in; each rank
+        # measures its shard, then averaged across ranks.
+        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, train_loader, device, verbose=False))
                         if replay_loss else float("nan"))
         losses_train[epoch] = epoch_train
         losses_test[epoch] = epoch_test
@@ -501,37 +731,41 @@ def train_loop(estimator: nn.Module,
 
         scheduler.step(epoch_test if has_val else epoch_train)
 
-        # ---- Checkpoint ---------------------------------------------------
+        # ---- Checkpoint (rank 0 only; the selection metric is identical on all ranks) ----
         if has_val:
-            # Keep the best-on-TEST checkpoint (clean model selection).
             if epoch_test < optimum_loss_test:
                 optimum_loss_test = epoch_test
-                torch.save(estimator.state_dict(), str(checkpoint_path))
-        else:
-            # No selection set: keep the latest epoch (last wins).
+                if is_main:
+                    torch.save(estimator.state_dict(), str(checkpoint_path))
+        elif is_main:
             torch.save(estimator.state_dict(), str(checkpoint_path))
 
         epoch_secs = time.time() - epoch_start
         elapsed = time.time() - loop_start
         eta = (elapsed / (epoch + 1)) * (epochs - epoch - 1)   # mean epoch time x remaining
-        replay_str = f"{epoch_replay:.5f}" if replay_loss else "off"
-        print(
-            f"Epoch {epoch + 1}|{epochs}    "
-            f"train={epoch_train:.5f}    test={epoch_test:.5f}    "
-            f"replay={replay_str}    lr={scheduler.get_last_lr()[0]:.2e}    "
-            f"epoch={epoch_secs:.1f}s    elapsed={time.strftime('%H:%M:%S', time.gmtime(elapsed))}    "
-            f"ETA={time.strftime('%H:%M:%S', time.gmtime(eta))}",
-            flush=True,
-        )
+        if is_main:
+            replay_str = f"{epoch_replay:.5f}" if replay_loss else "off"
+            print(
+                f"Epoch {epoch + 1}|{epochs}    "
+                f"train={epoch_train:.5f}    test={epoch_test:.5f}    "
+                f"replay={replay_str}    lr={scheduler.get_last_lr()[0]:.2e}    "
+                f"epoch={epoch_secs:.1f}s    elapsed={time.strftime('%H:%M:%S', time.gmtime(elapsed))}    "
+                f"ETA={time.strftime('%H:%M:%S', time.gmtime(eta))}",
+                flush=True,
+            )
 
     # ---- Final model ------------------------------------------------------
     if has_val:
-        # Reload the best-on-TEST checkpoint as the final estimator.
+        # All ranks reload the best-on-TEST checkpoint (rank 0 wrote it; a barrier
+        # guards the read) so every replica ends identical.
+        if distributed:
+            dist.barrier()
         estimator.load_state_dict(torch.load(str(checkpoint_path), weights_only=True))
-        final_replay = compute_validation_loss(estimator, val_loader, device, verbose=False)
-        print(f"Final: optimum test loss = {optimum_loss_test:.5f}; "
-              f"replay test loss = {final_replay:.5f}")
-    else:
+        final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
+        if is_main:
+            print(f"Final: optimum test loss = {optimum_loss_test:.5f}; "
+                  f"replay test loss = {final_replay:.5f}")
+    elif is_main:
         # No selection set: the last-epoch weights are already in the estimator
         # and saved to the checkpoint. Validation is done separately on EVAL.
         print("Final: last-epoch checkpoint kept (no test set; "
