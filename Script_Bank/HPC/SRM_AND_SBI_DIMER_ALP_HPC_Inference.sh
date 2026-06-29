@@ -6,7 +6,13 @@
 # DistributedDataParallel (torchrun, one process per GPU); with 1 GPU it is the
 # original single-GPU path. The `gpu` partition allocates a whole node (8 GPUs).
 # Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
+#   HEARTBEAT (within-epoch progress: a line every N batches; default ~4/epoch),
 #   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated).
+# Also honored from the environment (read directly by the Python):
+#   SRM_AND_SBI_NO_SYNC_BN=1 -> skip SyncBatchNorm under DDP (each rank keeps its
+#     own local batch statistics). DEFAULT (unset) keeps SyncBatchNorm ON, which
+#     is the correct, validated choice; the opt-out is faster but changes the
+#     batch statistics, so re-validate posterior recovery before using it.
 # BATCH is optional: leave unset to use the script default (PARAMETERS batch_size,
 # 32). Long videos (e.g. 10 s = 500 frames) need a smaller batch -- one early
 # conv3d activation is batch * ~1 GiB at 500 frames, so batch 32 OOMs a 64 GB GPU.
@@ -46,15 +52,18 @@ TEST_TASKS="${TEST_TASKS:-2}"
 EPOCHS="${EPOCHS:-50}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 BATCH="${BATCH:-}"   # empty -> script default (PARAMETERS batch_size, 32)
+HEARTBEAT="${HEARTBEAT:-}"   # empty -> ~4 within-epoch progress lines/epoch; else a line every N batches
 
 BATCH_ARG=()
 [ -n "$BATCH" ] && BATCH_ARG=(--batch-size "$BATCH")
+HEARTBEAT_ARG=()
+[ -n "$HEARTBEAT" ] && HEARTBEAT_ARG=(--heartbeat "$HEARTBEAT")
 
 # GPU count for data-parallel training: SRM_AND_SBI_GPUS override, else allocated, else 1.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py"
 INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
-             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" )
+             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" )
 
 echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} gpus=${GPUS} seed=None | node $(hostname) ==="
 

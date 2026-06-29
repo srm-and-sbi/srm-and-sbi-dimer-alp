@@ -437,7 +437,20 @@ def setup_training(estimator: nn.Module,
     # all-reduce; single worker -> the bare module (forward == estimator.loss).
     model: nn.Module = _LossModule(estimator)
     if topo.is_distributed:
-        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        # SyncBatchNorm shares the BatchNorm statistics across ranks so every
+        # replica normalizes against the full effective batch (matching the
+        # single-GPU large-batch behavior). It is ON BY DEFAULT and is the
+        # correct, validated choice. It adds a per-step collective measured at
+        # ~12-16% of a 4-GPU/5s epoch -- a minor cost, not the dominant one.
+        # Opt out with SRM_AND_SBI_NO_SYNC_BN=1: each rank then keeps its OWN
+        # local batch statistics, which is faster but changes the statistics, so
+        # re-validate posterior recovery before relying on it.
+        use_sync_bn = os.environ.get("SRM_AND_SBI_NO_SYNC_BN") != "1"
+        if use_sync_bn:
+            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        if topo.is_main:
+            state = "ENABLED (default)" if use_sync_bn else "DISABLED (SRM_AND_SBI_NO_SYNC_BN=1)"
+            print(f"  SyncBatchNorm: {state}", flush=True)
         model = DistributedDataParallel(model, device_ids=[topo.local_rank],
                                         output_device=topo.local_rank)
 
@@ -471,14 +484,19 @@ def setup_training(estimator: nn.Module,
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                                   num_workers=num_workers, pin_memory=True,
                                   persistent_workers=persistent)
-    # The TEST loader is NOT sharded: rank 0 computes the exact selection loss
-    # over the whole set and broadcasts it, so every rank's scheduler + model
-    # selection stay in lockstep.
+    # Distributed -> shard TEST across ranks too (DistributedSampler), so the
+    # per-epoch selection loss is computed in parallel (each rank measures its
+    # shard, then train_loop all-reduces the per-rank means) instead of rank 0
+    # alone running the whole TEST set serially. shuffle=False -> a fixed,
+    # balanced split; drop_last=False matches the TRAIN sampler.
     val_loader = None
     if test_dataset is not None:
+        val_sampler = (DistributedSampler(test_dataset, num_replicas=topo.world_size,
+                                          rank=topo.rank, shuffle=False, drop_last=False)
+                       if topo.is_distributed else None)
         val_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True,
-                                persistent_workers=persistent)
+                                sampler=val_sampler, num_workers=num_workers,
+                                pin_memory=True, persistent_workers=persistent)
 
     # Optimizer on the underlying estimator's parameters (DDP wraps the same
     # tensors and all-reduces their gradients in backward); created after the
@@ -572,6 +590,7 @@ def train_loop(estimator: nn.Module,
                epochs: Optional[int] = None,
                resurrect: bool = False,
                replay_loss: bool = False,
+               heartbeat_every: Optional[int] = None,
                verbose: bool = False) -> tuple:
     """Run the training loop with optimum-checkpoint tracking and optional RESURRECT.
 
@@ -593,13 +612,15 @@ def train_loop(estimator: nn.Module,
         epochs: Number of epochs. Defaults to `PARAMETERS.inference.training.epochs`.
         resurrect: If True, load the checkpoint before training and continue.
         replay_loss: If True, compute the per-epoch eval-mode TRAIN loss.
+        heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
+            only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
         verbose: If True, print per-batch progress.
 
-    Distributed: the TRAIN loss is all-reduced (reporting + the no-TEST-set
-    scheduler); rank 0 computes the exact full TEST loss and broadcasts it so
-    every rank's scheduler + model selection stay in lockstep; only rank 0 writes
-    the checkpoint and prints. On a single worker every collective is the identity
-    and the path matches the original.
+    Distributed: TRAIN and TEST are both sharded across ranks (DistributedSampler)
+    and their per-rank mean losses are all-reduced, so every rank's scheduler +
+    model selection stay in lockstep on values computed in parallel; only rank 0
+    writes the checkpoint and prints. On a single worker every collective is the
+    identity and the path matches the original.
 
     Returns:
         (losses_train, losses_test, losses_replay) -- three 1D arrays of length
@@ -638,9 +659,9 @@ def train_loop(estimator: nn.Module,
         # All ranks load the same checkpoint so the replicas stay identical.
         estimator.load_state_dict(torch.load(str(checkpoint_path), weights_only=True))
         if has_val:
-            base = (compute_validation_loss(estimator, val_loader, device, verbose=verbose)
-                    if is_main else 0.0)
-            optimum_loss_test = _broadcast(base)
+            # Sharded TEST loss across ranks (see the per-epoch block below).
+            optimum_loss_test = _reduce_mean(
+                compute_validation_loss(estimator, val_loader, device, verbose=verbose))
             if is_main:
                 print(f"RESURRECT: loaded checkpoint from {checkpoint_path}; "
                       f"baseline test loss = {optimum_loss_test:.5f}")
@@ -649,7 +670,11 @@ def train_loop(estimator: nn.Module,
                   f"(no test set; last-epoch checkpointing).")
 
     n_batches = len(train_loader)
-    heartbeat = max(1, n_batches // 4)   # ~4 within-epoch progress lines per epoch
+    # Within-epoch progress cadence: a line every `heartbeat` batches. Default
+    # (heartbeat_every unset) is ~4 lines/epoch; pass a smaller N (--heartbeat)
+    # for finer progress on the long epochs of a production run.
+    heartbeat = (heartbeat_every if (heartbeat_every and heartbeat_every > 0)
+                 else max(1, n_batches // 4))
     n_train_videos = len(train_loader.dataset)
     n_test_videos = len(val_loader.dataset) if has_val else 0
     if is_main:
@@ -683,14 +708,15 @@ def train_loop(estimator: nn.Module,
                       f"running train_loss={float(np.mean(batch_train_losses)):.5f}",
                       flush=True)
 
-        # ---- Losses (TRAIN all-reduced; TEST computed on rank 0 + broadcast) ----
+        # ---- Losses (TRAIN + TEST both sharded across ranks, then all-reduced) ----
         epoch_train = _reduce_mean(float(np.mean(batch_train_losses)))
         if has_val:
-            # Rank 0 computes the exact full-set TEST loss in eval mode (no DDP
-            # collective); broadcast so every rank's scheduler + selection match.
-            local_test = (compute_validation_loss(estimator, val_loader, device, verbose=False)
-                          if is_main else 0.0)
-            epoch_test = _broadcast(local_test)
+            # TEST loss in eval mode. Distributed -> each rank measures its shard
+            # of the (DistributedSampler-sharded) TEST set and the per-rank means
+            # are all-reduced, so every rank gets the same selection metric,
+            # computed in parallel instead of serially on rank 0. Single worker
+            # -> _reduce_mean is the identity over the full set (unchanged).
+            epoch_test = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
         else:
             epoch_test = float("nan")
         # Replay loss = eval-mode TRAIN loss (augmentation off), opt-in; each rank
@@ -733,8 +759,7 @@ def train_loop(estimator: nn.Module,
         if distributed:
             dist.barrier()
         estimator.load_state_dict(torch.load(str(checkpoint_path), weights_only=True))
-        final_replay = _broadcast(compute_validation_loss(estimator, val_loader, device, verbose=False)
-                                  if is_main else 0.0)
+        final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
         if is_main:
             print(f"Final: optimum test loss = {optimum_loss_test:.5f}; "
                   f"replay test loss = {final_replay:.5f}")

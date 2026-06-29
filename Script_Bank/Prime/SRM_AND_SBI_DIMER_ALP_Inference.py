@@ -290,6 +290,7 @@ def main(args: argparse.Namespace) -> None:
         epochs=args.epochs,
         resurrect=args.resurrect,
         replay_loss=args.replay_loss,
+        heartbeat_every=args.heartbeat,
         verbose=args.verbose,
     )
 
@@ -403,6 +404,12 @@ def parse_args(argv=None) -> argparse.Namespace:
              "running stats -- with augmentation disabled), for a directly comparable "
              "train-vs-test generalization signal. Off by default: a full extra pass "
              "over TRAIN each epoch, expensive on large datasets.",
+    )
+    parser.add_argument(
+        "--heartbeat", type=int, default=None,
+        help="Within-epoch progress cadence: emit a line every N batches (rank 0 "
+             "only). Default (unset) is ~4 lines/epoch; set a smaller N for finer "
+             "progress on the long epochs of a production run.",
     )
     parser.add_argument(
         "--verbose", action="store_true",
