@@ -282,6 +282,20 @@ checkpoint and resumes. The first job runs fresh; every continuation passes
 `RESURRECT=1`. Repeat until the target epochs are reached. This works on the
 single-GPU and the data-parallel paths alike.
 
+To pre-submit the whole chain so each link starts **even if the previous job hit
+the wall** (a timeout is recorded as a failure), gate each continuation on the
+previous job id with `DEP=afterany:<jobid>` — `afterany`, not `afterok`, because an
+`afterok` successor would never start after a wall-stopped predecessor:
+
+```bash
+id=$(DRYRUN=0 GPU_PART=gpu_test GRES=gpu:4 bash Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Submit.sh \
+       inference TOTAL_TIME=5.0 TRAIN_TASKS=100 EPOCHS=10 HEARTBEAT=20 | grep -oP 'Submitted batch job \K\d+')
+for _ in 1 2; do   # two continuations
+  id=$(DRYRUN=0 GPU_PART=gpu_test GRES=gpu:4 DEP="afterany:$id" bash Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Submit.sh \
+         inference TOTAL_TIME=5.0 TRAIN_TASKS=100 EPOCHS=10 HEARTBEAT=20 RESURRECT=1 | grep -oP 'Submitted batch job \K\d+')
+done
+```
+
 **Check (`gpu_test`), single-GPU smoke — Inference:**
 
 ```bash

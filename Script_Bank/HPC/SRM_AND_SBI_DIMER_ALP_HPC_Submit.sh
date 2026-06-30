@@ -34,6 +34,8 @@
 #   GPU_PART  partition for the GPU stages (e.g. gpu_test for a smoke, gpu for prod)
 #   ACCT      Slurm account, if your cluster requires one
 #   TIME      --time override (else the baked #SBATCH --time)
+#   DEP       --dependency override (e.g. afterany:<jobid> -- chain resurrect jobs so
+#             each starts after the previous ENDS, regardless of success/failure)
 #   ARRAY     Simulation only: --array spec (default 0-0 = one node)
 #   NTPN CPT  Simulation only: --ntasks-per-node / --cpus-per-task (else baked)
 #   GRES      GPU stages: --gres override (else baked gpu:8)
@@ -162,6 +164,7 @@ esac
 
 [ -n "${ACCT:-}" ] && SB+=( --account="$ACCT" )
 [ -n "${TIME:-}" ] && SB+=( --time="$TIME" )
+[ -n "${DEP:-}" ]  && SB+=( --dependency="$DEP" )
 [ -f "$SUBMIT_SCRIPT" ] || { echo "FATAL: stage script not found: $SUBMIT_SCRIPT" >&2; exit 1; }
 
 EXPORT="$(IFS=,; echo "${EXPORT_PARTS[*]}")"

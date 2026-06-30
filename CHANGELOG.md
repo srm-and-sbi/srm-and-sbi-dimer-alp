@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.4 - 2026-06-30
+
+Adds a dependency knob to the HPC submitter so a wall-limited training run can be
+pre-submitted as a fault-tolerant resurrect chain. No change to the scientific
+behavior.
+
+### Added
+
+- `Submit.sh` accepts a `DEP` override that forwards to `sbatch --dependency`
+  (e.g. `DEP=afterany:<jobid>`). With `afterany`, each chained continuation starts
+  after the previous job *ends regardless of exit status*, so a wall-timeout
+  (recorded by Slurm as a failure) does not stall the chain the way `afterok`
+  would. Combined with `RESURRECT=1`, this pre-submits a train-to-target chain
+  that survives per-job wall stops. The wall-limited-chaining section of the HPC
+  README shows the recipe.
+
 ## 0.2.3 - 2026-06-30
 
 Exposes the inference `--resurrect` mode through the HPC submission path, so a
