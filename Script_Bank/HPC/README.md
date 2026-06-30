@@ -36,7 +36,9 @@ runs the matching entry point under `Script_Bank/Prime/`.
   then merges the per-shard results into one report.
 - **Experiment** applies the trained estimator to real microscopy `.tif`
   recordings (no ground truth) and reports the inferred-parameter distribution
-  per condition. It is the scientific end use, not a correctness check.
+  per condition. With more than one GPU it shards its `(kind, cell)` work across
+  workers (torchrun), then merges the per-shard results into one report. It is the
+  scientific end use, not a correctness check.
 
 The normal ordering is **Simulation → Inference → Evaluation**. Experiment runs
 once a trained posterior exists. Generation runs on the CPU partition; training,
@@ -262,12 +264,13 @@ The GPU scripts bake a whole-node allocation:
 - `--nodes=1`, `--gres=gpu:8`, `--cpus-per-task=64`, `--mem=480G`
 - `--time=1-00:00:00` (Inference, Experiment); `--time=12:00:00` (Evaluation)
 
-Inference and Evaluation adapt to the GPUs they receive (`SLURM_GPUS_ON_NODE`,
-capped by the optional `SRM_AND_SBI_GPUS`): more than one GPU runs the torchrun
-data-parallel (Inference) or sharded (Evaluation) path; one GPU runs the
-single-GPU path. Experiment is single-GPU (one process, no sharding). Use the
-full `gpu` partition (whole node, `gpu:8`) for validation unless a run is a
-genuinely tiny throwaway.
+Inference, Evaluation, and Experiment adapt to the GPUs they receive
+(`SLURM_GPUS_ON_NODE`, capped by the optional `SRM_AND_SBI_GPUS`): more than one
+GPU runs the torchrun path — data-parallel training (Inference) or work-sharded
+estimation (Evaluation shards its EVAL videos; Experiment shards its
+`(kind, cell)` work), each followed by a merge of the per-shard results — while
+one GPU runs the original single-GPU path. Use the full `gpu` partition (whole
+node, `gpu:8`) for validation unless a run is a genuinely tiny throwaway.
 
 **Check (`gpu_test`), single-GPU smoke — Inference:**
 

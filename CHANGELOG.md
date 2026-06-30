@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.2 - 2026-06-30
+
+Completes the multi-GPU story across the GPU stages: the real-data application
+(experiment) stage now shards its work across the allocated GPUs and merges the
+per-shard results, matching the data-parallel training and the sharded
+evaluation. No change to the scientific behavior or to the single-GPU path.
+
+### Changed
+
+- The experiment stage adapts to the allocated GPUs: with more than one GPU it
+  shards its per-condition, per-cell work across one worker per GPU (`torchrun`)
+  and a separate merge step combines the per-shard arrays into a single report;
+  with one GPU it is the original single-process path. The estimation outputs are
+  factored into a shared writer used by both the single-process path and the
+  merge, mirroring the evaluation stage. A `--merge` mode and the
+  `SRM_AND_SBI_GPUS` cap are added on the experiment entry point, and its HPC
+  submitter wraps the `torchrun` launch and the merge.
+
 ## 0.2.1 - 2026-06-30
 
 Operational hardening of the HPC workflow, a dry-run-first submission path, and a
