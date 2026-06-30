@@ -448,17 +448,33 @@ def setup_training(estimator: nn.Module,
         train_tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress, test_tasks=test_tasks,
     )
-    num_workers = PARAMETERS.machine.num_workers
-    if num_workers <= 0:
-        # Auto: half the available CPU cores (SLURM-job-aware via sched_getaffinity).
-        # Set a positive num_workers in machine_profiles.toml to override this.
-        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-        num_workers = max(1, cores // 2)
+    # ---- DataLoader worker budget (rank- and loader-aware) -------------------
+    # Each DDP rank builds its OWN loaders, and persistent_workers keeps the train +
+    # validation loaders' workers alive at the same time, so the LIVE worker-process
+    # count is num_workers x world_size x n_live_loaders. Treat the configured value
+    # (or the CPU core count, when <= 0) as the node-wide TOTAL worker budget and
+    # divide it across ranks and concurrently-persistent loaders, so the product stays
+    # ~1 worker per core regardless of how many GPUs are allocated. This GENERALIZES
+    # the old single-GPU `cores // 2` default, which silently multiplied to
+    # world_size x n_live_loaders x that under DDP and exhausted host RAM at production
+    # scale (4 ranks x 16 x 2 = 128 loader processes > 480 GB). At world_size == 1 with
+    # a train+val pair it still resolves to cores // 2 per loader (single-GPU unchanged).
+    # This is the data-loading worker budget only; the GPU/shard-worker count
+    # (world_size) is bounded separately (SRM_AND_SBI_GPUS; eval/experiment cap it at
+    # the task/cell count). Eval/experiment build no num_workers loaders, so this
+    # budget is inference-only.
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    worker_budget = PARAMETERS.machine.num_workers if PARAMETERS.machine.num_workers > 0 else cores
+    n_live_loaders = 1 + (1 if test_dataset is not None else 0)   # train (+ persistent val)
+    num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
     # persistent_workers keeps the worker pool alive across epochs (avoids the
     # per-epoch re-spawn + stack re-import that otherwise dominates each epoch).
     persistent = num_workers > 0
     if topo.is_main:
-        print(f"  DataLoader: num_workers={num_workers} (persistent_workers={persistent})", flush=True)
+        print(f"  DataLoader: num_workers={num_workers}/loader/rank "
+              f"(budget={worker_budget} / {topo.world_size} rank(s) / {n_live_loaders} live loader(s) "
+              f"-> {num_workers * topo.world_size * n_live_loaders} live workers; "
+              f"persistent_workers={persistent})", flush=True)
 
     # Distributed -> shard TRAIN across ranks with a DistributedSampler (it owns
     # the shuffle, so `shuffle` is not passed); single worker -> shuffle directly.

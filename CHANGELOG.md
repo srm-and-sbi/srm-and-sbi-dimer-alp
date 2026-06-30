@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.5 - 2026-06-30
+
+Makes the inference DataLoader worker count rank- and loader-aware, so multi-GPU
+training cannot exhaust host memory by multiplying worker processes. No change to
+the scientific behavior or to the single-GPU path.
+
+### Changed
+
+- The inference DataLoader `num_workers` is now derived from a node-wide TOTAL
+  worker budget divided across the data-parallel ranks and the concurrently-live
+  loaders (train + validation): `max(1, budget // (world_size * n_live_loaders))`,
+  where `budget` is the machine profile's `num_workers` or the CPU core count when
+  unset. Each DDP rank builds its own loaders and `persistent_workers` keeps the
+  train and validation workers alive simultaneously, so the previous per-rank
+  `cores // 2` default silently multiplied to `world_size * 2 * (cores // 2)` live
+  worker processes under DDP and exhausted host RAM at production scale (e.g. 4
+  ranks x 16 x 2 = 128 processes > 480 GB). The new rule keeps the live total near
+  one worker per core on any GPU count and reduces to the prior `cores // 2` per
+  loader on a single GPU (single-GPU runs unchanged). The budget is data-loading
+  only and inference-only: evaluation and experiment build no `num_workers` loaders,
+  and the GPU/shard-worker count (`world_size`) stays bounded separately
+  (`SRM_AND_SBI_GPUS`, and the eval/experiment cap at the task/cell count). The
+  machine profile's `num_workers` is now interpreted as that node-wide total.
+
 ## 0.2.4 - 2026-06-30
 
 Adds a dependency knob to the HPC submitter so a wall-limited training run can be
