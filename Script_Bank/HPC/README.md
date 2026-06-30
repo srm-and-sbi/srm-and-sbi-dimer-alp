@@ -141,6 +141,8 @@ sbatch --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Inference \
        --output="$MON_OUT/%x_%A.out" \
        --export=ALL,REPO=$PWD,TRAIN_TASKS=8,TEST_TASKS=2,EPOCHS=50,TOTAL_TIME=2.0 \
        Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Inference.sh
+# Continue a wall-stopped run from its checkpoint: add RESURRECT=1 to the --export
+# (or pass RESURRECT=1 to the Submit.sh helper). The first job runs fresh.
 ```
 
 ```bash
@@ -271,6 +273,14 @@ estimation (Evaluation shards its EVAL videos; Experiment shards its
 `(kind, cell)` work), each followed by a merge of the per-shard results — while
 one GPU runs the original single-GPU path. Use the full `gpu` partition (whole
 node, `gpu:8`) for validation unless a run is a genuinely tiny throwaway.
+
+**Wall-limited training continues with `RESURRECT`.** Training checkpoints its
+optimum each epoch. A run that will not reach its target epochs within the
+partition wall is continued by relaunching the same submission with `RESURRECT=1`
+(a `Submit.sh` knob, or `RESURRECT=1` in the raw `--export`): it loads that
+checkpoint and resumes. The first job runs fresh; every continuation passes
+`RESURRECT=1`. Repeat until the target epochs are reached. This works on the
+single-GPU and the data-parallel paths alike.
 
 **Check (`gpu_test`), single-GPU smoke — Inference:**
 

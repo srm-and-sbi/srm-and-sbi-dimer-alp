@@ -77,11 +77,15 @@ each then merging the per-shard results into one report. With a single GPU the
 same code collapses to the original single-GPU path — no flags to change.
 The GPU count is read from the allocation (`SLURM_GPUS_ON_NODE`); the HPC
 submitters wrap the `torchrun` launch, so on a whole-node `gpu` allocation a run
-uses every GPU automatically. Three controls tune the behavior:
+uses every GPU automatically. Four controls tune the behavior:
 
 - **`--heartbeat N`** (Inference) — emit a within-epoch progress line every `N`
   batches (rank 0 only). Unset gives roughly four lines per epoch; a smaller `N`
   gives finer progress on the long epochs of a production run.
+- **`RESURRECT=1`** (Inference HPC knob → the Prime `--resurrect` flag) — load the
+  saved optimum checkpoint and continue training from those weights, so a run that
+  hits the partition wall before its target epochs is continued by relaunching with
+  `RESURRECT=1`. The first job runs fresh.
 - **`SRM_AND_SBI_GPUS`** (env var) — cap the GPUs used; default is all allocated.
   Set it to `1` to force the single-GPU path even on a multi-GPU allocation.
 - **`SRM_AND_SBI_NO_SYNC_BN=1`** (env var) — under data-parallel training, skip

@@ -23,7 +23,8 @@
 #   KEY=VALUE pairs are the stage's --export knobs (see each stage script header);
 #   anything not passed falls back to that stage script's own default:
 #     simulation  : SPLIT TASK_OFFSET TASK_COUNT TASK_SIMS TOTAL_TIME
-#     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH HEARTBEAT
+#     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH HEARTBEAT RESURRECT
+#                   (RESURRECT=1 continues training from the existing checkpoint)
 #     evaluation  : EVAL_TASKS SUMMARY POOL_MODE TOTAL_TIME
 #     experiment  : KINDS MAX_CELLS CHUNK_STEP SUMMARY POOL_MODE TOTAL_TIME
 #
@@ -46,6 +47,7 @@
 # Examples (all DRY-RUN by default -- print the sbatch line, submit nothing):
 #   bash .../Submit.sh inference TOTAL_TIME=5.0 TRAIN_TASKS=400 TEST_TASKS=100 EPOCHS=25
 #   DRYRUN=0 GPU_PART=gpu bash .../Submit.sh inference TOTAL_TIME=5.0 TRAIN_TASKS=400 TEST_TASKS=100 EPOCHS=25
+#   DRYRUN=0 GPU_PART=gpu_test bash .../Submit.sh inference TOTAL_TIME=5.0 TRAIN_TASKS=100 EPOCHS=10 RESURRECT=1  # continue a wall-stopped run
 #   PART=test bash .../Submit.sh simulation SPLIT=train TASK_COUNT=8 TASK_SIMS=1000 TOTAL_TIME=2.0
 #   bash .../Submit.sh evaluation TOTAL_TIME=5.0 EVAL_TASKS=20 POOL_MODE=bounded
 #   bash .../Submit.sh experiment TOTAL_TIME=2.0 SUMMARY=both KINDS=ALP,BET
@@ -128,7 +130,7 @@ case "$STAGE" in
   inference)
     SUBMIT_SCRIPT="$REPO/Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Inference.sh"
     JOBNAME="SRM_AND_SBI_DIMER_ALP_${timing_label}_Inference"
-    _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add HEARTBEAT
+    _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add HEARTBEAT; _add RESURRECT
     [ -n "${GPU_PART:-}" ] && SB+=( --partition="$GPU_PART" )
     [ -n "${GRES:-}" ]     && SB+=( --gres="$GRES" )
     [ -n "${MON_OUT:-}" ]  && SB+=( --output="$MON_OUT/%x_%A.out" )

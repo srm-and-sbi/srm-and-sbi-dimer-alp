@@ -686,8 +686,12 @@ def train_loop(estimator: nn.Module,
 
     optimum_loss_test = float("inf")
     if resurrect:
-        # All ranks load the same checkpoint so the replicas stay identical.
-        estimator.load_state_dict(torch.load(str(checkpoint_path), weights_only=True))
+        # All ranks load the same checkpoint -- staged to CPU, then placed onto each
+        # rank's own device by load_state_dict -- so the replicas stay identical and no
+        # single device accumulates every rank's copy. No barrier needed here: the
+        # checkpoint is from a prior completed run, so no rank writes it before this read.
+        estimator.load_state_dict(
+            torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
         if has_val:
             # Sharded TEST loss across ranks (see the per-epoch block below).
             optimum_loss_test = _reduce_mean(
@@ -786,10 +790,12 @@ def train_loop(estimator: nn.Module,
     # ---- Final model ------------------------------------------------------
     if has_val:
         # All ranks reload the best-on-TEST checkpoint (rank 0 wrote it; a barrier
-        # guards the read) so every replica ends identical.
+        # guards the read) so every replica ends identical. Staged to CPU, then placed
+        # onto each rank's own device by load_state_dict.
         if distributed:
             dist.barrier()
-        estimator.load_state_dict(torch.load(str(checkpoint_path), weights_only=True))
+        estimator.load_state_dict(
+            torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
         final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
         if is_main:
             print(f"Final: optimum test loss = {optimum_loss_test:.5f}; "
