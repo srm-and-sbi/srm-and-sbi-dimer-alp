@@ -28,7 +28,6 @@ import sys
 import time
 import warnings
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numcodecs
 import numpy as np
@@ -402,8 +401,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--total-time-seconds", type=float,
         required=True,
-        help="Simulation duration per video in seconds. Must match the value used "
-             "in the corresponding RDS run (default: 2.0).",
+        help="Simulation duration per video in seconds (required; e.g. 2.0, 5.0). "
+             "Must match the value used in the corresponding RDS run.",
     )
     parser.add_argument(
         "--tasks", type=int, default=2,

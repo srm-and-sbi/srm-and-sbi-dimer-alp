@@ -510,12 +510,12 @@ class InferenceNetwork:
 
     - `n_conv_layers`: depth of the 3D-CNN backbone (channels double per layer).
     - `n_attn_layers`: number of stacked self-attention blocks in the temporal
-      transformer that summarises the conv-stack output across time.
+      transformer that summarizes the conv-stack output across time.
     - `start_channels`: output channels of the first conv block (becomes
       `start_channels * 2^(n_conv_layers - 1)` at the deepest layer).
-    - `regress`: output mode of the network. "Comp" returns the CLS-token
-      embedding directly (used here, since the embedding feeds a MAF).
-      "Simp" applies a small MLP head and returns regressed parameter values.
+
+    The network returns the CLS-token embedding directly, which feeds the
+    downstream MAF density estimator.
     """
     input_channels: int = 1
     n_conv_layers: int = 4
@@ -523,8 +523,6 @@ class InferenceNetwork:
     start_channels: int = 8
     use_temporal_attention: bool = True
     attention_heads: int = 2
-    paras: int = 7                                 # number of learnable parameters (= len(PARAMETERIZATION))
-    regress: str = "Comp"                          # {"Simp", "Comp"} — see class docstring
 
 
 @dataclass(frozen=True)
@@ -619,7 +617,7 @@ PARAMETERS = Parameters(machine=load_machine_profile())
 #   {
 #     'KEY':          unique parameter identifier (str),
 #     'VALUE':        default / fixed value (scalar or list; for log-uniform
-#                     priors this is the value at the centre of the prior),
+#                     priors this is the value at the center of the prior),
 #     'PRIOR_RANGE':  (low, high) bounds for log-uniform priors; None for
 #                     fixed (non-learnable) parameters,
 #     'LOG_FLAG':     True if PRIOR_RANGE is given in log10 space,

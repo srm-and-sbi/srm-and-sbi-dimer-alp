@@ -22,7 +22,7 @@ gradient steps use ``posterior.posterior_estimator`` (the flow, which exposes
 ``log_prob`` and tracks gradients but does not enforce bounds).
 
 Module contents:
-    MAPEstimate(...)          -- full seed-then-optimize MAP for one video.
+    map_estimate(...)         -- full seed-then-optimize MAP for one video.
     recovery_stats(...)       -- per-parameter recovery error statistics.
     recovery_table(...)       -- (headers, rows) recovery summary for the report.
 """
@@ -30,7 +30,6 @@ Module contents:
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import numpy as np
 import torch
@@ -237,16 +236,16 @@ def optimize_elite(flow, train_device: torch.device, vista_device: torch.device,
     return optimal_score, optimal_np
 
 
-def MAPEstimate(posterior, video_chunk: np.ndarray,
-                train_device: torch.device, vista_device: torch.device,
-                theta_prex_size: int, theta_prex_batch_size: int,
-                score_prex_batch_size: int, elite_prex_size: int,
-                numb_steps: int, optimizer_patience: int,
-                scheduler_patience: int, show_progress_steps: int,
-                learning_rate_minimum: float, learning_rate_factor: float,
-                learning_rate: float, tolerance: float,
-                pool_mode: str = "bounded", show: bool = False,
-                verbose: bool = False, log_fn=None) -> tuple:
+def map_estimate(posterior, video_chunk: np.ndarray,
+                 train_device: torch.device, vista_device: torch.device,
+                 theta_prex_size: int, theta_prex_batch_size: int,
+                 score_prex_batch_size: int, elite_prex_size: int,
+                 numb_steps: int, optimizer_patience: int,
+                 scheduler_patience: int, show_progress_steps: int,
+                 learning_rate_minimum: float, learning_rate_factor: float,
+                 learning_rate: float, tolerance: float,
+                 pool_mode: str = "bounded", show: bool = False,
+                 verbose: bool = False, log_fn=None) -> tuple:
     """Estimate the MAP theta for one video via seed-then-optimize.
 
     Args:

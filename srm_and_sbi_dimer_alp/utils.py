@@ -65,11 +65,12 @@ def console_log_context(args, stage: str):
 
     Under ``--debug-dump`` (``args.debug_dump`` truthy) the transcript is written
     to ``<data_bank>/Labor/Debug/<run_label>/<stage>/console.log`` -- the same
-    process-level directory the DiagnosticReporter dumps into. Otherwise a no-op
+    process-level directory the DiagnosticReporter dumps into. Otherwise -- or
+    under ``--dry-run``, which performs no real work to transcribe -- a no-op
     context. ``args`` is expected to carry ``total_time_seconds`` and optionally
     ``split`` (RDS / DLI); both are read defensively.
     """
-    if not getattr(args, "debug_dump", False):
+    if not getattr(args, "debug_dump", False) or getattr(args, "dry_run", False):
         return contextlib.nullcontext()
     # Imported here (not at module top) to avoid a circular import at load time.
     from .parameterization import PARAMETERS, RunTiming

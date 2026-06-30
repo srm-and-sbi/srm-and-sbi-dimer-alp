@@ -2,7 +2,7 @@
 
 The companion to ``Evaluation.py``: where Evaluation recovers parameters from
 held-out *simulated* EVAL videos (known ground truth), this stage applies the
-same seed-then-optimize ``MAPEstimate`` to *real* experimental videos, for which
+same seed-then-optimize ``map_estimate`` to *real* experimental videos, for which
 there is no ground truth. Each cell's long recording is split into model-length
 chunks; the MAP theta is estimated per chunk, and the report shows the
 distribution of inferred parameters per experimental condition (kind), so
@@ -40,14 +40,14 @@ import torch._dynamo
 
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.evaluation import (
-    MAPEstimate,
+    map_estimate,
     experiment_table,
     posterior_summary,
     _theta_repr,
 )
 from srm_and_sbi_dimer_alp.inference_support import get_device, load_posterior
 from srm_and_sbi_dimer_alp.io import convert_video_dtype
-from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming
+from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming, build_prior
 from srm_and_sbi_dimer_alp.utils import console_log_context
 from srm_and_sbi_dimer_alp.visualization_inference import figure_experiment_combined
 
@@ -202,6 +202,29 @@ def main(args: argparse.Namespace) -> None:
     print(f"  live progress    : {progress_path}   (tail -f to monitor)")
     print(f"\n{div}\n")
 
+    # ---- Dry-run preview (no GPU, no compute) ----------------------------
+    if args.dry_run:
+        print("[DRY RUN] validating configuration and inputs:")
+        checks = [
+            ("posterior", posterior_path),
+            ("experiment dir", experiment_dir),
+        ]
+        missing = 0
+        for role, path in checks:
+            ok = Path(path).exists()
+            missing += not ok
+            print(f"  reads {role}: {path}  [{'OK' if ok else 'MISSING'}]")
+        for kind in kinds:
+            discovered = _discover_cells(experiment_dir, kind, span)
+            print(f"  discovered {kind} recordings: {len(discovered)} cell(s) "
+                  f"({span}S_RAW.tif)")
+        if missing:
+            print(f"[DRY RUN] configuration validated; {missing} input(s) MISSING.")
+        else:
+            print("[DRY RUN] configuration validated; all inputs present.")
+        print("[DRY RUN] no MAP estimation performed.")
+        return
+
     run_start = time.time()
 
     # ---- Diagnostics reporter (the experiment report is the deliverable) -
@@ -217,7 +240,10 @@ def main(args: argparse.Namespace) -> None:
     posterior = load_posterior(posterior_path)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
-        posterior.prior = posterior._prior
+        # Rebuild the prior on this device for bounded rejection sampling, matching
+        # Evaluation.py (avoids a device mismatch if this GPU index differs from the
+        # one the posterior was saved on).
+        posterior.prior = build_prior(device=str(device))
 
     # ---- Output dir + progress log + stale-figure clear ------------------
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +298,7 @@ def main(args: argparse.Namespace) -> None:
                               flush=True)
                     if debug_log:
                         log_file_only(progress_fh, f"-- {kind} cell {cell} chunk {c} --")
-                    score, theta_log = MAPEstimate(
+                    score, theta_log = map_estimate(
                         posterior, chunk, device, vista_device,
                         theta_prex_size, eval_cfg.theta_prex_batch_size,
                         eval_cfg.score_prex_batch_size, elite_prex_size,
@@ -469,6 +495,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--debug-dump", action="store_true",
                         help="Implies --debug; tees the console transcript to "
                              "Labor/Debug/<run>/Experiment/console.log.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate configuration and inputs, print what would be read/written, then exit "
+                             "without running the stage (no GPU, no compute). Use before a queue submission or a long local run.")
     return parser.parse_args(argv)
 
 

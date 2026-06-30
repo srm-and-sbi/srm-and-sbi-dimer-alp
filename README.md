@@ -64,19 +64,41 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py --core-tasks
 ### Train the posterior on TRAIN, selecting on TEST
 
 ```bash
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --tasks 8 --test-tasks 2 --epochs 50
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --total-time-seconds 2.0 --tasks 8 --test-tasks 2 --epochs 50
 ```
+
+#### Multi-GPU
+
+Training and MAP recovery auto-adapt to the GPUs they are given. Launched under
+`torchrun` with one worker per GPU, training runs data-parallel
+(`DistributedDataParallel`) and evaluation shards its EVAL videos across the
+workers, then merges the per-shard results into one report. With a single GPU
+the same code collapses to the original single-GPU path — no flags to change.
+The GPU count is read from the allocation (`SLURM_GPUS_ON_NODE`); the HPC
+submitters wrap the `torchrun` launch, so on a whole-node `gpu` allocation a run
+uses every GPU automatically. Three controls tune the behavior:
+
+- **`--heartbeat N`** (Inference) — emit a within-epoch progress line every `N`
+  batches (rank 0 only). Unset gives roughly four lines per epoch; a smaller `N`
+  gives finer progress on the long epochs of a production run.
+- **`SRM_AND_SBI_GPUS`** (env var) — cap the GPUs used; default is all allocated.
+  Set it to `1` to force the single-GPU path even on a multi-GPU allocation.
+- **`SRM_AND_SBI_NO_SYNC_BN=1`** (env var) — under data-parallel training, skip
+  `SyncBatchNorm` so each worker keeps its own local batch statistics. The
+  default (unset) keeps `SyncBatchNorm` on, which is the validated choice; the
+  opt-out is faster but changes the batch statistics, so re-validate posterior
+  recovery before relying on it.
 
 ### Validate and apply
 
 Validate by MAP recovery on the held-out EVAL set, then apply the posterior to real microscopy videos:
 
 ```bash
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Evaluation.py --eval-tasks 1 --summary both
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py --kinds ALP,BET --summary both
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Evaluation.py --total-time-seconds 2.0 --eval-tasks 1 --summary both
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py --total-time-seconds 2.0 --kinds ALP,BET --summary both
 ```
 
-Evaluation reports per-parameter recovery accuracy + posterior calibration; Experiment reports inferred-parameter distributions per condition (no ground truth). Both write a self-contained report (figures + tables + arrays + a live `progress.log`) under `Posit/`. Run any stage with `--help` for the full flag list (`--summary {map,posterior,both}`, `--pool-mode {bounded,unrestricted}`, `--bin-mode`, `--posterior-samples`, …).
+Evaluation reports per-parameter recovery accuracy + posterior calibration; Experiment reports inferred-parameter distributions per condition (no ground truth). Both write a self-contained report (figures + tables + arrays + a live `progress.log`) under `Posit/`. Run any stage with `--help` for the full flag list (`--summary {map,posterior,both}`, `--pool-mode {bounded,unrestricted}`, `--posterior-samples`, …; Evaluation additionally takes `--bin-mode {prior,quantile}`). The Inference, Evaluation, and Experiment stages also accept `--dry-run`, which resolves the machine profile and the input paths, prints what it would read and write (flagging anything missing), and exits before any compute (no GPU, no output directories) — run it before a long job or a queue submission; the dataset-generation orchestrator (`Generate_Datasets.py`) offers the same preview.
 
 ## Data split
 
@@ -89,6 +111,8 @@ Recording length is supplied per run via the **required `--total-time-seconds`**
 ## HPC and reproducibility
 
 Generation is **non-deterministic by default** — prior sampling, particle placement, optics, and camera noise all draw fresh entropy each run — which matches the reaction-diffusion stepper itself being unseedable. A `--seed` flag opts into a deterministic base seed when one is wanted; the batch-generation scripts pass none. No scientific information is lost: the sampled parameters are persisted per task, so every (parameters, video) pair is recorded. Dataset integrity instead rests on a **global task index encoded in each file name** (`..._TASK_<tid>_<split>`), which keeps parallel fan-out, array overflow, and incremental appends from ever colliding on a filename or mixing split namespaces. The reproducibility characteristics and the task-index scheme are detailed in [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md), under the non-deterministic generation and provenance section.
+
+For running on a Slurm cluster, the [HPC operations runbook](Script_Bank/HPC/README.md) is the authoritative guide. Submissions are **dry-run first**: a unified submit helper (`Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Submit.sh`) and the generation controller both build and print the exact `sbatch` command for review, submitting only when `DRYRUN=0` is set, so a misconfigured job never reaches the queue.
 
 ## Debug mode & diagnostics
 

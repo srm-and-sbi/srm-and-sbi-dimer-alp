@@ -13,7 +13,7 @@ Three molecular species:
 
 Two reactions:
     A + A <-> B    (dimerization / dissociation; the forward rate is
-                    parameterised relative to the diffusion-limited cap)
+                    parameterized relative to the diffusion-limited cap)
     B    <-> C    (immobilization / mobilization)
 
 Functions:
@@ -80,7 +80,7 @@ def build_system(theta: np.ndarray,
           requiring the prior to encode their joint dependence.
 
     Reaction model — dimerization:
-        Dimerization (A + A -> B) is parameterised by `R_ON`, a dimensionless
+        Dimerization (A + A -> B) is parameterized by `R_ON`, a dimensionless
         ratio in (0, 1] of the macroscopic rate to the diffusion-limited cap:
 
               kappa_ON = R_ON * kappa_ON_CAP
@@ -93,13 +93,13 @@ def build_system(theta: np.ndarray,
               lamb_ON = kappa_ON / V_CAP
               V_CAP = (4/3) * pi * rho_CAP^3            (effective capture volume)
 
-        Parameterising via R_ON instead of an absolute kappa_ON guarantees
+        Parameterizing via R_ON instead of an absolute kappa_ON guarantees
         the macroscopic rate never exceeds the physically attainable
         diffusion-limited rate, regardless of how the prior is sampled.
 
     Reaction model — other reactions:
         Dissociation (B -> A + A), immobilization (B -> C), and mobilization
-        (C -> B) are parameterised by absolute macroscopic rates in counts
+        (C -> B) are parameterized by absolute macroscopic rates in counts
         per second. The corresponding microscopic rates are just the
         macroscopic rates with ReaDDy's per-second unit attached.
 
@@ -186,7 +186,7 @@ def build_system(theta: np.ndarray,
     if verbose:
         rates_by_species = dict(zip(particle_species_names, diffusion_rates))
         print(f"  Diffusion rates per species (um^2/s): {rates_by_species}")
-        print(f"  Reaction rates:")
+        print("  Reaction rates:")
         print(f"    A+A -> B (dimerization):     macroscopic={kappa_ON:.6g} um^3/s "
               f"(cap={kappa_ON_CAP:.6g}, R_ON={R_ON:.6g})")
         print(f"    B   -> A+A (dissociation):   macroscopic={kappa_OFF:.6g} 1/s")
@@ -290,7 +290,7 @@ def extract_trajectory_poses(tray,
                 Each entry is the (x, y, z) coordinate of a given particle in
                 a given frame for a given species rank. Entries are `np.nan`
                 when the particle does not exist as that species in that frame.
-                Coordinates are shifted from box-centred (ReaDDy default) to
+                Coordinates are shifted from box-centered (ReaDDy default) to
                 box-anchored (origin at the corner): each component has
                 `box_size[dim] / 2` added so all coordinates are non-negative.
         If `return_dimer_mask=True`:
@@ -365,7 +365,7 @@ def extract_trajectory_poses(tray,
             f"every frame. Refusing to emit truncated poses."
         )
 
-    # Shift coordinates from box-centred to box-anchored (origin at corner).
+    # Shift coordinates from box-centered to box-anchored (origin at corner).
     box_size = PARAMETERS.simulation.stem.box_size
     half_box = np.array([dim / 2 for dim in box_size]).reshape(1, 1, 3, 1)
     tray_poses = half_box + poses_centred

@@ -11,7 +11,7 @@ Forward pipeline:
       |
       v   Complex3DCNN (3D convolutional encoder)
       |   - 3D convs capture local spatio-temporal patterns (a particle's
-      |     PSF + its motion across a few neighbouring frames).
+      |     PSF + its motion across a few neighboring frames).
       |   - Spatial dims are halved at each layer via MaxPool3d.
       |   - Temporal dim T is preserved through the conv stack.
       |
@@ -38,7 +38,7 @@ Module contents:
                             extended to vision in Dosovitskiy et al., 2020,
                             https://arxiv.org/abs/2010.11929).
     Complex3DCNN         -- end-to-end encoder: 3D CNN backbone + optional
-                            TemporalTransformer + optional regressor head.
+                            TemporalTransformer.
 """
 
 import math
@@ -58,12 +58,12 @@ class PositionalEncoding(nn.Module):
     Adds a fixed (non-learnable) position-dependent vector to each token in an
     input sequence so that an otherwise permutation-invariant attention block
     can use order information. Sinusoidal because:
-        - it generalises to sequence lengths longer than seen at training time;
+        - it generalizes to sequence lengths longer than seen at training time;
         - it provides a continuous notion of relative position via the
           sin/cos identities.
 
     The encoding is precomputed up to `max_len` positions and registered as a
-    non-parametric buffer (saved with state_dict, but not optimised).
+    non-parametric buffer (saved with state_dict, but not optimized).
 
     Args:
         d_model: Embedding dimension. Each position gets a `d_model`-vector.
@@ -165,7 +165,7 @@ class AttentionBlock(nn.Module):
 # =============================================================================
 
 class TemporalTransformer(nn.Module):
-    """Transformer encoder that summarises a temporal sequence into a single embedding.
+    """Transformer encoder that summarizes a temporal sequence into a single embedding.
 
     A learnable "CLS" (class) token is prepended to each input sequence; after
     several attention blocks, the CLS token's final embedding serves as a
@@ -196,7 +196,7 @@ class TemporalTransformer(nn.Module):
         ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Summarise a temporal sequence to a single embedding via the CLS token.
+        """Summarize a temporal sequence to a single embedding via the CLS token.
 
         Args:
             x: Tensor `[batch, seq_len, embed_dim]` (one embedding per time step).
@@ -216,7 +216,7 @@ class TemporalTransformer(nn.Module):
 
 
 # =============================================================================
-# Complex 3D CNN encoder (+ Temporal transformer + optional regressor head)
+# Complex 3D CNN encoder (+ Temporal transformer)
 # =============================================================================
 
 class Complex3DCNN(nn.Module):
@@ -244,27 +244,17 @@ class Complex3DCNN(nn.Module):
               v
         features:        [B, C, T]
               |
-              |   3. Temporal summarisation
+              |   3. Temporal summarization
               |      ----------------------
               |      EITHER the TemporalTransformer (if `use_temporal_attention=True`),
               |      which returns the CLS-token embedding of the sequence,
               |      OR a simple temporal mean over T.
               v
         embedding:       [B, C]
-              |
-              |   4. Optional regressor head
-              |      -----------------------
-              |      In 'Simp' mode (`regress='Simp'`): two-layer MLP from
-              |      C -> 64 -> `paras` channels. Used when the network is
-              |      trained as a direct point-estimate regressor.
-              |
-              |      In 'Comp' mode (`regress='Comp'`, the default): identity.
-              |      The CLS-token embedding IS the output, suitable as a
-              |      conditioning input for a downstream MAF density estimator
-              |      that learns the full posterior p(theta | video).
-              v
-        output:          [B, paras]   ('Simp' mode)
-                  or:    [B, C]       ('Comp' mode)
+
+    The CLS-token embedding IS the output, suitable as a conditioning input for
+    a downstream MAF density estimator that learns the full posterior
+    p(theta | video).
 
     Why this architecture?
         - 3D convolutions capture LOCAL spatio-temporal features (a single
@@ -287,19 +277,10 @@ class Complex3DCNN(nn.Module):
         start_channels: Output channels of the first conv block; doubles each
             block. With `start_channels=8` and `n_conv_layers=4`, the final
             channel count is 128.
-        use_temporal_attention: If True, summarise the temporal sequence via
+        use_temporal_attention: If True, summarize the temporal sequence via
             TemporalTransformer (CLS token output). If False, average over T.
         attention_heads: Number of attention heads in each AttentionBlock.
             Must divide `start_channels * 2^(n_conv_layers-1)`.
-        paras: Output dimension of the regressor head ('Simp' mode only).
-            Typically the number of parameters to infer.
-        regress: Output mode.
-            'Simp' -> apply a regressor head, output shape `[B, paras]`.
-            'Comp' -> return the CLS-token embedding directly, shape `[B, C]`
-                       where C is the final channel count. The 'Comp' setting
-                       is used when the network is the conditioning encoder
-                       for a downstream density estimator (the embedding is
-                       what gets fed into a MAF / NPE).
         verbose: If True, print the inferred output shape and feature dim at
             construction time.
     """
@@ -312,16 +293,9 @@ class Complex3DCNN(nn.Module):
                  start_channels: int = 8,
                  use_temporal_attention: bool = True,
                  attention_heads: int = 2,
-                 paras: int = 7,
-                 regress: str = "Comp",
                  verbose: bool = False):
         super().__init__()
-        if regress not in ("Simp", "Comp"):
-            raise ValueError(
-                f"regress={regress!r} is invalid; must be 'Simp' or 'Comp'."
-            )
         self.use_temporal_attention = use_temporal_attention
-        self.regress = regress
 
         # ---- 3D CNN backbone ------------------------------------------------
         layers = []
@@ -360,23 +334,15 @@ class Complex3DCNN(nn.Module):
                 num_heads=attention_heads,
             )
 
-        # ---- Optional regressor head ('Simp' mode only) ---------------------
-        if regress == "Simp":
-            self.regressor = nn.Sequential(
-                nn.Linear(self.feature_dim, 64),
-                nn.Mish(),
-                nn.Linear(64, paras),
-            )
-
         if verbose:
             attn_part = f", {n_attn_layers} attention layers" if use_temporal_attention else ""
             print(
-                f"Complex3DCNN initialised: {n_conv_layers} CNN layers{attn_part}; "
+                f"Complex3DCNN initialized: {n_conv_layers} CNN layers{attn_part}; "
                 f"pre-pool shape {pre_pool_shape}; feature dim {self.feature_dim}"
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode a video into an embedding (or, in 'Simp' mode, into regressed parameters).
+        """Encode a video into a summary embedding.
 
         Args:
             x: Input tensor. Either:
@@ -384,8 +350,8 @@ class Complex3DCNN(nn.Module):
                 - `[B, 1, T, H, W]` (5D; channel dim already present).
 
         Returns:
-            In 'Comp' mode: `[B, feature_dim]` -- the summary embedding.
-            In 'Simp' mode: `[B, paras]` -- regressed parameter estimates.
+            `[B, feature_dim]` -- the summary embedding (the CLS-token output
+            when temporal attention is used, otherwise the temporal mean).
         """
         # Add channel dim if missing.
         if x.dim() == 4:
@@ -397,7 +363,4 @@ class Complex3DCNN(nn.Module):
             x = self.temporal_transformer(x)   # CLS token -> [B, C]
         else:
             x = torch.mean(x, dim=2)           # temporal mean -> [B, C]
-        if self.regress == "Simp":
-            x = self.regressor(x)              # [B, paras]
-        # else 'Comp': identity. Return [B, C] (the CLS-token embedding).
         return x
