@@ -69,11 +69,12 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --total-time-seconds
 
 #### Multi-GPU
 
-Training and MAP recovery auto-adapt to the GPUs they are given. Launched under
-`torchrun` with one worker per GPU, training runs data-parallel
-(`DistributedDataParallel`) and evaluation shards its EVAL videos across the
-workers, then merges the per-shard results into one report. With a single GPU
-the same code collapses to the original single-GPU path — no flags to change.
+Training, evaluation, and the real-data application auto-adapt to the GPUs they
+are given. Launched under `torchrun` with one worker per GPU, training runs
+data-parallel (`DistributedDataParallel`); evaluation shards its EVAL videos
+across the workers and the experiment stage shards its `(condition, cell)` work,
+each then merging the per-shard results into one report. With a single GPU the
+same code collapses to the original single-GPU path — no flags to change.
 The GPU count is read from the allocation (`SLURM_GPUS_ON_NODE`); the HPC
 submitters wrap the `torchrun` launch, so on a whole-node `gpu` allocation a run
 uses every GPU automatically. Three controls tune the behavior:

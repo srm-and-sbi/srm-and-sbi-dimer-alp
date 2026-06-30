@@ -45,7 +45,7 @@ from srm_and_sbi_dimer_alp.evaluation import (
     posterior_summary,
     _theta_repr,
 )
-from srm_and_sbi_dimer_alp.inference_support import get_device, load_posterior
+from srm_and_sbi_dimer_alp.inference_support import load_posterior, resolve_topology
 from srm_and_sbi_dimer_alp.io import convert_video_dtype
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming, build_prior
 from srm_and_sbi_dimer_alp.utils import console_log_context
@@ -88,6 +88,189 @@ def _aggregate_by_kind(inferred_log10, kind_index, cell_arr, kinds, mode, n_para
         else:  # pooled
             out[kind] = kinf
     return out
+
+
+def _shard_array_path(out_dir: Path, rank: int, world_size: int) -> Path:
+    """Path of one worker's partial experiment arrays in a multi-GPU sharded run."""
+    return out_dir / f"_shard_{rank:02d}_of_{world_size:02d}.npz"
+
+
+def write_experiment_outputs(reporter, args, eval_cfg, array_path: Path,
+                             scores, inferred_log10, kind_index, cell_of, chunk_of,
+                             post_quantiles, kinds, run_start) -> None:
+    """Save the inferred-theta arrays and write the report + figures.
+
+    Shared by the single-process path and the ``--merge`` combine step, so both
+    emit an identical report. ``post_quantiles`` may be a list (built by the
+    estimation loop) or an array (concatenated by a merge); both are handled.
+    """
+    do_map = args.summary in ("map", "both")
+    do_posterior = args.summary in ("posterior", "both")
+    posterior_samples = args.posterior_samples or eval_cfg.posterior_samples
+
+    scores = np.asarray(scores)
+    inferred_log10 = np.asarray(inferred_log10)
+    kind_index = np.asarray(kind_index)
+    cell_of = np.asarray(cell_of)
+    chunk_of = np.asarray(chunk_of)
+    n_estimates = inferred_log10.shape[0]
+    # (N, D, 5) posterior quantiles [Q05,Q25,Q50,Q75,Q95] when View B was requested.
+    post_arr = np.asarray(post_quantiles)
+    post_q = post_arr if (do_posterior and post_arr.size > 0) else None
+
+    # ---- Save the inferred-theta arrays ----------------------------------
+    save_arrays = dict(
+        inferred_log10=inferred_log10, scores=scores, kind_index=kind_index,
+        cell=cell_of, chunk=chunk_of, kinds=np.asarray(kinds))
+    if post_q is not None:
+        save_arrays["posterior_quantiles"] = post_q
+    np.savez_compressed(str(array_path), **save_arrays)
+    print(f"\nExperiment MAP arrays saved to {array_path}")
+
+    # ---- Report ----------------------------------------------------------
+    inferred_by_kind = _aggregate_by_kind(
+        inferred_log10, kind_index, cell_of, kinds,
+        args.aggregation, len(PARAMETERIZATION))
+    agg_desc = ("pooled over (cell x chunk)" if args.aggregation == "pooled"
+                else "one point per cell (median over its chunks)")
+    reporter.check("estimates_nonempty", n_estimates > 0,
+                   f"{n_estimates} MAP estimates over real videos",
+                   note="at least one experimental chunk was MAP-estimated.")
+    reporter.stat("conditions", len(kinds))
+    reporter.stat("total_estimates", n_estimates,
+                  note="number of (cell, chunk) windows MAP-estimated across all conditions.")
+    reporter.stat("aggregation", args.aggregation, note=f"report distribution view: {agg_desc}.")
+    for kind in kinds:
+        reporter.stat(f"n[{kind}]", int(inferred_by_kind[kind].shape[0]),
+                      note=f"estimates for condition {kind}.")
+    if n_estimates:
+        reporter.stat("mean_log_prob", float(np.mean(scores)),
+                      note="mean MAP log-density at the optimized mode (optimization "
+                           "diagnostic; not a calibration/quality metric).")
+
+    headers, rows = experiment_table(PARAMETERIZATION, inferred_by_kind, kinds)
+    reporter.table("Inferred theta by condition (log10 units)", headers, rows,
+                   note=f"no ground truth for real data; values are the distribution "
+                        f"of inferred MAP theta per condition ({agg_desc}). Compare "
+                        f"conditions to read out parameter differences.")
+
+    if post_q is not None:
+        reporter.stat("posterior_samples", posterior_samples,
+                      note="samples per chunk used to summarize the posterior (View B).")
+
+    if reporter.dump and n_estimates:
+        for i, para in enumerate(PARAMETERIZATION):
+            key = para["KEY"]
+            label = para.get("LABEL") or key
+            prior_range = para["PRIOR_RANGE"]
+            values = ({kind: inferred_by_kind[kind][:, i] for kind in kinds}
+                      if do_map else None)
+            # View B: per chunk, [MAP, posterior median, q25, q75] by kind.
+            by_kind_post = None
+            if post_q is not None:
+                by_kind_post = {}
+                for ki, kind in enumerate(kinds):
+                    m = kind_index == ki
+                    map_col = inferred_log10[m][:, i:i + 1]               # (n, 1)
+                    q_cols = post_q[m][:, i][:, [2, 1, 3]]                # (n, 3): med,q25,q75
+                    by_kind_post[kind] = np.hstack([map_col, q_cols])    # (n, 4)
+            reporter.save_figure(
+                f"experiment_{key}",
+                figure_experiment_combined(
+                    values, by_kind_post, prior_range, label, seed=args.seed,
+                    show_map=do_map, show_posterior=(post_q is not None)),
+                caption=f"{key} ({label}). View A (MAP): per-condition distribution of "
+                        f"inferred MAP theta ({agg_desc}). View B (posterior): each "
+                        f"chunk's posterior median +/- IQR per condition (within-chunk "
+                        f"uncertainty). A panel stamped 'not computed' marks a view the "
+                        f"--summary option omitted.",
+            )
+
+    reporter.summary()
+    reporter.write_report()
+    print(f"\nTotal elapsed: {time.time() - run_start:.1f}s")
+
+
+def _save_shard(topo, out_dir: Path, scores, inferred_log10, kind_index, cell_of,
+                chunk_of, post_quantiles, kinds, run_start) -> None:
+    """Write this worker's partial experiment arrays (multi-GPU sharded run).
+
+    The report is produced later by the ``--merge`` step, once every shard
+    exists; this writes no report. A worker that drew no cells writes no shard
+    (so ``--merge`` simply sees fewer files), avoiding empty-array concatenation.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if len(scores) == 0:
+        print(f"\n[rank {topo.rank}/{topo.world_size}] no cells assigned -- "
+              f"no shard written.", flush=True)
+        return
+    arrays = dict(
+        scores=np.asarray(scores),
+        inferred_log10=np.asarray(inferred_log10),
+        kind_index=np.asarray(kind_index),
+        cell=np.asarray(cell_of),
+        chunk=np.asarray(chunk_of),
+        kinds=np.asarray(kinds),
+    )
+    if post_quantiles:
+        arrays["posterior_quantiles"] = np.asarray(post_quantiles)
+    path = _shard_array_path(out_dir, topo.rank, topo.world_size)
+    np.savez_compressed(str(path), **arrays)
+    print(f"\n[rank {topo.rank}/{topo.world_size}] shard saved: {path} "
+          f"({arrays['scores'].shape[0]} estimates) in {time.time() - run_start:.1f}s. "
+          f"Run the --merge step once all shards finish.", flush=True)
+
+
+def _merge_shards(reporter, args, eval_cfg, out_dir: Path,
+                  array_path: Path, run_start) -> None:
+    """Combine all per-shard experiment arrays into the final report (no estimation).
+
+    Reads every ``_shard_*_of_*.npz`` in the output directory, concatenates the
+    per-(cell, chunk) arrays (order-independent -- the report aggregates by kind),
+    writes the final report + figures + combined ``.npz`` via
+    :func:`write_experiment_outputs`, then removes the shard files.
+    """
+    shard_paths = sorted(out_dir.glob("_shard_*_of_*.npz"))
+    if not shard_paths:
+        raise SystemExit(
+            f"--merge: no shard files (_shard_*_of_*.npz) found in {out_dir}")
+    print(f"Merging {len(shard_paths)} shard file(s) from {out_dir}", flush=True)
+    scores, inferred, kidx, cell, chunk, quant = [], [], [], [], [], []
+    kinds = None
+    have_quant = True
+    n_used = 0
+    for shard_path in shard_paths:
+        with np.load(str(shard_path)) as data:
+            if data["scores"].shape[0] == 0:
+                continue   # defensive: a zero-estimate shard contributes nothing
+            n_used += 1
+            scores.append(data["scores"])
+            inferred.append(data["inferred_log10"])
+            kidx.append(data["kind_index"])
+            cell.append(data["cell"])
+            chunk.append(data["chunk"])
+            if kinds is None:
+                kinds = [str(k) for k in data["kinds"]]
+            if "posterior_quantiles" in data:
+                quant.append(data["posterior_quantiles"])
+            else:
+                have_quant = False   # a populated shard genuinely computed no View B
+    if not scores:
+        raise SystemExit(
+            f"--merge: every shard in {out_dir} was empty (no estimates)")
+    scores = np.concatenate(scores, axis=0)
+    inferred = np.concatenate(inferred, axis=0)
+    kidx = np.concatenate(kidx, axis=0)
+    cell = np.concatenate(cell, axis=0)
+    chunk = np.concatenate(chunk, axis=0)
+    post_quantiles = np.concatenate(quant, axis=0) if (have_quant and quant) else np.asarray([])
+    print(f"Merged {scores.shape[0]} estimates from {n_used} shard(s).", flush=True)
+    write_experiment_outputs(reporter, args, eval_cfg, array_path,
+                             scores, inferred, kidx, cell, chunk,
+                             post_quantiles, kinds, run_start)
+    for shard_path in shard_paths:
+        shard_path.unlink()
+    print(f"Removed {len(shard_paths)} shard file(s).", flush=True)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -233,21 +416,31 @@ def main(args: argparse.Namespace) -> None:
         run_label=f"{paths.project_alias}_{timing_label}",
         timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     )
+    # --merge: combine the per-shard arrays from a multi-GPU sharded run into the
+    # final report, then exit (no estimation, no GPU, no posterior needed).
+    if args.merge:
+        _merge_shards(reporter, args, eval_cfg, out_dir, array_path, run_start)
+        return
+
     reporter.check_file("posterior", posterior_path)
 
-    device = get_device()
+    topo = resolve_topology()
+    device = topo.device
     vista_device = torch.device("cpu")
     posterior = load_posterior(posterior_path)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
-        # Rebuild the prior on this device for bounded rejection sampling, matching
-        # Evaluation.py (avoids a device mismatch if this GPU index differs from the
-        # one the posterior was saved on).
+        # Rebuild the prior on THIS worker's device for bounded rejection sampling.
+        # Under multi-GPU sharding each rank binds its own cuda:local_rank, so reusing
+        # the pickled _prior (saved on cuda:0) would mix devices; rebuilding is
+        # equivalent on the single-GPU path. Mirrors Evaluation.py.
         posterior.prior = build_prior(device=str(device))
 
     # ---- Output dir + progress log + stale-figure clear ------------------
     out_dir.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(out_dir / "figures", ignore_errors=True)
+    # Only rank 0 / a single worker clears the shared figures dir (avoid a race).
+    if topo.is_main:
+        shutil.rmtree(out_dir / "figures", ignore_errors=True)
 
     def log_progress(progress_fh, message: str) -> None:
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -262,18 +455,36 @@ def main(args: argparse.Namespace) -> None:
             progress_fh.write(f"           {message}\n")
             progress_fh.flush()
 
-    try:
-        progress_fh = open(progress_path, "w", encoding="utf-8")
-    except OSError as exc:
-        print(f"WARNING: cannot open progress log {progress_path} ({exc}).", flush=True)
+    # Under sharding all workers share out_dir; only rank 0 writes the progress
+    # log (concurrent truncating writers would clobber each other). Other ranks
+    # still echo progress to their own stdout (captured in the Slurm log).
+    if topo.is_distributed and not topo.is_main:
         progress_fh = None
+    else:
+        try:
+            progress_fh = open(progress_path, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"WARNING: cannot open progress log {progress_path} ({exc}).", flush=True)
+            progress_fh = None
     step_log = (lambda m: log_file_only(progress_fh, m)) if debug_log else None
+
+    # ---- This worker's (kind, cell) shard --------------------------------
+    # Flatten the (kind, cell) work items and split across workers round-robin
+    # (a single worker takes them all). Each cell's chunks stay on one worker; the
+    # report aggregates by kind, so per-shard results merge order-independently.
+    flat_work = [(ki, cell) for ki, kind in enumerate(kinds)
+                 for cell in cells_by_kind[kind]]
+    my_work = set(w for i, w in enumerate(flat_work)
+                  if i % topo.world_size == topo.rank)
+    my_estimates = len(my_work) * n_chunks
 
     # ---- MAP estimation over (kind, cell, chunk) -------------------------
     scores, inferred_log10, post_quantiles = [], [], []
     kind_index, cell_of, chunk_of = [], [], []
+    shard_note = (f" [shard rank {topo.rank}/{topo.world_size}: {len(my_work)} of "
+                  f"{len(flat_work)} cells]" if topo.is_distributed else "")
     log_progress(progress_fh,
-                 f"START Experiment MAP: {total_estimates} estimates "
+                 f"START Experiment MAP: {my_estimates} estimates{shard_note} "
                  f"({len(kinds)} kinds, {n_chunks} chunks/video; pool={theta_prex_size}, "
                  f"elites={elite_prex_size}, steps={numb_steps}; summary={args.summary}).")
     loop_start = time.time()
@@ -281,6 +492,8 @@ def main(args: argparse.Namespace) -> None:
     try:
         for ki, kind in enumerate(kinds):
             for cell in cells_by_kind[kind]:
+                if (ki, cell) not in my_work:
+                    continue
                 tif_path = paths.experiment_video_path(kind, cell, span, data_bank_root)
                 if not tif_path.exists():
                     log_progress(progress_fh, f"SKIP {kind} cell {cell}: file missing "
@@ -321,9 +534,9 @@ def main(args: argparse.Namespace) -> None:
                     done += 1
                     elapsed = time.time() - loop_start
                     avg = elapsed / done
-                    eta = avg * (total_estimates - done)
+                    eta = avg * (my_estimates - done)
                     log_progress(progress_fh,
-                                 f"{kind} cell {cell} chunk {c} | {done}/{total_estimates} | "
+                                 f"{kind} cell {cell} chunk {c} | {done}/{my_estimates} | "
                                  f"log_prob={score:+.3f} | elapsed={elapsed:.1f}s | "
                                  f"avg={avg:.1f}s | ETA={eta:.0f}s")
                     if debug_log:
@@ -331,90 +544,23 @@ def main(args: argparse.Namespace) -> None:
                 log_progress(progress_fh, f"{kind} cell {cell} complete "
                                           f"({n_cell_chunks} chunks in "
                                           f"{time.time() - cell_start:.1f}s).")
-        log_progress(progress_fh, f"DONE: {done}/{total_estimates} estimates in "
+        log_progress(progress_fh, f"DONE: {done}/{my_estimates} estimates in "
                                   f"{time.time() - loop_start:.1f}s.")
     finally:
         if progress_fh is not None:
             progress_fh.close()
 
-    scores = np.asarray(scores)
-    inferred_log10 = np.asarray(inferred_log10)
-    kind_index = np.asarray(kind_index)
-    n_estimates = inferred_log10.shape[0]
-    # (N, D, 5) posterior quantiles [Q05,Q25,Q50,Q75,Q95] when View B was requested.
-    post_q = np.asarray(post_quantiles) if (do_posterior and post_quantiles) else None
-
-    # ---- Save the inferred-theta arrays ----------------------------------
-    save_arrays = dict(
-        inferred_log10=inferred_log10, scores=scores, kind_index=kind_index,
-        cell=np.asarray(cell_of), chunk=np.asarray(chunk_of), kinds=np.asarray(kinds))
-    if post_q is not None:
-        save_arrays["posterior_quantiles"] = post_q   # [Q05,Q25,Q50,Q75,Q95]
-    np.savez_compressed(str(array_path), **save_arrays)
-    print(f"\nExperiment MAP arrays saved to {array_path}")
-
-    # ---- Report ----------------------------------------------------------
-    inferred_by_kind = _aggregate_by_kind(
-        inferred_log10, kind_index, np.asarray(cell_of), kinds,
-        args.aggregation, len(PARAMETERIZATION))
-    agg_desc = ("pooled over (cell x chunk)" if args.aggregation == "pooled"
-                else "one point per cell (median over its chunks)")
-    reporter.check("estimates_nonempty", n_estimates > 0,
-                   f"{n_estimates} MAP estimates over real videos",
-                   note="at least one experimental chunk was MAP-estimated.")
-    reporter.stat("conditions", len(kinds))
-    reporter.stat("total_estimates", n_estimates,
-                  note="number of (cell, chunk) windows MAP-estimated across all conditions.")
-    reporter.stat("aggregation", args.aggregation, note=f"report distribution view: {agg_desc}.")
-    for kind in kinds:
-        reporter.stat(f"n[{kind}]", int(inferred_by_kind[kind].shape[0]),
-                      note=f"estimates for condition {kind}.")
-    if n_estimates:
-        reporter.stat("mean_log_prob", float(np.mean(scores)),
-                      note="mean MAP log-density at the optimized mode (optimization "
-                           "diagnostic; not a calibration/quality metric).")
-
-    headers, rows = experiment_table(PARAMETERIZATION, inferred_by_kind, kinds)
-    reporter.table("Inferred theta by condition (log10 units)", headers, rows,
-                   note=f"no ground truth for real data; values are the distribution "
-                        f"of inferred MAP theta per condition ({agg_desc}). Compare "
-                        f"conditions to read out parameter differences.")
-
-    if post_q is not None:
-        reporter.stat("posterior_samples", posterior_samples,
-                      note="samples per chunk used to summarize the posterior (View B).")
-
-    if reporter.dump and n_estimates:
-        for i, para in enumerate(PARAMETERIZATION):
-            key = para["KEY"]
-            label = para.get("LABEL") or key
-            prior_range = para["PRIOR_RANGE"]
-            values = ({kind: inferred_by_kind[kind][:, i] for kind in kinds}
-                      if do_map else None)
-            # View B: per chunk, [MAP, posterior median, q25, q75] by kind.
-            by_kind_post = None
-            if post_q is not None:
-                by_kind_post = {}
-                for ki, kind in enumerate(kinds):
-                    m = kind_index == ki
-                    map_col = inferred_log10[m][:, i:i + 1]               # (n, 1)
-                    q_cols = post_q[m][:, i][:, [2, 1, 3]]                # (n, 3): med,q25,q75
-                    by_kind_post[kind] = np.hstack([map_col, q_cols])    # (n, 4)
-            reporter.save_figure(
-                f"experiment_{key}",
-                figure_experiment_combined(
-                    values, by_kind_post, prior_range, label, seed=args.seed,
-                    show_map=do_map, show_posterior=(post_q is not None)),
-                caption=f"{key} ({label}). View A (MAP): per-condition distribution of "
-                        f"inferred MAP theta ({agg_desc}). View B (posterior): each "
-                        f"chunk's posterior median +/- IQR per condition (within-chunk "
-                        f"uncertainty). A panel stamped 'not computed' marks a view the "
-                        f"--summary option omitted.",
-            )
-
-    reporter.summary()
-    reporter.write_report()
-    print(f"\nTotal elapsed: {time.time() - run_start:.1f}s")
+    # ---- Write outputs ---------------------------------------------------
+    # One worker (world_size == 1) writes the final report directly. Multiple
+    # workers each write their partial arrays; the separate --merge step, run by
+    # the launcher once all shards finish, combines them into the report.
+    if topo.is_distributed:
+        _save_shard(topo, out_dir, scores, inferred_log10, kind_index, cell_of,
+                    chunk_of, post_quantiles, kinds, run_start)
+    else:
+        write_experiment_outputs(reporter, args, eval_cfg, array_path,
+                                 scores, inferred_log10, kind_index, cell_of,
+                                 chunk_of, post_quantiles, kinds, run_start)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -495,6 +641,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--debug-dump", action="store_true",
                         help="Implies --debug; tees the console transcript to "
                              "Labor/Debug/<run>/Experiment/console.log.")
+    parser.add_argument(
+        "--merge", action="store_true",
+        help="Combine-only mode: read the per-shard .npz files written by a "
+             "multi-GPU sharded run (in this run's experiment output directory), "
+             "concatenate them, and write the final report + figures + combined "
+             ".npz, then exit. Does no estimation and needs no GPU; the launcher "
+             "runs it once after the sharded workers finish. Single-GPU runs never use it.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate configuration and inputs, print what would be read/written, then exit "
                              "without running the stage (no GPU, no compute). Use before a queue submission or a long local run.")

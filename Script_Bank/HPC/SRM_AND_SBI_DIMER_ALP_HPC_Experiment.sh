@@ -2,11 +2,15 @@
 # =============================================================================
 # Slurm HPC application submitter: MAP estimation on real microscopy videos.
 # =============================================================================
-# Single GPU node. Reads the trained posterior + the .tif
-# recordings under <data_bank>/Experiment/, writes inferred-parameter
+# Adapts to the allocated GPUs: with >1 GPU it shards the (kind, cell) work across
+# one worker per GPU (torchrun) then merges the per-shard results into one report;
+# with 1 GPU it is the original single-GPU path. Reads the trained posterior + the
+# .tif recordings under <data_bank>/Experiment/, writes inferred-parameter
 # distributions per condition (Posit/..._MAP_Experiment/).
 # Overridable via --export: KINDS (e.g. ALP,BET), MAX_CELLS (0=all),
-#   CHUNK_STEP (seconds), SUMMARY (map|posterior|both), POOL_MODE, TOTAL_TIME.
+#   CHUNK_STEP (seconds), SUMMARY (map|posterior|both), POOL_MODE, TOTAL_TIME,
+#   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated). A worker that
+#   draws no cells writes no shard.
 #   Non-deterministic (no seed).
 # Submit from the repo root and forward REPO: Slurm spools this script to
 # /var/spool, so the child must be told where the repo is (--export=ALL,REPO=$PWD).
@@ -80,11 +84,22 @@ SUMMARY="${SUMMARY:-both}"
 POOL_MODE="${POOL_MODE:-bounded}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 
-echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP}s summary=${SUMMARY} seed=None | node $(hostname) ==="
+# GPU count for sharding: SRM_AND_SBI_GPUS override, else allocated GPUs, else 1.
+GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
+EXP_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py"
+EXP_ARGS=( --kinds "$KINDS" --max-cells "$MAX_CELLS" --chunk-step-seconds "$CHUNK_STEP"
+           --summary "$SUMMARY" --pool-mode "$POOL_MODE" --total-time-seconds "$TOTAL_TIME" )
 
-python -u "$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py" \
-    --kinds "$KINDS" --max-cells "$MAX_CELLS" --chunk-step-seconds "$CHUNK_STEP" \
-    --summary "$SUMMARY" --pool-mode "$POOL_MODE" \
-    --total-time-seconds "$TOTAL_TIME"
+echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP}s summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s gpus=${GPUS} seed=None | node $(hostname) ==="
+
+if [ "${GPUS:-1}" -gt 1 ]; then
+    # Shard the (kind, cell) work across $GPUS workers (one GPU each), then merge
+    # the per-shard arrays into one report. A worker that draws no cells writes no shard.
+    torchrun --standalone --nproc_per_node="$GPUS" "$EXP_PY" "${EXP_ARGS[@]}"
+    python -u "$EXP_PY" "${EXP_ARGS[@]}" --merge
+else
+    # Single GPU: the original path (writes the report directly; no merge).
+    python -u "$EXP_PY" "${EXP_ARGS[@]}"
+fi
 
 echo "=== Experiment complete ==="

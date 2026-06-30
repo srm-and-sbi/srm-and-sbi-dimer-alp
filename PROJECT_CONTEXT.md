@@ -260,13 +260,15 @@ which otherwise dominates the per-epoch wall time. The worker count defaults to
 half the available CPU cores (job-scheduler aware), so it scales with the node
 automatically; a positive value in the machine profile pins it explicitly.
 
-**Multi-GPU scaling.** Training and MAP recovery adapt to the GPUs they are
-given. Launched with one worker per GPU (via `torchrun`), training runs
-data-parallel through `DistributedDataParallel` — each worker holds a replica,
-processes its own shard of every batch, and synchronizes gradients each step,
-with `SyncBatchNorm` sharing batch statistics across workers by default — while
-MAP recovery partitions the held-out videos across the workers and merges the
-per-shard results into one report. The single-GPU run is the collapse case of
+**Multi-GPU scaling.** Training, MAP-recovery evaluation, and the real-data
+application adapt to the GPUs they are given. Launched with one worker per GPU
+(via `torchrun`), training runs data-parallel through `DistributedDataParallel` —
+each worker holds a replica, processes its own shard of every batch, and
+synchronizes gradients each step, with `SyncBatchNorm` sharing batch statistics
+across workers by default — while MAP-recovery evaluation partitions the held-out
+videos across the workers, and the experiment stage partitions its
+`(condition, cell)` work the same way, each merging the per-shard results into
+one report. The single-GPU run is the collapse case of
 the same code: with one worker the distributed wrappers reduce to no-ops and the
 loop is exactly the original single-GPU path, so behavior is unchanged where
 only one GPU is present. The GPU count is read from the allocation, capped by an
