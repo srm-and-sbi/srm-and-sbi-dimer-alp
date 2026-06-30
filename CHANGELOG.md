@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.3 - 2026-06-30
+
+Exposes the inference `--resurrect` mode through the HPC submission path, so a
+wall-limited training run can be continued across successive jobs without leaving
+the standard submitter. No change to the scientific behavior or to the inference
+algorithm.
+
+### Added
+
+- The HPC inference submitter forwards a `RESURRECT` knob to the Prime entry
+  point's `--resurrect` flag. `Inference.sh` reads `RESURRECT` from the
+  environment (set `1` to load the existing checkpoint and continue training;
+  unset for a fresh run) and appends `--resurrect` to the training command,
+  forwarded on both the single-GPU and the `torchrun` data-parallel launches; the
+  unified `Submit.sh` lists `RESURRECT` among the inference knobs, so it appears
+  in the dry-run preview and the explicit `--export`. The flag already existed on
+  the Prime `Inference.py` (and in the validation smoke test); only the HPC
+  forwarding was missing, which left wall-limited chaining unreachable from the
+  submitter.
+
+### Fixed
+
+- The resurrect and final-model checkpoint reloads now stage through CPU
+  (`torch.load(..., map_location="cpu")`) before `load_state_dict` places the
+  weights onto each rank's device. The load previously targeted the saving rank's
+  recorded device, which under a multi-GPU resurrect transiently concentrated one
+  checkpoint copy per rank on a single GPU; CPU staging removes that concentration
+  and makes the load independent of the saved device index. Weights are unchanged.
+
 ## 0.2.2 - 2026-06-30
 
 Completes the multi-GPU story across the GPU stages: the real-data application
