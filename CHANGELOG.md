@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.1 - 2026-06-30
+
+Operational hardening of the HPC workflow, a dry-run-first submission path, and a
+documentation and code-hygiene pass on top of the multi-GPU release. The
+pipeline's scientific behavior is unchanged.
+
+### Added
+
+- A unified, dry-run-first submission helper for every HPC stage
+  (`Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Submit.sh`). It builds the exact
+  `sbatch` command — the resolved repository root, the data-file-pattern job name
+  with the rendered timing label, and a comma-safe `--export` — and prints it
+  without submitting unless `DRYRUN=0` is set, so the recipe, the naming, and the
+  configuration cannot be mistyped at submit time. A multi-value condition list is
+  carried through the exported environment rather than the comma-split `--export`.
+- A `--dry-run` configuration and input preview on the training, evaluation, and
+  real-data application entry points: it resolves the machine profile and the
+  input paths, reports what would be read and written (flagging anything missing),
+  and exits before any GPU use or compute, creating no output directories. The
+  dataset-generation orchestrator already offered an equivalent preview.
+- An HPC operations runbook (`Script_Bank/HPC/README.md`) consolidating the stage
+  and partition map, the submission recipe, the job and log naming convention, the
+  hardware layouts to replicate, and the dry-run-first workflow.
+
+### Changed
+
+- The HPC batch scripts resolve the repository root robustly under the scheduler's
+  script spooling — an explicit forwarded root, the submit directory, or the script
+  location, each validated against the package layout — and fail loud with guidance
+  when it cannot be located. Job and log names follow the naming convention shared
+  with the theta and video data files.
+- Internal hygiene: removed dead code carried over from earlier development (an
+  unused regressor head and its configuration fields, an unused sampling helper, and
+  unused imports) and renamed an internal estimation function to the package's
+  snake_case convention.
+
+### Fixed
+
+- The per-epoch replay loss now uses a dedicated augmentation-disabled loader, so
+  the replay measurement excludes the spatial augmentation applied during training
+  (the previous in-place toggle did not hold under persistent data-loader workers).
+- A run requesting fewer than one epoch is now rejected immediately rather than
+  failing later on a checkpoint that was never written.
+- Removed private host, login, and machine-profile values from the bundled
+  notebook.
+
 ## 0.2.0 - 2026-06-29
 
 Multi-GPU support for the compute-heavy inference and evaluation stages, enabling

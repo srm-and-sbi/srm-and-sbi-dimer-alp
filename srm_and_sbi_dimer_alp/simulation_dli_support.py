@@ -36,7 +36,7 @@ Module contents:
 
     Transition matrices (CTMC and DTMC)
         compute_matrices          (CTMC generator Q and DTMC stochastic matrix P
-                                   from photobleaching + neighbour-decay rates)
+                                   from photobleaching + neighbor-decay rates)
 
     Top-level orchestrator
         simulate_dli              (theta + particle poses -> fully noised video)
@@ -206,7 +206,7 @@ def generate_frames(intensity: np.ndarray,
 def _erf(x: np.ndarray, bounds: np.ndarray, sqrt_2sigma: np.ndarray) -> np.ndarray:
     """Integrate a Gaussian PSF along ONE coordinate over a pixel grid.
 
-    For each emitter j with centre x_j and width sigma_j, the integral of
+    For each emitter j with center x_j and width sigma_j, the integral of
     the 1D Gaussian N(x; x_j, sigma_j) over the pixel interval
     `[bounds[i], bounds[i+1]]` is
 
@@ -238,7 +238,7 @@ def _erf(x: np.ndarray, bounds: np.ndarray, sqrt_2sigma: np.ndarray) -> np.ndarr
     X = np.moveaxis(x, 0, 2)
     # Reshape sqrt_2sigma to (1, nemitters, 1) for broadcast over bounds and frames.
     sqrt_2sigma = np.asarray(sqrt_2sigma).reshape(1, -1, 1)
-    # Normalised distance from each pixel boundary: (n_bounds, nemitters, nframes).
+    # Normalized distance from each pixel boundary: (n_bounds, nemitters, nframes).
     X = (bounds[:, None, None] - X) / sqrt_2sigma
     # Adjacent-boundary erf difference -> (n_pixels, nemitters, nframes).
     return (erf(X[:-1, :, :]) - erf(X[1:, :, :])) / 2
@@ -370,7 +370,7 @@ def compute_brightness(brightness_quantile: np.ndarray,
             0.75, 0.9, 0.95]). The state-0 quantile is conventionally 0
             (photobleached state).
         scale, shape, loc: Lognormal distribution parameters
-            (`scipy.stats.lognorm` parameterisation).
+            (`scipy.stats.lognorm` parameterization).
 
     Returns:
         Array of integer brightness values, one per quantile.
@@ -385,7 +385,7 @@ def compute_brightness_probability(brightness_quantile: np.ndarray) -> np.ndarra
     0.1, 0.25, 0.5, 0.75, 0.9, 0.95]), this assigns each state a probability
     proportional to its surrounding interval width. The state-0 (photo-
     bleached) state gets probability 0 (no emitter starts photobleached).
-    The result is normalised to sum to 1.
+    The result is normalized to sum to 1.
 
     Args:
         brightness_quantile: 1D array of quantile values.
@@ -509,7 +509,7 @@ def compute_matrices(mu_pc: float,
 
               Q[i, j] = lambda_rate * exp(-gamma_penalty * |brightness[i] - brightness[j]|)
 
-          i.e. fast for neighbouring brightness levels, slow for far-apart ones.
+          i.e. fast for neighboring brightness levels, slow for far-apart ones.
         - Diagonal: `Q[i, i] = -sum_j Q[i, j]` (CTMC row-sum convention).
         - State 0 (photobleached) is absorbing: no transitions OUT of state 0.
 
@@ -581,11 +581,6 @@ def compute_matrices(mu_pc: float,
 # =============================================================================
 # Private helpers
 # =============================================================================
-
-def _sample_categorical(p: np.ndarray, size: int, rng: np.random.Generator) -> np.ndarray:
-    """Sample `size` integers from a categorical distribution with probabilities `p`."""
-    return rng.choice(p.size, p=p, size=size)
-
 
 def _propagate_chain(states: np.ndarray,
                      P: np.ndarray,

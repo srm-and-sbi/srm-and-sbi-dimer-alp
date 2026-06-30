@@ -1,14 +1,16 @@
 # Single-GPU timing benchmark — srm-and-sbi-dimer-alp
 
 > Scope: **single GPU per machine** (one device used, no DataParallel/sharding).
-> Multi-GPU results will live in a companion `BENCHMARKS_Multi_GPU.md` for a
-> direct single-vs-multi comparison.
+> These are the dated single-GPU baseline numbers. Data-parallel training and
+> MAP-recovery sharding shipped in 0.2.0; their timings belong in a companion
+> `BENCHMARKS_Multi_GPU.md` so the single-vs-multi comparison stays a direct one.
 
 ## Baseline (2026-06-18)
 
 Cross-machine timing for the standard check: **16 train / 4 test / 2 eval tasks @
-10 sims/task**, batch size 32, 10 epochs. **Single GPU per machine** (multi-GPU
-not yet implemented); `num_workers` = 4 (workstations) / 8 (HPC node). HPC times are
+10 sims/task**, batch size 32, 10 epochs. **Single GPU per machine** (one device
+used, no data-parallel training or sharding, to fix this baseline);
+`num_workers` = 4 (workstations) / 8 (HPC node). HPC times are
 **run-only** (`sacct Elapsed` / script `Total elapsed`; Slurm queue excluded).
 These timings characterize the single-GPU configuration with current data-I/O
 (worker-count) and compile settings; the optimization opportunities below are
@@ -50,4 +52,4 @@ measured against them.
 ### Known optimization opportunities (to be measured against this baseline)
 1. **Data I/O:** the HPC node's `num_workers` 8 → 16 → 32; re-measure inference steady epoch.
 2. **Compile:** add a persistent Inductor cache and a `--compile/--no-compile` flag, then re-measure the cold-start cost.
-3. **Multi-GPU:** a multi-GPU configuration is in active development — sharding MAP recovery across the node's GPUs and data-parallel training; timings will appear in the companion `BENCHMARKS_Multi_GPU.md`.
+3. **Multi-GPU:** data-parallel training and MAP-recovery sharding across the node's GPUs shipped in 0.2.0; their timings belong in the companion `BENCHMARKS_Multi_GPU.md`, measured against this single-GPU baseline.

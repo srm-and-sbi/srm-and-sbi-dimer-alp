@@ -11,10 +11,18 @@
 #   default = all allocated). Workers are auto-capped at EVAL_TASKS (an idle
 #   worker would do no recovery), so EVAL_TASKS<=1 runs the single-process path.
 #   Non-deterministic (no seed).
+# Submit from the repo root and forward REPO: Slurm spools this script to
+# /var/spool, so the child must be told where the repo is (--export=ALL,REPO=$PWD).
+# --job-name follows the data-file naming convention
+# SRM_AND_SBI_DIMER_ALP_<timing_label>_Evaluation; with no TOTAL_TIME set the
+# launcher default (2.0 s) gives timing_label 2S_50FPS, so swap the token (e.g.
+# 5S_50FPS) whenever you pass TOTAL_TIME=5.0. POOL_MODE defaults to bounded (a
+# trained posterior); use POOL_MODE=unrestricted for an undertrained/smoke posterior.
 # Example:
-#   sbatch --export=ALL,EVAL_TASKS=1,SUMMARY=both SRM_AND_SBI_DIMER_ALP_HPC_Evaluation.sh
+#   cd /path/to/srm-and-sbi-dimer-alp
+#   sbatch --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Evaluation --export=ALL,REPO=$PWD,EVAL_TASKS=1,SUMMARY=both Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Evaluation.sh
 # -----------------------------------------------------------------------------
-#SBATCH --job-name=SRM_AND_SBI_DIMER_ALP_HPC_Evaluation
+#SBATCH --job-name=SRM_AND_SBI_DIMER_ALP_Evaluation   # fallback; per-run --job-name (with timing_label) overrides this
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
@@ -26,18 +34,40 @@
 
 set -eo pipefail
 
+# Locate the repo root robustly. Slurm runs a SPOOLED COPY of this batch script
+# from /var/spool, so BASH_SOURCE is unreliable for a directly-submitted job.
+# Resolve REPO from, in order: an explicit REPO (e.g. --export=ALL,REPO=...), the
+# Slurm submit directory, or this script's own location (for a non-Slurm
+# `bash <script>`); accept the first that actually contains the package, and fail
+# loud otherwise rather than crashing cryptically on a /var/spool path.
+_find_repo() {
+    local c
+    for c in "${REPO:-}" "${SLURM_SUBMIT_DIR:-}" "${SLURM_SUBMIT_DIR:+$SLURM_SUBMIT_DIR/../..}" \
+             "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"; do
+        [ -n "$c" ] || continue
+        if [ -f "$c/pyproject.toml" ] && [ -d "$c/srm_and_sbi_dimer_alp" ]; then
+            (cd "$c" && pwd); return 0
+        fi
+    done
+    return 1
+}
+REPO="$(_find_repo)" || {
+    echo "FATAL: cannot locate the srm-and-sbi-dimer-alp repo root (Slurm spools this" >&2
+    echo "  script, so its own path is unreliable). Submit with an explicit REPO, e.g.:" >&2
+    echo "    cd /path/to/srm-and-sbi-dimer-alp && sbatch --export=ALL,REPO=\$PWD,... <this-script>" >&2
+    exit 1
+}
+cd "$REPO"
+
 # Per-machine HPC config (gitignored; copy from hpc_local.env.example): sets
-# MACHINE_PROFILE / CONDA_SETUP / etc. so this generic script runs unchanged
-# on any cluster. Falls back to the defaults below if absent.
-HPC_ENV="${HPC_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hpc_local.env}"
+# MACHINE_PROFILE / CONDA_SETUP / etc. Sourced via the resolved REPO so it is
+# found even under Slurm spooling. Falls back to the defaults below if absent.
+HPC_ENV="${HPC_ENV:-$REPO/Script_Bank/HPC/hpc_local.env}"
 if [ -f "$HPC_ENV" ]; then . "$HPC_ENV"; fi
 
 source "${CONDA_SETUP:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 conda activate SRM_AND_SBI_ENVY_V0
-export MACHINE_PROFILE="${MACHINE_PROFILE:?set MACHINE_PROFILE to the profile name in your machine_profiles.toml}"
-
-REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"   # self-derived: each script lives at REPO/Script_Bank/HPC/
-cd "$REPO"
+export MACHINE_PROFILE="${MACHINE_PROFILE:?set MACHINE_PROFILE (via hpc_local.env or --export) to a profile in your machine_profiles.toml}"
 
 EVAL_TASKS="${EVAL_TASKS:-1}"
 SUMMARY="${SUMMARY:-both}"

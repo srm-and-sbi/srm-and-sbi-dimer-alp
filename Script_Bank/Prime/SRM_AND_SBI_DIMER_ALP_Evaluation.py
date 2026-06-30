@@ -2,7 +2,7 @@
 
 Loads the trained posterior and the held-out EVAL namespace (videos with known
 ground-truth theta), estimates the MAP parameter vector for each EVAL video via
-the seed-then-optimize procedure in ``evaluation.MAPEstimate``, and reports how
+the seed-then-optimize procedure in ``evaluation.map_estimate``, and reports how
 well the inferred parameters recover the truth.
 
 The EVAL namespace is physically separate from TRAIN/TEST (distinct ``_EVAL``
@@ -36,13 +36,13 @@ import torch._dynamo
 
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.evaluation import (
-    MAPEstimate,
+    map_estimate,
     posterior_coverage_table,
     posterior_summary,
     recovery_table,
     _theta_repr,
 )
-from srm_and_sbi_dimer_alp.inference_support import get_device, load_posterior, resolve_topology
+from srm_and_sbi_dimer_alp.inference_support import load_posterior, resolve_topology
 from srm_and_sbi_dimer_alp.io import load_data
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming, build_prior
 from srm_and_sbi_dimer_alp.utils import console_log_context
@@ -277,8 +277,6 @@ def main(args: argparse.Namespace) -> None:
     do_posterior = args.summary in ("posterior", "both")
     bin_mode = args.bin_mode
     posterior_samples = args.posterior_samples or eval_cfg.posterior_samples
-    n_bins = args.n_bins or eval_cfg.quantile_bins
-    min_count = args.min_count or eval_cfg.quantile_min_count
 
     # ---- Pre-run banner --------------------------------------------------
     machine = PARAMETERS.machine
@@ -316,6 +314,30 @@ def main(args: argparse.Namespace) -> None:
     print(f"  writes report   : {recovery_dir}")
     print(f"  live progress   : {progress_path}   (tail -f to monitor)")
     print(f"\n{div}\n")
+
+    # ---- Dry run: validate inputs and exit before the reporter, GPU, posterior,
+    # or topology -- so it creates no output directory and needs no torchrun.
+    # Reuses the script's own already-resolved path expressions; only calls .exists().
+    if args.dry_run:
+        eval_video_path = paths.video_set_path(0, data_bank_root, timing_label, compress, "EVAL")
+        eval_theta_path = paths.theta_set_path(0, data_bank_root, timing_label, compress, "EVAL")
+        inputs = [
+            ("posterior", posterior_path),
+            ("EVAL video set (task 0)", eval_video_path),
+            ("EVAL theta set (task 0)", eval_theta_path),
+        ]
+        missing = 0
+        for role, path in inputs:
+            ok = Path(path).exists()
+            if not ok:
+                missing += 1
+            print(f"  reads {role}: {path}  [{'OK' if ok else 'MISSING'}]")
+        if missing:
+            print(f"\n[DRY RUN] configuration validated; {missing} input(s) MISSING.")
+        else:
+            print(f"\n[DRY RUN] configuration validated; all inputs present.")
+        print("[DRY RUN] no MAP-recovery evaluation performed.")
+        return
 
     run_start = time.time()
 
@@ -430,7 +452,7 @@ def main(args: argparse.Namespace) -> None:
                           flush=True)
                 if debug_log:
                     log_file_only(progress_fh, f"-- task {task} sim {sim} --")
-                score, theta_log = MAPEstimate(
+                score, theta_log = map_estimate(
                     posterior, video_chunk, device, vista_device,
                     theta_prex_size, eval_cfg.theta_prex_batch_size,
                     eval_cfg.score_prex_batch_size, elite_prex_size,
@@ -521,6 +543,11 @@ def parse_args(argv=None) -> argparse.Namespace:
              "concatenate them, and write the final report + figures + combined "
              ".npz, then exit. Does no recovery and needs no GPU; the launcher runs "
              "it once after the sharded workers finish. Single-GPU runs never use it.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate configuration and inputs, print what would be read/written, then exit "
+             "without running the stage (no GPU, no compute). Use before a queue submission or a long local run.",
     )
     parser.add_argument(
         "--seed", type=int, default=None,

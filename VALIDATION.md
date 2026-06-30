@@ -136,6 +136,14 @@ misconfiguration) before any longer run. They share a common pattern: pass
 `--total-time-seconds` (always required), keep the task and simulation counts
 tiny, and pass an explicit `--seed` so the run is repeatable.
 
+On HPC, run smoke and check submissions on the short-lived `test` (CPU) and
+`gpu_test` (GPU) partitions, leaving the production `general1` (CPU generation)
+and `gpu` (train/eval) partitions for full runs. Take the partition,
+node-geometry, and resource layout from each stage script's `#SBATCH` block and
+header examples and replicate them verbatim — change only what the check
+requires (typically the duration and the task counts). Do not recompute node
+counts, core-per-node geometry, or GPU counts; the scripts already pin them.
+
 ### 2.1 RDS (reaction-diffusion simulation)
 
 ```bash
@@ -373,8 +381,16 @@ never seen, using the two MAP-recovery stages.
 
   ```bash
   python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Evaluation.py \
-      --total-time-seconds 2.0 --eval-tasks 1 --summary both
+      --total-time-seconds 2.0 --eval-tasks 1 --summary both --pool-mode unrestricted
   ```
+
+  Use `--pool-mode unrestricted` for a smoke or check run. The smoke-tested
+  posterior is undertrained, so much of its probability mass lies outside the
+  prior box; the default `bounded` pool draws candidates by rejection sampling
+  within the prior and stalls when almost every draw is rejected. The
+  `unrestricted` pool samples the flow directly and does not stall. Switch back
+  to the default `bounded` pool only once the posterior is well trained (see
+  the pool-mode note below).
 
 - **Real-data application** (`Experiment.py`): the same estimator is applied to
   experimental microscopy videos, which have no ground truth. Each recording is

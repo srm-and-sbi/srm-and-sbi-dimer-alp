@@ -17,8 +17,11 @@
 #
 # RUN ON THE HPC LOGIN NODE inside tmux/screen (it polls for hours-days). Machine
 # divergence is via env vars (all have neutral defaults; override per cluster):
-# PART, ACCT, MON_OUT, USER_ME, SIM + the launcher's
-# MACHINE_PROFILE/CONDA_SETUP/REPO/MON (carried by --export=ALL):
+# PART, ACCT, MON_OUT, USER_ME, SIM + the launcher's MACHINE_PROFILE/CONDA_SETUP/MON
+# (carried by --export=ALL). REPO is the one exception: this controller self-derives
+# it from its own location, then forwards it EXPLICITLY (--export=ALL,REPO=$REPO,...)
+# so the spooled child job resolves the repo even though the login-node REPO is a
+# plain shell var, not part of the inherited environment.
 # Override points: PART (CPU partition), ACCT (Slurm account), MON_OUT (batch-log
 # output dir), USER_ME (queue-owner username for polling), SIM (per-task launcher
 # path), CASES (which dataset(s): 5s|2s|both), DRYRUN (1 = print only, 0 = submit).
@@ -31,10 +34,15 @@
 # STOPS before submitting eval (so eval is never generated against broken data).
 #
 # Re-run a failed node/task under its ORIGINAL global label (fills the gap,
-# regenerates nothing good -- the incremental-append mechanism).
+# regenerates nothing good -- the incremental-append mechanism). Submit from the
+# repo root and forward REPO (the spooled child cannot resolve the repo from its
+# own /var/spool path); --job-name follows the data-file naming convention.
 #   node 5 of 5s-train (global task ids 50..59):
-#     sbatch --array=0-0 --ntasks-per-node=10 --cpus-per-task=4 --time=24:00:00 \
-#       --export=ALL,SPLIT=train,TASK_OFFSET=50,TASK_COUNT=10,TASK_SIMS=500,TOTAL_TIME=5.0 "$SIM"
+#     cd /path/to/srm-and-sbi-dimer-alp && \
+#       sbatch --array=0-0 --ntasks-per-node=10 --cpus-per-task=4 --time=24:00:00 \
+#         --job-name=SRM_AND_SBI_DIMER_ALP_5S_50FPS_Simulation_TRAIN \
+#         --export=ALL,REPO=$PWD,SPLIT=train,TASK_OFFSET=50,TASK_COUNT=10,TASK_SIMS=500,TOTAL_TIME=5.0 \
+#         Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Simulation.sh
 #   single task (id 137): --ntasks-per-node=1 TASK_OFFSET=137 TASK_COUNT=1 (same SPLIT/SIMS/TIME).
 # Then confirm label completeness with the seeding-validation script before training.
 # =============================================================================
@@ -87,11 +95,22 @@ insys(){ squeue -u "$USER_ME" -h -r 2>/dev/null | wc -l | tr -d ' '; }
 submit(){   # $1 = entry; echoes job id on stdout, logs to stderr
   IFS='|' read -r label amax tlim split count sims ttime <<<"$1"
   local n=$(( amax + 1 ))
-  local export="ALL,SPLIT=$split,TASK_OFFSET=0,TASK_COUNT=$count,TASK_SIMS=$sims,TOTAL_TIME=$ttime"
+  # REPO is forwarded EXPLICITLY: it is a plain shell var on the login node, so
+  # --export=ALL alone would NOT carry it to the spooled child (which runs from
+  # /var/spool and cannot resolve the repo from its own path).
+  local export="ALL,REPO=$REPO,SPLIT=$split,TASK_OFFSET=0,TASK_COUNT=$count,TASK_SIMS=$sims,TOTAL_TIME=$ttime"
+  # Job name follows the data-file naming convention:
+  # SRM_AND_SBI_DIMER_ALP_<timing_label>_Simulation_<SPLIT>, with timing_label
+  # rendered exactly as PARAMETERS.simulation.timing.label does ("{duration}S_50FPS",
+  # duration via :g so 2.0 -> 2, 5.0 -> 5, 2.5 -> 2.5) and SPLIT upper-cased.
+  local timing_label split_uc jobname
+  timing_label="$(LC_ALL=C printf '%gS_50FPS' "$ttime")"
+  split_uc="$(echo "$split" | tr '[:lower:]' '[:upper:]')"
+  jobname="SRM_AND_SBI_DIMER_ALP_${timing_label}_Simulation_${split_uc}"
   # batch-log --output is forced here (the launcher's baked #SBATCH --output is a
   # submit-directory path); --partition and --account are appended only when set,
   # so an unset PART/ACCT leaves the submit line at the launcher's baked defaults.
-  local -a extra=( --output="$MON_OUT/%x_%A_Node_%a.out" )
+  local -a extra=( --job-name="$jobname" --output="$MON_OUT/%x_%A_Node_%a.out" )
   [ -n "$PART" ] && extra+=( --partition="$PART" )
   [ -n "$ACCT" ] && extra+=( --account="$ACCT" )
   if [ "$DRYRUN" = 1 ]; then

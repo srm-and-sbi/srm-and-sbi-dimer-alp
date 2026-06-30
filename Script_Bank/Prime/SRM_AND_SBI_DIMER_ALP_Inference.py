@@ -120,21 +120,6 @@ def main(args: argparse.Namespace) -> None:
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
     posterior_path = paths.posterior_path(data_bank_root, timing_label)
 
-    # Ensure the checkpoint output directory (Labor/) exists before train_loop
-    # writes to it; the posterior directory (Posit/) is created before its save
-    # further below. Mirrors the per-stage dir creation in the RDS / DLI scripts.
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # ---- Diagnostics reporter (debug mode) ------------------------------
-    reporter = DiagnosticReporter(
-        stage="Inference",
-        enabled=args.debug or args.debug_dump,
-        dump=args.debug_dump,
-        dump_dir=paths.debug_run_dir(data_bank_root, timing_label, "Inference"),
-        run_label=f"{paths.project_alias}_{timing_label}",
-        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-    )
-
     print("\nOutput destinations:")
     print(f"  data_bank_root  : {data_bank_root}")
     print(f"  reads videos    : <data_bank>/{paths.video_subdir}/"
@@ -144,6 +129,74 @@ def main(args: argparse.Namespace) -> None:
     print(f"  writes ckpt     : {checkpoint_path}")
     print(f"  writes posterior: {posterior_path}")
 
+    # ---- Dry-run preview --------------------------------------------------
+    # Validate configuration and report the resolved inputs, then exit before
+    # any distributed init, GPU use, dataset build, or training loop. Runs as a
+    # plain single process (placed before resolve_topology / init_distributed),
+    # so no torchrun is needed. Only cheap .exists() probes are performed.
+    if args.dry_run:
+        print(f"\n{div}")
+        print(" [DRY RUN] no training performed -- input validation only")
+        print(div)
+        # Inputs live on the TRAIN/TEST split storage tier (train_data_root),
+        # read via the same PARAMETERS.paths API and compress flag the real run
+        # uses through build_datasets / VideoDataset. Probing the first task
+        # file of each required split is sufficient to confirm the namespace.
+        missing = 0
+        train_video = paths.video_set_path(
+            0, train_data_root, timing_label, compress, "TRAIN")
+        train_theta = paths.theta_set_path(
+            0, train_data_root, timing_label, compress, "TRAIN")
+        print(f"\n[DRY RUN] TRAIN namespace ({args.tasks} task(s) expected, probing TASK_0):")
+        for role, set_path in (("TRAIN video set", train_video),
+                               ("TRAIN theta set", train_theta)):
+            if Path(set_path).exists():
+                print(f"  reads {role}: {set_path}  [OK]")
+            else:
+                print(f"  reads {role}: {set_path}  [MISSING]")
+                missing += 1
+        if args.test_tasks > 0:
+            test_video = paths.video_set_path(
+                0, train_data_root, timing_label, compress, "TEST")
+            test_theta = paths.theta_set_path(
+                0, train_data_root, timing_label, compress, "TEST")
+            print(f"\n[DRY RUN] TEST namespace ({args.test_tasks} task(s) expected, probing TASK_0):")
+            for role, set_path in (("TEST video set", test_video),
+                                   ("TEST theta set", test_theta)):
+                if Path(set_path).exists():
+                    print(f"  reads {role}: {set_path}  [OK]")
+                else:
+                    print(f"  reads {role}: {set_path}  [MISSING]")
+                    missing += 1
+        else:
+            print("\n[DRY RUN] TEST namespace: skipped (--test-tasks 0)")
+        print()
+        if missing:
+            print(f"[DRY RUN] configuration validated; {missing} input(s) MISSING.")
+        else:
+            print("[DRY RUN] configuration validated; all inputs present.")
+        print("[DRY RUN] no inference performed.")
+        print(f"{div}\n")
+        return
+
+    # Ensure the checkpoint output directory (Labor/) exists before train_loop
+    # writes to it; the posterior directory (Posit/) is created before its save
+    # further below. Mirrors the per-stage dir creation in the RDS / DLI scripts.
+    # Placed after the dry-run early-return so a dry-run creates no directories.
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- Diagnostics reporter (debug mode) ------------------------------
+    # Constructed after the dry-run early-return: under --debug-dump it creates the
+    # debug dump directory, which a dry-run must not do.
+    reporter = DiagnosticReporter(
+        stage="Inference",
+        enabled=args.debug or args.debug_dump,
+        dump=args.debug_dump,
+        dump_dir=paths.debug_run_dir(data_bank_root, timing_label, "Inference"),
+        run_label=f"{paths.project_alias}_{timing_label}",
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    )
+
     print("\nTraining & network summary:")
     print(f"  optimizer : AdamW   "
           f"scheduler: ReduceLROnPlateau (factor={training_cfg.scheduler_factor}, "
@@ -152,7 +205,7 @@ def main(args: argparse.Namespace) -> None:
           f"n_attn={network_cfg.n_attn_layers}, "
           f"start_ch={network_cfg.start_channels}) "
           f"+ TemporalTransformer(heads={network_cfg.attention_heads})")
-    print(f"  estimator : MAF (z_score=structured, dropout=0.1, batch_norm=True)")
+    print("  estimator : MAF (z_score=structured, dropout=0.1, batch_norm=True)")
     if args.resurrect:
         print(f"  RESURRECT : will load checkpoint from {checkpoint_path}")
 
@@ -175,8 +228,6 @@ def main(args: argparse.Namespace) -> None:
         print(f"  start_channels         : {network_cfg.start_channels}")
         print(f"  use_temporal_attention : {network_cfg.use_temporal_attention}")
         print(f"  attention_heads        : {network_cfg.attention_heads}")
-        print(f"  paras                  : {network_cfg.paras}")
-        print(f"  regress                : {network_cfg.regress}")
 
     print(f"\n{div}\n")
 
@@ -220,8 +271,6 @@ def main(args: argparse.Namespace) -> None:
         start_channels=network_cfg.start_channels,
         use_temporal_attention=network_cfg.use_temporal_attention,
         attention_heads=network_cfg.attention_heads,
-        paras=network_cfg.paras,
-        regress=network_cfg.regress,
         verbose=args.verbose,
     )
     embedding_net = torch.compile(embedding_net).to(device)
@@ -410,6 +459,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Within-epoch progress cadence: emit a line every N batches (rank 0 "
              "only). Default (unset) is ~4 lines/epoch; set a smaller N for finer "
              "progress on the long epochs of a production run.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate configuration and inputs, print what would be read/written, then exit "
+             "without running the stage (no GPU, no compute). Use before a queue submission or a long local run.",
     )
     parser.add_argument(
         "--verbose", action="store_true",

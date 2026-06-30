@@ -2,7 +2,7 @@
 
 Wraps the simulation-based inference (SBI) training loop: loads (video, theta)
 pairs from disk, builds train/val DataLoaders, runs an Adam+ReduceLROnPlateau
-optimiser over an sbi posterior estimator, and saves the trained posterior to
+optimizer over an sbi posterior estimator, and saves the trained posterior to
 a pickle file.
 
 Module contents:
@@ -15,7 +15,7 @@ Module contents:
         get_device()                 -- torch.device from PARAMETERS.machine.
         build_datasets(...)          -- (train_dataset, val_dataset) with a
                                         shuffled-index train/val split.
-        setup_training(...)          -- bundles loaders + optimiser + scheduler
+        setup_training(...)          -- bundles loaders + optimizer + scheduler
                                         into a dict for `train_loop`.
 
     Loss
@@ -36,6 +36,7 @@ conditioned on the Complex3DCNN embedding of the input video.
 
 from dataclasses import dataclass
 from pathlib import Path
+import copy
 import os
 import pickle
 import random
@@ -101,9 +102,9 @@ class VideoDataset(Dataset):
             subset of `tasks * task_canons`. Used by `build_datasets` to
             implement the train/val split.
         augment: If True, apply random rotation+flip augmentation in
-            `__getitem__`. The flag is also exposed for runtime toggling
-            (e.g. by `compute_validation_loss`, which temporarily disables
-            augmentation when computing the replay loss).
+            `__getitem__`. Augmentation is on for the TRAIN dataset and off for
+            the TEST dataset; the replay loss is measured over a separate
+            augmentation-off copy built by `build_replay_loader`.
     """
 
     def __init__(self,
@@ -371,22 +372,6 @@ def build_datasets(train_tasks: int,
     return train_dataset, test_dataset
 
 
-def build_eval_dataset(eval_tasks: int,
-                       data_bank_root: Path,
-                       timing_label: str,
-                       compress: bool = True) -> "VideoDataset":
-    """Read-only dataset over the held-out EVAL namespace (final validation only).
-
-    The EVAL namespace is never loaded by training; it exists solely for
-    posterior validation (MAP recovery). Augmentation is off.
-    """
-    return VideoDataset(
-        tasks=eval_tasks, data_bank_root=data_bank_root,
-        timing_label=timing_label, compress=compress,
-        augment=False, split="EVAL",
-    )
-
-
 def setup_training(estimator: nn.Module,
                    train_tasks: int,
                    data_bank_root: Path,
@@ -395,7 +380,7 @@ def setup_training(estimator: nn.Module,
                    batch_size: Optional[int] = None,
                    learning_rate: Optional[float] = None,
                    test_tasks: int = 0) -> dict:
-    """Bundle DataLoaders + optimiser + scheduler + device into a dict for `train_loop`.
+    """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
     Args:
         estimator: The posterior estimator to train (an sbi MAF wrapping
@@ -539,30 +524,67 @@ def setup_training(estimator: nn.Module,
 # Validation loss
 # =============================================================================
 
+def build_replay_loader(train_loader: DataLoader, topo) -> DataLoader:
+    """Build an augmentation-off, non-persistent loader over the TRAIN data.
+
+    The replay loss is the eval-mode TRAIN loss measured under the same
+    conditions as the TEST loss, which requires augmentation OFF. Toggling
+    ``augment`` on the live TRAIN loader's dataset does not work: that loader
+    uses ``persistent_workers=True``, so each worker holds its own pickled copy
+    of the dataset and never observes a flag flipped in the main process -- the
+    replay pass would silently run WITH augmentation. This builds a separate
+    loader over an independent, augmentation-off shallow copy of the dataset and
+    spawns fresh (non-persistent) workers, so the copy's ``augment=False`` is the
+    state the workers actually see.
+
+    Sharding mirrors the TRAIN loader: distributed -> a DistributedSampler with
+    ``shuffle=False``/``drop_last=False`` (each rank measures its shard; the
+    caller all-reduces the per-rank means), single worker -> a sequential pass
+    over the full set. Order is irrelevant to a mean loss, so the sampler does
+    not shuffle.
+
+    Args:
+        train_loader: The live TRAIN DataLoader (its dataset, batch size, and
+            worker count are reused).
+        topo: The launch Topology (drives the distributed sharding).
+
+    Returns:
+        A DataLoader yielding (video, theta) pairs with augmentation disabled.
+    """
+    replay_dataset = copy.copy(train_loader.dataset)   # independent object; shares the lazy path lists
+    replay_dataset.augment = False                     # the workers pickle THIS copy (augmentation off)
+    num_workers = train_loader.num_workers
+    sampler = (DistributedSampler(replay_dataset, num_replicas=topo.world_size,
+                                  rank=topo.rank, shuffle=False, drop_last=False)
+               if topo.is_distributed else None)
+    return DataLoader(replay_dataset, batch_size=train_loader.batch_size,
+                      shuffle=False, sampler=sampler, num_workers=num_workers,
+                      pin_memory=True, persistent_workers=False)
+
+
 def compute_validation_loss(estimator: nn.Module,
                             loader: DataLoader,
                             device: torch.device,
                             verbose: bool = False) -> float:
-    """Compute mean loss over a loader in eval mode, with augmentation disabled.
+    """Compute mean loss over a loader in eval mode.
 
     The estimator is set to eval mode (dropout disabled, batch-norm uses running
-    statistics) and augmentation is temporarily disabled on the loader's dataset,
-    so the loss reflects the augmentation-free distribution under the same network
-    conditions as the test-set evaluation. The original `augment` flag is restored
-    before return.
+    statistics), so the loss reflects the same network conditions as the test-set
+    evaluation. The loader is expected to already disable augmentation -- the TEST
+    loader is built with ``augment=False`` and the replay loader from
+    ``build_replay_loader`` carries an augmentation-off dataset copy -- so this
+    function does not toggle the flag (which would not reach a persistent loader's
+    workers anyway).
 
     Args:
         estimator: The posterior estimator. Set to eval mode internally.
-        loader: DataLoader over (video, theta) pairs.
+        loader: DataLoader over (video, theta) pairs, with augmentation off.
         device: Device to move batches to.
-        verbose: If True, print the augmentation flag before and after.
+        verbose: If True, print the loader's augmentation flag.
 
     Returns:
         Mean loss across all batches, as a Python float.
     """
-    original_augment = loader.dataset.augment
-    if original_augment:
-        loader.dataset.augment = False
     if verbose:
         print(f"Data augmentation? {loader.dataset.augment}")
 
@@ -574,11 +596,6 @@ def compute_validation_loss(estimator: nn.Module,
             theta_batch = theta_batch.to(device)
             batch_loss = torch.mean(estimator.loss(theta_batch, condition=video_batch))
             losses_per_batch.append(batch_loss.item())
-
-    if original_augment != loader.dataset.augment:
-        loader.dataset.augment = original_augment
-        if verbose:
-            print(f"Data augmentation? {loader.dataset.augment}")
 
     return float(np.mean(losses_per_batch))
 
@@ -610,7 +627,7 @@ def train_loop(estimator: nn.Module,
         model: The loss-computing module driven each batch (``_LossModule``,
             DDP-wrapped when distributed); its forward returns the per-sample loss.
         train_loader, val_loader: DataLoaders for the TRAIN and TEST splits.
-        optimizer: Already-constructed optimiser (e.g. AdamW).
+        optimizer: Already-constructed optimizer (e.g. AdamW).
         scheduler: Learning-rate scheduler with `.step(metric)` (ReduceLROnPlateau).
         device: Device to move batches to.
         topo: The launch Topology (rank / world_size / is_main / is_distributed).
@@ -639,6 +656,12 @@ def train_loop(estimator: nn.Module,
     import torch.distributed as dist
     if epochs is None:
         epochs = PARAMETERS.inference.training.epochs
+    if epochs < 1:
+        # At least one epoch must run: the optimum checkpoint is written inside the
+        # epoch loop, and the final-model section reloads it. With epochs < 1 the
+        # loop never runs, so (absent a resurrect checkpoint) the reload would fail
+        # on a never-written file. Reject the no-op run loudly instead.
+        raise ValueError(f"epochs={epochs} is invalid; train_loop requires epochs >= 1.")
 
     losses_train = np.full(shape=epochs, fill_value=np.nan)
     losses_test = np.full(shape=epochs, fill_value=np.nan)
@@ -647,6 +670,11 @@ def train_loop(estimator: nn.Module,
     has_val = val_loader is not None   # TEST namespace present -> model selection
     distributed = topo.is_distributed
     is_main = topo.is_main
+
+    # Replay loss = eval-mode TRAIN loss with augmentation off, opt-in. Built once
+    # as a dedicated augmentation-off, non-persistent loader (the live TRAIN loader
+    # keeps augmentation on and its persistent workers would not see a toggled flag).
+    replay_loader = build_replay_loader(train_loader, topo) if replay_loss else None
 
     def _reduce_mean(value: float) -> float:
         """Mean of a scalar across ranks (identity when not distributed)."""
@@ -722,8 +750,9 @@ def train_loop(estimator: nn.Module,
         else:
             epoch_test = float("nan")
         # Replay loss = eval-mode TRAIN loss (augmentation off), opt-in; each rank
-        # measures its shard, then averaged across ranks.
-        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, train_loader, device, verbose=False))
+        # measures its shard of the dedicated augmentation-off loader, then averaged
+        # across ranks.
+        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, replay_loader, device, verbose=False))
                         if replay_loss else float("nan"))
         losses_train[epoch] = epoch_train
         losses_test[epoch] = epoch_test

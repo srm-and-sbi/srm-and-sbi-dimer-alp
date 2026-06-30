@@ -156,9 +156,9 @@ def plot_transitions(Q: np.ndarray,
         P: DTMC stochastic matrix.
         fig_size: Figure size in inches (width, height).
         font_size: Font size for labels and titles.
-        color_map: Matplotlib colour map name.
+        color_map: Matplotlib color map name.
         format_Q, format_P: Format strings for in-cell annotations.
-        color_bar: Whether to show colour bars.
+        color_bar: Whether to show color bars.
         color_bar_dit: Optional kwargs dict for seaborn's `cbar_kws`.
         fig_title: Optional figure-level title.
     """

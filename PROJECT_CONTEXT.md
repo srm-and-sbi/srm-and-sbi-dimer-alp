@@ -259,9 +259,20 @@ cost of re-spawning and re-importing the full stack in every worker each epoch �
 which otherwise dominates the per-epoch wall time. The worker count defaults to
 half the available CPU cores (job-scheduler aware), so it scales with the node
 automatically; a positive value in the machine profile pins it explicitly.
-Training and MAP recovery currently run on a single GPU; a multi-GPU setup —
-data-parallel training and MAP-recovery sharding across a node's GPUs — is in
-active development.
+
+**Multi-GPU scaling.** Training and MAP recovery adapt to the GPUs they are
+given. Launched with one worker per GPU (via `torchrun`), training runs
+data-parallel through `DistributedDataParallel` — each worker holds a replica,
+processes its own shard of every batch, and synchronizes gradients each step,
+with `SyncBatchNorm` sharing batch statistics across workers by default — while
+MAP recovery partitions the held-out videos across the workers and merges the
+per-shard results into one report. The single-GPU run is the collapse case of
+the same code: with one worker the distributed wrappers reduce to no-ops and the
+loop is exactly the original single-GPU path, so behavior is unchanged where
+only one GPU is present. The GPU count is read from the allocation, capped by an
+optional `SRM_AND_SBI_GPUS` override (set it to 1 to force the single-GPU path),
+and `SRM_AND_SBI_NO_SYNC_BN=1` opts each worker into its own local batch
+statistics for speed at the cost of re-validating recovery.
 
 ### Leak-proof data split (TRAIN / TEST / EVAL)
 
@@ -415,10 +426,10 @@ defined on-disk artifact. Module paths are relative to the package
 | DLI video output (chunked, bit-depth-converted) | entry point `SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py` (drives `extract_trajectory_poses()` → `simulate_dli()`) | `.zarr` video set, shape `(frame_count, height, width)` (via `io.py` → `convert_video_dtype()`, `save_video_set()`) |
 | Parameter prior and specification (ranges, log flags, units, labels; log-uniform prior and bounds) | `parameterization.py` → `PARAMETERS` (a `Parameters` singleton) with `build_prior()`, `theta_lower_bound()`, `theta_upper_bound()`, `parameter_find()` | (configuration in code; sampled theta persisted in the RDS theta-set `.zarr`) |
 | NPE + MAF estimator with 3D-CNN + temporal-transformer embedding | `inference_network.py` → `Complex3DCNN` (video encoder), `TemporalTransformer` (with `AttentionBlock`, `PositionalEncoding`); training wired in `inference_support.py` → `setup_training()`, `train_loop()` (with the resurrect branch) | (in-memory network; checkpoint + posterior written below) |
-| Leak-proof TRAIN / TEST / EVAL split, sizing rule, and dataset construction | entry point `SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py` (runs RDS → DLI per split with the `CORE = TRAIN + TEST`, `EVAL = max(floor, 0.1·CORE)` sizing); dataset assembly in `inference_support.py` → `build_datasets()`, `build_eval_dataset()` (with `VideoDataset`, `normalize_video()`) | `_TRAIN` / `_TEST` / `_EVAL`-suffixed trajectory `.h5` and video `.zarr` namespaces |
+| Leak-proof TRAIN / TEST / EVAL split, sizing rule, and dataset construction | entry point `SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py` (runs RDS → DLI per split with the `CORE = TRAIN + TEST`, `EVAL = max(floor, 0.1·CORE)` sizing); dataset assembly in `inference_support.py` → `build_datasets()` (with `VideoDataset`, `normalize_video()`) | `_TRAIN` / `_TEST` / `_EVAL`-suffixed trajectory `.h5` and video `.zarr` namespaces |
 | Posterior training run (gradient updates on TRAIN, selection on TEST) | entry point `SRM_AND_SBI_DIMER_ALP_Inference.py` (drives `build_datasets()` → `setup_training()` → `train_loop()` → `save_posterior()`) | pickled posterior (`DirectPosterior`, via `inference_support.py` → `save_posterior()`); network checkpoint at each new optimum |
-| MAP recovery and calibration on held-out EVAL | `evaluation.py` → `MAPEstimate()` (seed-then-optimize: `collect_theta_prex()`, `collect_score_prex()`, `extract_elite_prex()`, `optimize_elite()`), `posterior_summary()`, `recovery_stats()`, `recovery_table()`, `posterior_coverage_table()`; driven by entry point `SRM_AND_SBI_DIMER_ALP_Evaluation.py` | recovery report (figures + tables + arrays + a live `progress.log`) under the validation output directory |
-| Real-data application (no ground truth) | same `evaluation.py` estimator (`MAPEstimate()`, `experiment_table()`); driven by entry point `SRM_AND_SBI_DIMER_ALP_Experiment.py` | per-condition inferred-parameter report under the validation output directory |
+| MAP recovery and calibration on held-out EVAL | `evaluation.py` → `map_estimate()` (seed-then-optimize: `collect_theta_prex()`, `collect_score_prex()`, `extract_elite_prex()`, `optimize_elite()`), `posterior_summary()`, `recovery_stats()`, `recovery_table()`, `posterior_coverage_table()`; driven by entry point `SRM_AND_SBI_DIMER_ALP_Evaluation.py` | recovery report (figures + tables + arrays + a live `progress.log`) under the validation output directory |
+| Real-data application (no ground truth) | same `evaluation.py` estimator (`map_estimate()`, `experiment_table()`); driven by entry point `SRM_AND_SBI_DIMER_ALP_Experiment.py` | per-condition inferred-parameter report under the validation output directory |
 | Configuration, paths, storage routing, and file I/O | `parameterization.py` → `Paths`, `MachineProfile` / `load_machine_profile()`, `FrameConfig`, `RunTiming`; `io.py` → `load_data()`, `save_video_set()`, `save_theta_set()`, `convert_video_dtype()` | resolved absolute paths (per-machine `machine_profiles.toml`); all artifacts above land under the configured roots |
 
 The five pipeline stages are RDS, DLI, Inference, Evaluation, and Experiment;
@@ -572,9 +583,10 @@ previous optimum, how many invocations are needed for posterior stability? Is
 there a principled stopping criterion beyond an empirical plateau (for example, a
 test-loss delta below tolerance)?
 
-**S4. Out-of-distribution robustness.** If the network is trained on 2 s videos
-and tested on 10 s videos, how does posterior accuracy degrade? Can it be trained
-jointly on multiple durations?
+**S4. Out-of-distribution robustness.** If the network is trained at one
+recording length and tested at a different one (for example, trained on 2 s
+videos and tested on 10 s), how does posterior accuracy degrade? Can it be
+trained jointly on multiple durations?
 
 **S5. Multi-cell heterogeneity.** Real microscopy data contains cells with
 varying expression levels, spatial organization, and cell-cycle phase. Can the
