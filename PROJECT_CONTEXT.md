@@ -256,9 +256,16 @@ optional `--resurrect` flag to continue from an existing checkpoint)
 **Training-loop efficiency.** The data loaders keep their worker pool alive
 across epochs (`persistent_workers`) so that a long training run does not pay the
 cost of re-spawning and re-importing the full stack in every worker each epoch —
-which otherwise dominates the per-epoch wall time. The worker count defaults to
-half the available CPU cores (job-scheduler aware), so it scales with the node
-automatically; a positive value in the machine profile pins it explicitly.
+which otherwise dominates the per-epoch wall time. Because each data-parallel rank
+builds its own loaders and the train and validation loaders' workers stay alive
+together, the live worker-process count is (workers per loader) × (ranks) ×
+(concurrent loaders). The per-loader count is therefore derived from a node-wide
+TOTAL budget — the machine profile's `num_workers`, or the CPU core count when unset
+— divided across the ranks and concurrent loaders, so the live total stays near one
+worker per core at any GPU count (and reduces to half the cores per loader on a
+single GPU). This keeps a multi-GPU run from exhausting host memory through worker
+multiplication. This budget is the data-loading workers only; the GPU/shard-worker
+count is bounded separately (see Multi-GPU scaling).
 
 **Multi-GPU scaling.** Training, MAP-recovery evaluation, and the real-data
 application adapt to the GPUs they are given. Launched with one worker per GPU

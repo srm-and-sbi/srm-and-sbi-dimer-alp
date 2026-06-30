@@ -14,7 +14,11 @@ script_bank_root  = "/path/to/srm-and-sbi-dimer-alp/Script_Bank"
 data_bank_root    = "/path/to/Data_Bank"
 compute_backend   = "GPU"           # "GPU" | "CPU"
 gpu_device_index  = 0               # required when compute_backend = "GPU"
-num_workers       = 4               # DataLoader worker processes
+num_workers       = 0               # node-wide TOTAL DataLoader-worker budget (0 = auto: the CPU
+                                    # core count). Inference divides it across DDP ranks x the
+                                    # concurrent train+val loaders, so the live worker count stays
+                                    # ~1 per core at any GPU count; a positive value overrides the auto.
+                                    # (Inference only -- evaluation/experiment build no such workers.)
 
 [hpc_compute_example]
 # Example HPC-mode profile for a cluster submission.
@@ -24,7 +28,8 @@ script_bank_root  = "/path/to/srm-and-sbi-dimer-alp/Script_Bank"
 data_bank_root    = "/path/to/Data_Bank"   # permanent / backed-up tier: posterior, checkpoints, reports
 compute_backend   = "GPU"
 gpu_device_index  = 0
-num_workers       = 16
+num_workers       = 0               # 0 = auto (CPU core count); node-wide total worker budget,
+                                    # divided by ranks x concurrent loaders (see pc_local_example).
 # scratch_data_bank_root = "/path/to/Scratch/Data_Bank"   # OPTIONAL (two-tier storage):
 #   regenerable TRAIN/TEST data lives on this scratch tier (e.g. a fast or purge-policy
 #   filesystem), while the trained posterior, checkpoints, and reports stay on
