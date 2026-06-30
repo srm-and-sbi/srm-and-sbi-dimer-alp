@@ -491,8 +491,8 @@ A correctly set up and validated installation has:
 - A working `SRM_AND_SBI_ENVY_V0` environment (or a reused compatible one) with
   the package installed editable, and a `machine_profiles.toml` configured for
   the machine.
-- All four entry points (RDS, DLI, Inference, Resurrect) running end-to-end on
-  minimal inputs.
+- All four smoke-test invocations (RDS, DLI, Inference, and Inference `--resurrect`)
+  running end-to-end on minimal inputs.
 - The three-pillar semantic-equivalence checks holding: theta bit-reproducible
   at a fixed seed, the constructed reaction-diffusion system matching the
   declared model, and imaging output correctly shaped and physically plausible.
