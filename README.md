@@ -153,5 +153,6 @@ then open the printed `http://localhost:8888/...` URL in your browser and run th
 - **[`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md)** — scientific context, model parameters, ReaDDy semantics, the data split, timing model, reproducibility, and the inference workflow in full.
 - **[`VALIDATION.md`](VALIDATION.md)** — environment setup, smoke tests, the validation methodology, and success criteria.
 - **[`env_snapshots/README.md`](env_snapshots/README.md)** — the canonical install guide.
+- **[`BENCHMARKS_Single_GPU.md`](BENCHMARKS_Single_GPU.md)** and **[`BENCHMARKS_Multi_GPU.md`](BENCHMARKS_Multi_GPU.md)** — wall-clock timing references: the single-GPU baseline on a fixed micro-check, and the multi-GPU timings from the production-scale 2 s and 5 s runs (data-parallel training plus sharded evaluation and experiment), with an honest read of the single-vs-multi gap.
 
 See workspace-root files (parent directory) for program-wide context.

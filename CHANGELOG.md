@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.10 - 2026-07-01
+
+Documentation: add the multi-GPU timing benchmark. No code change.
+
+### Added
+
+- `BENCHMARKS_Multi_GPU.md` — wall-clock timings for the three GPU stages that
+  shard across the allocated devices (data-parallel training, and the sharded
+  Evaluation and Experiment MAP passes), drawn from the production-scale 2 s and
+  5 s runs rather than a synthetic micro-check. States the explicit per-epoch
+  multiplier of the four-card node over a single card (1.4×–2.5×, contention-free
+  floor to full-run average, plus the whole-run 21.9 h → 8.9 h equivalent), the
+  sharded-stage wall-clocks and per-video rates, the 5 s wall-budget finding that
+  motivates checkpoint-resume, and an explicit measurement-gaps section (no
+  single-device MI210 point, no eight-GPU whole-node point yet).
+
+### Documentation
+
+- Reconciled `BENCHMARKS_Single_GPU.md`: its two forward references to the
+  companion no longer promise a like-for-like check-scale comparison, since the
+  multi-GPU numbers are production-scale.
+- Surfaced both benchmark documents in the README documentation list; neither was
+  referenced there before.
+
 ## 0.2.9 - 2026-07-01
 
 Documentation: make the post-hoc analysis scripts discoverable. No code change.

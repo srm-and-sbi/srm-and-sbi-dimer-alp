@@ -3,9 +3,10 @@
 > Scope: **single GPU per machine** (one device used, no DataParallel/sharding).
 > These are the dated single-GPU baseline numbers. Data-parallel training and
 > evaluation sharding shipped in 0.2.0, and the experiment-stage sharding in 0.2.2
-> (all three GPU stages now adapt to the allocated GPUs); their timings belong in
-> a companion `BENCHMARKS_Multi_GPU.md` so the single-vs-multi comparison stays a
-> direct one.
+> (all three GPU stages now adapt to the allocated GPUs); their timings live in
+> the companion `BENCHMARKS_Multi_GPU.md`, drawn from the production-scale 2 s and
+> 5 s runs rather than this micro-check — so the two files are read together, not
+> as a like-for-like table.
 
 ## Baseline (2026-06-18)
 
@@ -54,4 +55,4 @@ measured against them.
 ### Known optimization opportunities (to be measured against this baseline)
 1. **Data I/O:** the HPC node's `num_workers` 8 → 16 → 32; re-measure inference steady epoch.
 2. **Compile:** add a persistent Inductor cache and a `--compile/--no-compile` flag, then re-measure the cold-start cost.
-3. **Multi-GPU:** data-parallel training and evaluation sharding shipped in 0.2.0, and the experiment-stage sharding in 0.2.2 (all three GPU stages adapt across the node's GPUs); their timings belong in the companion `BENCHMARKS_Multi_GPU.md`, measured against this single-GPU baseline.
+3. **Multi-GPU:** data-parallel training and evaluation sharding shipped in 0.2.0, and the experiment-stage sharding in 0.2.2 (all three GPU stages adapt across the node's GPUs); their timings are reported in the companion `BENCHMARKS_Multi_GPU.md`, drawn from the production-scale 2 s and 5 s runs.
