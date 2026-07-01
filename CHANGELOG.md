@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.9 - 2026-07-01
+
+Documentation: make the post-hoc analysis scripts discoverable. No code change.
+
+### Documentation
+
+- Named the `Script_Bank/Analysis/` scripts in the front-door docs (the README
+  structure list and the PROJECT_CONTEXT entry-point section): the temporal-dynamics
+  experiment analysis (`Experiment_Temporal_Dynamics`, with its experimental-range
+  validation against Li et al. 2026 and its companion interpretation doc) and the
+  seeding / non-determinism validation (`Seeding_Validation`). The folder was
+  previously listed only generically, so a new user would not have discovered these
+  analyses from the top-level documentation.
+
 ## 0.2.8 - 2026-07-01
 
 Adds a standalone temporal-dynamics analysis of the inferred parameters on the real

@@ -408,6 +408,17 @@ one. In those workflows it is the step that feeds the downstream Evaluation and
 Experiment stages. It is run ad hoc, outside the standard four-stage dispatcher;
 the HPC operations runbook (`Script_Bank/HPC/README.md`) documents its launch.
 
+`Script_Bank/Analysis/` collects post-hoc analyses that run on completed outputs
+rather than producing pipeline artifacts:
+`SRM_AND_SBI_DIMER_ALP_Experiment_Temporal_Dynamics.py` tracks each inferred
+parameter's MAP estimate over the real recordings per condition (non-overlapping
+chunk → time), overlays the experimental range for the parameters the source paper
+constrains (Li et al. 2026, doi:10.1002/smll.202507115), annotates each figure with
+its held-out recovery quality, and writes figures plus a self-contained `report.md`;
+its companion `Experiment_Temporal_Dynamics.md` gives the full interpretation.
+`SRM_AND_SBI_DIMER_ALP_Seeding_Validation.py` checks the RNG / non-determinism
+behavior of the generation stack.
+
 ### Configuration architecture
 
 Configuration is split into two complementary parts:
