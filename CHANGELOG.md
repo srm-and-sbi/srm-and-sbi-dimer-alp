@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.8 - 2026-07-01
+
+Adds a standalone temporal-dynamics analysis of the inferred parameters on the real
+experimental recordings. Additive only; no change to the pipeline stages.
+
+### Added
+
+- `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Experiment_Temporal_Dynamics.py` — a
+  post-hoc analysis (in `Analysis/`, not a pipeline stage) that reads a completed
+  Experiment `MAP_Experiment.npz` and, per learnable parameter, plots the MAP estimate
+  over the recording (non-overlapping chunk → time), averaged across cells per
+  condition (MET-FAB / MET-INLB) in absolute units, with a between-cell band and faint
+  per-cell trajectories. Its purpose is temporal dynamics, with a parameter-dependent
+  robustness/stationarity read (constant-property parameters should be flat). For the
+  parameters the source paper constrains (κ_OFF, D_A, R_B) it overlays the experimental
+  range (band + reported values + mean) and the inferred time-average, and annotates
+  each figure with its EVAL recovery quality. Writes one figure per parameter plus a
+  self-contained `report.md` into a `temporal_dynamics/` subdirectory. Config-driven
+  from `PARAMETERIZATION`; derives the 2 s (10 timepoints) / 5 s (4 timepoints) axis
+  from the data; headless. Experimental references: Li et al., *Small* 2026, e07115
+  (doi:10.1002/smll.202507115) — κ_OFF = 1/(dimer lifetime ≈ 1 s), D_A ≈ 0.10 µm²/s,
+  R_B ≈ 0.6 (dimer ≈ 1.6× slower than monomer).
+- `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Experiment_Temporal_Dynamics.md` — the
+  companion method/interpretation reference (temporal-dynamics-primary framing with
+  parameter-dependent stationarity, why this exceeds the whole-recording experimental
+  readout, the κ_OFF validation, the recovery × stationarity reliability view, caveats).
+
+### Documented (not implemented)
+
+- Aggregated posterior-distribution panels (the original per-parameter histogram of the
+  posterior sample cloud pooled across all chunks) require the full per-window posterior
+  sample pool, which the Experiment stage does not persist (only five quantiles per
+  window). The approach is documented in the script and companion doc as a future
+  extension.
+
 ## 0.2.7 - 2026-07-01
 
 Documentation corrections and a backup convention. No code or behavior change.
