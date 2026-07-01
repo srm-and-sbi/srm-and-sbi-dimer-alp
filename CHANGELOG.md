@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.7 - 2026-07-01
+
+Documentation corrections and a backup convention. No code or behavior change.
+
+### Fixed
+
+- **Receptor identity (PROJECT_CONTEXT.md §2).** The system section mislabeled the
+  modeled receptor as "EGFR-Like" / epidermal growth factor receptor. The pipeline's
+  real-data application is the **MET receptor** (c-Met / hepatocyte growth factor
+  receptor): the Experiment stage consumes MET single-particle-tracking recordings
+  under `Experiment/SPT_Data_MET_FAB_INLB_S-BSST712` (BioStudies S-BSST712; MET
+  engaged by an antibody fragment and Internalin B). §2 now names MET where receptor
+  identity is asserted, and states explicitly that the A/B/C reaction scheme itself
+  is receptor-agnostic (identity enters only through the experimental data). This was
+  the only EGFR reference in the repository.
+- **ReaDDy mischaracterized as deterministic (VALIDATION.md, PROJECT_CONTEXT.md).**
+  The "Reaction-diffusion primitive equivalence" pillar stated "ReaDDy is
+  deterministic given the same system specification," which is incorrect: ReaDDy is a
+  stochastic particle-based reaction-diffusion simulator (Brownian diffusion plus
+  stochastic reaction events), and the pipeline runs it seedless. Both copies of the
+  sentence now state that ReaDDy is stochastic (trajectories vary run-to-run) while
+  the deterministic property is the *construction* of the system specification (the
+  builders produce exactly the declared model for a given theta). Every other
+  "non-deterministic" statement in the docs was already correct and is unchanged.
+
+### Documentation
+
+- Added an "Artifact backups" section to the HPC operations runbook documenting the
+  `<stem>_<TAG>_<DD.MM.YYYY>.<ext>` backup naming convention (German-format date;
+  the suffix sits before the extension so backups never match the loaded artifact
+  names), so preserved posteriors and checkpoints are discoverable and self-describing.
+
 ## 0.2.6 - 2026-07-01
 
 Adds a special-situation entry point that constructs a posterior from a saved

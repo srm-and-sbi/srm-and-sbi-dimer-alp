@@ -435,7 +435,38 @@ job name and `--total-time-seconds` together for other durations.
 
 ---
 
-## 7. Do not
+## 7. Artifact backups
+
+The trained artifacts — a posterior (`Posit/…_Posterior.pkl`) and its checkpoint
+(`Labor/…_Optimum_ANN.pth`) — are overwritten in place whenever the stage that
+produces them re-runs (a fresh Inference run, or a Construction rebuild, §6).
+Before a run that will supersede an artifact worth keeping, copy it aside under a
+dated backup name so it survives and stays easy to tell apart from later ones. The
+convention is a tag plus a German-format date inserted before the extension:
+
+    <original-stem>_<TAG>_<DD.MM.YYYY>.<ext>
+
+- **`<TAG>`** — a short label for why the copy was kept (e.g. `PREPROD` for the
+  best artifact preserved before a full production run).
+- **`<DD.MM.YYYY>`** — the date in German format (e.g. `01.07.2026`).
+
+```bash
+# preserve the current best 2S posterior + its checkpoint before a production run
+cp Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl \
+   Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior_PREPROD_01.07.2026.pkl
+cp Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN.pth \
+   Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN_PREPROD_01.07.2026.pth
+```
+
+Because the tag-and-date suffix sits before the extension, a backup never matches
+the `…_Posterior.pkl` / `…_Optimum_ANN.pth` names the pipeline loads — it is kept,
+but never picked up as the active artifact. Keep the backup beside its original
+(same `Posit/` or `Labor/` directory); if that storage tier is not backed up
+(e.g. a scratch `data_bank_root`), also copy it to a backed-up location.
+
+---
+
+## 8. Do not
 
 - **Do not invent job or log names.** Use exactly
   `SRM_AND_SBI_DIMER_ALP_<timing_label>_<Stage>[_<SPLIT>]` (§3). No invented

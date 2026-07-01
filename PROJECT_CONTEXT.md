@@ -35,10 +35,15 @@ autoregressive flow) from simulated (RDS, video) pairs.
 
 ---
 
-## §2. System: EGFR-Like Dimerization (DIMER Model)
+## §2. System: MET-Receptor Dimerization (DIMER Model)
 
-**Molecular system:** A simplified model of epidermal growth factor receptor
-(EGFR) dimerization and internalization on the plasma membrane.
+**Molecular system:** A simplified, receptor-agnostic model of receptor
+dimerization and internalization on the plasma membrane (the generic
+monomer/dimer species A/B/C below). The pipeline is applied to
+single-particle-tracking microscopy of the **MET receptor** (c-Met /
+hepatocyte growth factor receptor); the Experiment stage consumes the real
+recordings under `Experiment/SPT_Data_MET_FAB_INLB_S-BSST712` (BioStudies
+accession S-BSST712).
 
 **Three molecular species:**
 - **A (monomer):** Single receptor. Diffuses freely (diffusion coefficient `D_A`).
@@ -509,9 +514,12 @@ reference run element-by-element. Three pillars carry this:
 1. **Theta-sampling determinism.** The prior sampler draws from the same fixed
    bounds with a seeded generator, so the same seed produces bit-identical theta
    vectors — directly verifiable.
-2. **Reaction-diffusion primitive equivalence.** ReaDDy is deterministic given
-   the system specification (species, reactions, rates, box), and the system and
-   simulation builders construct exactly the declared model for a given theta.
+2. **Reaction-diffusion primitive equivalence.** ReaDDy is a stochastic
+   simulator (its stepper draws random numbers for diffusion and reaction
+   events, so trajectories vary run-to-run), but the construction of its system
+   specification (species, reactions, rates, box) is deterministic: the system
+   and simulation builders construct exactly the declared model for a given
+   theta.
 3. **Imaging-pipeline functional equivalence.** The Gaussian PSF (erf-based
    pixel integration), the EMCCD model (Poisson plus Gaussian readout), the
    brightness state machine, and the duration-independent photobleaching model

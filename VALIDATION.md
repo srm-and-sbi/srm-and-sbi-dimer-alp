@@ -256,14 +256,17 @@ against any particular reference run. Equivalence rests on three pillars:
    "
    ```
 
-2. **Reaction-diffusion primitive equivalence.** ReaDDy is deterministic given
-   the same system specification (species, reactions, rates, simulation box,
-   particle complement). The system builder and the simulation builder produce
-   a ReaDDy system with the declared rates, geometry, and observables expected
-   for a given theta. The verbose RDS banner (`--verbose`) prints the diffusion
-   and reaction rates, so the constructed system can be inspected directly. The
-   only intentional source of run-to-run variability is the reaction-diffusion
-   stepper's own internal randomness (see the theta-only regression test,
+2. **Reaction-diffusion primitive equivalence.** ReaDDy is a stochastic
+   simulator — its stepper draws its own random numbers for diffusive motion
+   and reaction-event timing, so trajectories differ run-to-run even at a fixed
+   system specification (species, reactions, rates, simulation box, particle
+   complement). What is deterministic, and what this pillar verifies, is the
+   construction of that specification: the system builder and the simulation
+   builder produce a ReaDDy system with the declared rates, geometry, and
+   observables expected for a given theta. The verbose RDS banner (`--verbose`)
+   prints the diffusion and reaction rates, so the constructed system can be
+   inspected directly. The stepper's own internal randomness is the intended
+   source of run-to-run variability (see the theta-only regression test,
    section 3.2).
 
 3. **Imaging-pipeline functional equivalence.** The DLI stage applies a Gaussian
