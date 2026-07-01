@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.6 - 2026-07-01
+
+Adds a special-situation entry point that constructs a posterior from a saved
+checkpoint without retraining, for cross-machine weight transfer and checkpoint
+recovery. Additive only; no change to the pipeline stages or their behavior.
+
+### Added
+
+- `Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py` — builds a
+  `DirectPosterior` pickle from an existing `Optimum_ANN.pth` checkpoint by running
+  the Inference build-and-save sequence (Complex3DCNN + `build_maf`, `torch.compile`,
+  `load_state_dict`, `DirectPosterior`, `save_posterior`) without the training loop.
+  Single-process, single-GPU; the one-time `torch.compile` is its only real cost. It
+  reproduces the Inference stage's posterior output for the situations where
+  retraining is not wanted: moving trained weights between machines (copy the small
+  `.pth`, construct the `.pkl` locally), or recovering a posterior from a run that
+  checkpointed but was stopped before it wrote one. It is run ad hoc and is
+  deliberately kept out of the `SRM_AND_SBI_DIMER_ALP_HPC_Submit.sh` dispatcher and
+  the standard HPC wrapper set, which stay exactly the four canonical stages.
+
+### Documentation
+
+- Documented the entry point across the front-door references: the README structure
+  list, the PROJECT_CONTEXT entry-point section, and a new "Special-situation entry
+  points" section in the HPC operations runbook carrying the ad-hoc `sbatch --wrap`
+  recipe — so its purpose and launch are discoverable without presenting it as a
+  pipeline stage.
+
 ## 0.2.5 - 2026-06-30
 
 Makes the inference DataLoader worker count rank- and loader-aware, so multi-GPU

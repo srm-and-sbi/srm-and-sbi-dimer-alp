@@ -145,7 +145,7 @@ then open the printed `http://localhost:8888/...` URL in your browser and run th
 
 - `Script_Bank/Analysis` — analysis entry-point scripts
 - `Script_Bank/HPC` — HPC-mode submission and orchestration scripts
-- `Script_Bank/Prime` — stage scripts: simulation (`Simulation_RDS`, `Simulation_DLI`), dataset generation (`Generate_Datasets`), training (`Inference`), and validation (`Evaluation` on simulated EVAL data, `Experiment` on real microscopy)
+- `Script_Bank/Prime` — stage scripts: simulation (`Simulation_RDS`, `Simulation_DLI`), dataset generation (`Generate_Datasets`), training (`Inference`), and validation (`Evaluation` on simulated EVAL data, `Experiment` on real microscopy); plus `Construction_Optimum_ANN`, a special-situation entry point that rebuilds the posterior from a saved checkpoint without training — it stands in for Inference's posterior output when transferring trained weights between machines or recovering a checkpoint, run ad hoc rather than through the standard submitter (see the [HPC operations runbook](Script_Bank/HPC/README.md), *Special-situation entry points*)
 - `srm_and_sbi_dimer_alp/` — main Python package (modules, support functions)
 
 ## Documentation

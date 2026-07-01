@@ -393,6 +393,16 @@ configuration, calls package functions, and writes outputs to the
 configuration-defined paths. The package is installed editable, so script edits
 to the package take effect without reinstallation.
 
+Alongside the standard pipeline stages, `Script_Bank/Prime/` holds one
+special-situation entry point — `SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py`,
+which rebuilds a saved posterior from an `Optimum_ANN` checkpoint without
+retraining. It produces the same posterior artifact the Inference stage would,
+for the situations where retraining is not wanted: moving a trained model
+between machines, or recovering a posterior from a run stopped before it wrote
+one. In those workflows it is the step that feeds the downstream Evaluation and
+Experiment stages. It is run ad hoc, outside the standard four-stage dispatcher;
+the HPC operations runbook (`Script_Bank/HPC/README.md`) documents its launch.
+
 ### Configuration architecture
 
 Configuration is split into two complementary parts:

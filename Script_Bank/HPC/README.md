@@ -383,7 +383,59 @@ submit line at the script's baked defaults.
 
 ---
 
-## 6. Do not
+## 6. Special-situation entry points (run ad hoc)
+
+The four stages in §1 form the standard, dispatcher-driven pipeline. A few entry
+points sit outside that dispatcher — special-situation steps run by hand when a
+specific case calls for them. They are deliberately kept out of the `Submit.sh`
+dispatcher and the stage wrapper set, so the standard submission surface stays
+exactly the four stages. Run them ad hoc with the recipe here rather than
+building new launch machinery.
+
+### Construct a posterior from a checkpoint
+
+`Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py` rebuilds a
+`DirectPosterior` pickle from a saved `Optimum_ANN.pth` checkpoint **without
+training**: it constructs the estimator exactly as Inference does, loads the
+checkpoint weights into it, and pickles the posterior. Use it to
+
+- move a trained model between machines — copy the small `.pth`, then construct
+  the `.pkl` locally (a pickle embeds device state and is not portably moved); or
+- recover a posterior from a run that checkpointed but was stopped (e.g. a wall
+  timeout) before it reached its own save block.
+
+It is single-process, single-GPU — there is nothing to shard — and its cost is
+the one-time `torch.compile` in `build_maf` (a few minutes). Run it with plain
+`python`, not `torchrun`.
+
+Locally (add `--dry-run` first to validate the checkpoint and inputs without GPU use):
+
+```bash
+MACHINE_PROFILE=<profile> python \
+    Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py --total-time-seconds 2.0
+```
+
+On Slurm — a one-off `sbatch --wrap` that sources `hpc_local.env` (§5) for the
+machine config and requests a single GPU on the check partition. Submit from the
+repo root; the job name follows the §3 pattern with a `Construction` descriptor:
+
+```bash
+cd /path/to/srm-and-sbi-dimer-alp
+sbatch --partition=gpu_test --gres=gpu:1 --cpus-per-task=16 --mem=64G --time=00:30:00 \
+       --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Construction \
+       --output="$MON_OUT/%x_%A.out" \
+       --wrap='set -e; . Script_Bank/HPC/hpc_local.env; source "$CONDA_SETUP"; \
+               conda activate SRM_AND_SBI_ENVY_V0; export MACHINE_PROFILE="${MACHINE_PROFILE:?}"; \
+               python -u Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py --total-time-seconds 2.0'
+```
+
+Reads `Labor/..._{timing_label}_Optimum_ANN.pth`, writes
+`Posit/..._{timing_label}_Posterior.pkl`. Swap the `timing_label` token in the
+job name and `--total-time-seconds` together for other durations.
+
+---
+
+## 7. Do not
 
 - **Do not invent job or log names.** Use exactly
   `SRM_AND_SBI_DIMER_ALP_<timing_label>_<Stage>[_<SPLIT>]` (§3). No invented
