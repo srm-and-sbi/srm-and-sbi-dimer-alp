@@ -5,6 +5,71 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.11 - 2026-07-02
+
+Automatic provenance backups for the trained artifacts, and a Construction path
+that rebuilds a posterior from any checkpoint backup. Also makes the Experiment
+launcher's chunk-step default duration-general, and adds the CD86 / CTLA-4
+control-receptor analysis scripts. Additive and backward compatible: the canonical
+outputs and the default Construction behavior are unchanged.
+
+### Added
+
+- **Automatic artifact backups.** A finished Inference run that loaded a TEST set
+  (`--test-tasks > 0`) now writes, alongside the canonical checkpoint
+  (`Labor/…_Optimum_ANN.pth`) and posterior (`Posit/…_Posterior.pkl`), a
+  provenance-named copy of each:
+  `…_TRAIN+TEST_<train>+<test>_Epoch_<n>_TEST_LOSS_<loss>.<ext>`. The suffix records
+  the TRAIN/TEST video counts (as thousands-tokens, `50000` → `50K`), the epochs the
+  job ran, and the checkpoint's best TEST loss (exactly two decimals; explicit `+`
+  on a positive value, no sign when it rounds to `0.00`). The bare `state_dict` and
+  the posterior pickle carry no such metadata, so the name is the only record of a
+  model's training scale and result. Canonical names are untouched — a backup is a
+  copy and is never loaded as the active artifact. A `--test-tasks 0` run has no
+  selection loss and writes the canonical pair only.
+- **Construction from a specific checkpoint.**
+  `Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py` gained
+  `--checkpoint` and `--posterior`: point `--checkpoint` at a backup and the matching
+  backup posterior is derived (`Optimum_ANN` → `Posterior`, `.pth` → `.pkl`) and
+  written, so an archived checkpoint can be rebuilt into its posterior without
+  retraining. With no flags the behavior is unchanged (canonical → canonical).
+- `Paths` (`parameterization.py`) gained the pure name-derivation helpers
+  `format_backup_loss`, `format_backup_size`, `backup_descriptor`,
+  `backup_checkpoint_path`, `backup_posterior_path`, and
+  `posterior_path_for_checkpoint`.
+- **CD86 / CTLA-4 control-receptor analysis** (`Script_Bank/Analysis/`,
+  special-scope reuse — not canonical pipeline stages). `…_Experiment_CD86_CTLA-4_Controls.py`
+  is a near-verbatim clone of the MET Experiment stage that applies the MET-trained
+  posterior (no retraining) to two control receptors of known oligomeric state —
+  CD86 (monomer) and CTLA-4 (dimer) — reading their own dataset folder and writing
+  their own output directory, so the canonical MET Experiment and its outputs are
+  never touched. `…_Controls_Temporal_Dynamics.py` (with companion `.md`) analyzes
+  the temporal dynamics of the inferred parameters with a mobile-diffusion headline
+  readout, with the two receptors bracketing the monomer/dimer diffusion scale.
+
+### Changed
+
+- `train_loop` (`inference_support.py`) now returns a fourth value,
+  `optimum_loss_test` — the checkpoint's best TEST loss, resurrect-baseline-aware —
+  which names the automatic backup. Its only caller, the Inference entry point, is
+  updated; no other behavior changes.
+- The Experiment launcher (`Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Experiment.sh`)
+  now leaves `CHUNK_STEP` unset by default, so the Experiment entry point tiles at
+  the integer model window (non-overlapping) for any `--total-time-seconds`, rather
+  than a hardcoded 2 s literal that only evenly divides a 2 s window. Set `CHUNK_STEP`
+  to force overlapping chunks (e.g. `1` for a 1 s stride).
+
+### Documentation
+
+- Rewrote the HPC runbook §7 (*Artifact backups*): documents the automatic
+  provenance scheme as primary and retains the manual dated-tag convention
+  (`_<TAG>_<DD.MM.YYYY>`) for ad-hoc keeps.
+- Extended the HPC runbook §6 (*Construct a posterior from a checkpoint*) with the
+  `--checkpoint` / `--posterior` derivation and the backup-rebuild use case.
+- Expanded the PROJECT_CONTEXT §3 output note to cover the canonical + auto-backup +
+  rebuild story, and noted in the VALIDATION Inference smoke test when a backup is
+  written.
+
 ## 0.2.10 - 2026-07-01
 
 Documentation: add the multi-GPU timing benchmark. No code change.

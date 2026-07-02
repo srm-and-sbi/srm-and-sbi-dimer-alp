@@ -111,7 +111,15 @@ model for Stage 2.
 **Objective:** Infer the RDS parameters (`θ`) conditional on the fixed detector:
 `p(θ | video, β_fixed)`.
 
-**Output:** A pickled posterior and a trained neural-network checkpoint.
+**Output:** A pickled posterior and a trained neural-network checkpoint. Both are
+written under canonical, duration-stamped names that every downstream stage loads
+(`Posit/…_Posterior.pkl`, `Labor/…_Optimum_ANN.pth`), and a re-run on the same
+duration overwrites them. So that superseded models stay identifiable and recoverable,
+every finished run also writes a provenance-named backup of both — encoding the
+train/test set sizes, epochs, and test loss — and any archived checkpoint can be
+rebuilt into its posterior without retraining. See the HPC operations runbook
+(*Artifact backups* and *Special-situation entry points*) for the naming, restore,
+and rebuild conventions.
 
 ---
 

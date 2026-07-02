@@ -666,8 +666,12 @@ def train_loop(estimator: nn.Module,
     identity and the path matches the original.
 
     Returns:
-        (losses_train, losses_test, losses_replay) -- three 1D arrays of length
-        `epochs` (per-epoch mean train, test, and replay loss).
+        (losses_train, losses_test, losses_replay, optimum_loss_test) -- the three
+        1D arrays of length `epochs` (per-epoch mean train, test, and replay loss),
+        plus the best (lowest) TEST loss the saved checkpoint attained. In resurrect
+        mode it starts from the loaded checkpoint's baseline, so it reflects the
+        checkpoint on disk even when no epoch improved on it; it is ``inf`` when
+        there is no TEST set.
     """
     import torch.distributed as dist
     if epochs is None:
@@ -822,7 +826,7 @@ def train_loop(estimator: nn.Module,
         print("Final: last-epoch checkpoint kept (no test set; "
               "validate on the EVAL namespace).")
 
-    return losses_train, losses_test, losses_replay
+    return losses_train, losses_test, losses_replay, optimum_loss_test
 
 
 # =============================================================================

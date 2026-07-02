@@ -8,7 +8,7 @@
 # .tif recordings under <data_bank>/Experiment/, writes inferred-parameter
 # distributions per condition (Posit/..._MAP_Experiment/).
 # Overridable via --export: KINDS (e.g. ALP,BET), MAX_CELLS (0=all),
-#   CHUNK_STEP (seconds), SUMMARY (map|posterior|both), POOL_MODE, TOTAL_TIME,
+#   CHUNK_STEP (seconds; unset -> model-window default, non-overlapping), SUMMARY (map|posterior|both), POOL_MODE, TOTAL_TIME,
 #   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated). A worker that
 #   draws no cells writes no shard.
 #   Non-deterministic (no seed).
@@ -79,7 +79,12 @@ export MACHINE_PROFILE="${MACHINE_PROFILE:?set MACHINE_PROFILE (via hpc_local.en
 
 KINDS="${KINDS:-ALP,BET}"
 MAX_CELLS="${MAX_CELLS:-0}"
-CHUNK_STEP="${CHUNK_STEP:-2}"
+# Leave CHUNK_STEP unset by default so the Experiment entry point applies its own
+# default (step = the integer model window -> non-overlapping tiling), which is
+# valid for ANY --total-time-seconds. A fixed literal here would divide only some
+# windows (e.g. 2 divides a 2 s window but not a 5 s one). Set CHUNK_STEP to force
+# overlapping chunks (e.g. 1 = 1 s stride).
+CHUNK_STEP="${CHUNK_STEP:-}"
 SUMMARY="${SUMMARY:-both}"
 POOL_MODE="${POOL_MODE:-bounded}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
@@ -87,10 +92,13 @@ TOTAL_TIME="${TOTAL_TIME:-2.0}"
 # GPU count for sharding: SRM_AND_SBI_GPUS override, else allocated GPUs, else 1.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 EXP_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py"
-EXP_ARGS=( --kinds "$KINDS" --max-cells "$MAX_CELLS" --chunk-step-seconds "$CHUNK_STEP"
+EXP_ARGS=( --kinds "$KINDS" --max-cells "$MAX_CELLS"
            --summary "$SUMMARY" --pool-mode "$POOL_MODE" --total-time-seconds "$TOTAL_TIME" )
+# Forward --chunk-step-seconds only when explicitly set; otherwise let the entry
+# point default it to the model window (see the CHUNK_STEP note above).
+[ -n "$CHUNK_STEP" ] && EXP_ARGS+=( --chunk-step-seconds "$CHUNK_STEP" )
 
-echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP}s summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s gpus=${GPUS} seed=None | node $(hostname) ==="
+echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP:-window-default} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s gpus=${GPUS} seed=None | node $(hostname) ==="
 
 if [ "${GPUS:-1}" -gt 1 ]; then
     # Shard the (kind, cell) work across $GPUS workers (one GPU each), then merge

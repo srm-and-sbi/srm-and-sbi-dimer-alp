@@ -400,9 +400,11 @@ training**: it constructs the estimator exactly as Inference does, loads the
 checkpoint weights into it, and pickles the posterior. Use it to
 
 - move a trained model between machines — copy the small `.pth`, then construct
-  the `.pkl` locally (a pickle embeds device state and is not portably moved); or
+  the `.pkl` locally (a pickle embeds device state and is not portably moved);
 - recover a posterior from a run that checkpointed but was stopped (e.g. a wall
-  timeout) before it reached its own save block.
+  timeout) before it reached its own save block; or
+- rebuild the posterior for an archived backup checkpoint (§7) — point
+  `--checkpoint` at the backup and the matching backup posterior is produced.
 
 It is single-process, single-GPU — there is nothing to shard — and its cost is
 the one-time `torch.compile` in `build_maf` (a few minutes). Run it with plain
@@ -429,9 +431,14 @@ sbatch --partition=gpu_test --gres=gpu:1 --cpus-per-task=16 --mem=64G --time=00:
                python -u Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py --total-time-seconds 2.0'
 ```
 
-Reads `Labor/..._{timing_label}_Optimum_ANN.pth`, writes
-`Posit/..._{timing_label}_Posterior.pkl`. Swap the `timing_label` token in the
-job name and `--total-time-seconds` together for other durations.
+By default reads `Labor/..._{timing_label}_Optimum_ANN.pth` and writes
+`Posit/..._{timing_label}_Posterior.pkl`. Pass `--checkpoint <path>` to build from a
+specific checkpoint instead — e.g. a provenance-named backup (§7)
+`..._Optimum_ANN_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pth`; the output
+posterior name is then derived to match (`Optimum_ANN` → `Posterior`, `.pth` →
+`.pkl`), so the rebuilt `.pkl` tracks the weights it came from (override with
+`--posterior`). Swap the `timing_label` token in the job name and
+`--total-time-seconds` together for other durations.
 
 ---
 
@@ -439,30 +446,81 @@ job name and `--total-time-seconds` together for other durations.
 
 The trained artifacts — a posterior (`Posit/…_Posterior.pkl`) and its checkpoint
 (`Labor/…_Optimum_ANN.pth`) — are overwritten in place whenever the stage that
-produces them re-runs (a fresh Inference run, or a Construction rebuild, §6).
-Before a run that will supersede an artifact worth keeping, copy it aside under a
-dated backup name so it survives and stays easy to tell apart from later ones. The
-convention is a tag plus a German-format date inserted before the extension:
+produces them re-runs (a fresh Inference run, or a Construction rebuild, §6). The
+canonical names never change: they are the live objects every downstream stage
+(Evaluation, Experiment, Construction) loads. To keep a superseded model
+identifiable and recoverable after it is overwritten, a copy is set aside under a
+distinct name — automatically by a finished run, or by hand for an ad-hoc keep.
+
+### Automatic provenance backup
+
+A finished Inference run that loaded a TEST set (`--test-tasks > 0`, so a
+model-selection loss exists) writes, alongside the canonical checkpoint and
+posterior, a provenance-named copy of each. The suffix records what the bare
+`state_dict` and posterior pickle cannot carry themselves — the run's training
+scale and result — inserted before the extension:
+
+    <original-stem>_TRAIN+TEST_<train>+<test>_Epoch_<n>_TEST_LOSS_<loss>.<ext>
+
+- **`<train>` / `<test>`** — the number of TRAIN and TEST videos the run used, as
+  thousands-tokens (`50000` → `50K`, `47500` → `47.5K`). Sizes are in the name
+  because a test loss is only comparable at equal test-set size: a −17.00 measured
+  on 50K selection videos is not the same result as −17.00 on 10K.
+- **`Epoch_<n>`** — the number of epochs this job ran (`--epochs`), counted for the
+  current job (a warm-started `--resurrect` run counts its own epochs, not the
+  history of the weights it loaded).
+- **`TEST_LOSS_<loss>`** — the checkpoint's best TEST loss, always exactly two
+  decimals. A negative loss keeps its native `-`; a positive loss gets an explicit
+  `+`; a value that rounds to zero is written `0.00`, with no sign.
+
+For a 200K-train / 50K-test run over 25 epochs that reached a best test loss of
+−17.05, the pair is:
+
+    Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pth
+    Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pkl
+
+The backup is a copy, so the canonical `…_Optimum_ANN.pth` / `…_Posterior.pkl`
+stay the active artifacts and a backup is never picked up as the live model. Across
+warm-started runs the canonical checkpoint is additionally protected by
+save-on-improvement — it is overwritten only when the current run beats the loaded
+best on the TEST set — so each accepted optimum is preserved under its own backup
+name. To make a backup the active model again, copy it onto the canonical name; to
+rebuild its posterior from the checkpoint alone, point Construction's `--checkpoint`
+at the backup (§6).
+
+A run with no TEST set (`--test-tasks 0`, which trains on all of TRAIN and keeps
+the last-epoch checkpoint) has no selection loss to name a backup by, so it writes
+the canonical pair only.
+
+### Manual ad-hoc keep
+
+The automatic backup covers finished training runs. To preserve an artifact the
+automatic scheme does not — for instance the current canonical *before* you
+deliberately launch a run that will overwrite it, or a milestone worth tagging —
+copy it aside by hand under a tag plus a day-month-year date, inserted before the
+extension:
 
     <original-stem>_<TAG>_<DD.MM.YYYY>.<ext>
 
-- **`<TAG>`** — a short label for why the copy was kept (e.g. `PREPROD` for the
-  best artifact preserved before a full production run).
-- **`<DD.MM.YYYY>`** — the date in German format (e.g. `01.07.2026`).
-
 ```bash
-# preserve the current best 2S posterior + its checkpoint before a production run
+# preserve the current best 2S posterior + its checkpoint before an overwriting run
 cp Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl \
    Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior_PREPROD_01.07.2026.pkl
 cp Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN.pth \
    Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN_PREPROD_01.07.2026.pth
 ```
 
-Because the tag-and-date suffix sits before the extension, a backup never matches
-the `…_Posterior.pkl` / `…_Optimum_ANN.pth` names the pipeline loads — it is kept,
-but never picked up as the active artifact. Keep the backup beside its original
-(same `Posit/` or `Labor/` directory); if that storage tier is not backed up
-(e.g. a scratch `data_bank_root`), also copy it to a backed-up location.
+`<TAG>` is a short label for why the copy was kept (e.g. `PREPROD` before a
+production run); `<DD.MM.YYYY>` is the date (e.g. `01.07.2026`).
+
+### Both kinds land beside the original
+
+Whether automatic or manual, the suffix sits before the extension, so a backup
+never matches the `…_Posterior.pkl` / `…_Optimum_ANN.pth` names the pipeline loads —
+it is kept, but never picked up as the active artifact. Keep each backup in the
+same `Posit/` or `Labor/` directory as its original; if that storage tier is not
+itself backed up (for example a scratch `data_bank_root`), also copy the backup to
+a backed-up location.
 
 ---
 

@@ -295,6 +295,84 @@ class Paths:
         )
         return data_bank_root / self.posit_subdir / filename
 
+    # ---- Backup / archival artifact names --------------------------------
+    # A finished training run overwrites the canonical checkpoint + posterior above
+    # (the names every downstream stage loads). To keep an identifiable, restorable
+    # history, each finished run also writes a backup copy whose name embeds the
+    # run's provenance -- train/test set sizes, epoch count, and best TEST loss --
+    # since the bare state_dict and posterior pickle carry no such metadata. The
+    # canonical files remain the live objects; a backup is restored by copying it
+    # back onto the canonical name.
+    @staticmethod
+    def format_backup_loss(test_loss: float) -> str:
+        """Signed TEST-loss token with exactly two decimals: ``-17.05``, ``+3.20``.
+
+        A value that rounds to zero (either sign) renders ``0.00`` with no sign.
+        Operates on the formatted string, so it never relies on float equality.
+        """
+        text = f"{test_loss:.2f}"
+        if text in ("0.00", "-0.00"):
+            return "0.00"
+        return text if text.startswith("-") else f"+{text}"
+
+    @staticmethod
+    def format_backup_size(n_videos: int) -> str:
+        """Video count as a compact ``K`` token: 200000 -> ``200K``, 47500 -> ``47.5K``."""
+        if n_videos % 1000 == 0:
+            return f"{n_videos // 1000}K"
+        return f"{n_videos / 1000:g}K"
+
+    def backup_descriptor(self, train_videos: int, test_videos: int,
+                          epochs: int, test_loss: float) -> str:
+        """Provenance token appended to a backup filename, e.g.
+        ``TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05``."""
+        return (
+            f"TRAIN+TEST_{self.format_backup_size(train_videos)}"
+            f"+{self.format_backup_size(test_videos)}"
+            f"_Epoch_{epochs}_TEST_LOSS_{self.format_backup_loss(test_loss)}"
+        )
+
+    def backup_checkpoint_path(self, data_bank_root: Path, timing_label: str,
+                               train_videos: int, test_videos: int,
+                               epochs: int, test_loss: float) -> Path:
+        """Provenance-named backup of the checkpoint, alongside the canonical one."""
+        base = self.checkpoint_pattern.format(
+            project_alias=self.project_alias, timing_label=timing_label)
+        stem, ext = base.rsplit(".", 1)
+        descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)
+        return data_bank_root / self.labor_subdir / f"{stem}_{descriptor}.{ext}"
+
+    def backup_posterior_path(self, data_bank_root: Path, timing_label: str,
+                              train_videos: int, test_videos: int,
+                              epochs: int, test_loss: float) -> Path:
+        """Provenance-named backup of the posterior, alongside the canonical one."""
+        base = self.posterior_pattern.format(
+            project_alias=self.project_alias, timing_label=timing_label)
+        stem, ext = base.rsplit(".", 1)
+        descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)
+        return data_bank_root / self.posit_subdir / f"{stem}_{descriptor}.{ext}"
+
+    def posterior_path_for_checkpoint(self, checkpoint_path: Path,
+                                      data_bank_root: Path) -> Path:
+        """Posterior path matching a given checkpoint (canonical or a backup).
+
+        Derives the output name from the checkpoint's own filename by swapping the
+        object token and extension -- ``Optimum_ANN`` -> ``Posterior``, ``.pth`` ->
+        ``.pkl`` -- and placing it under ``Posit/``. A canonical checkpoint maps to
+        the canonical posterior; a descriptor-named backup checkpoint maps to the
+        matching backup posterior (the descriptor rides along unchanged). Lets a
+        posterior be rebuilt from any archived checkpoint under a consistent name.
+        """
+        name = checkpoint_path.name
+        if "Optimum_ANN" not in name or not name.endswith(".pth"):
+            raise ValueError(
+                f"cannot derive a posterior name from {name!r}: expected an "
+                f"'Optimum_ANN' checkpoint ending in '.pth'. Pass an explicit "
+                f"posterior path instead."
+            )
+        posterior_name = name.replace("Optimum_ANN", "Posterior")[:-len(".pth")] + ".pkl"
+        return data_bank_root / self.posit_subdir / posterior_name
+
     def debug_run_dir(self, data_bank_root: Path, timing_label: str, stage: str,
                       split: Optional[str] = None) -> Path:
         """Process-level diagnostics directory for one ``--debug-dump`` run.

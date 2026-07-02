@@ -31,13 +31,23 @@ Inputs / outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered
 from ``PARAMETERS.simulation.timing`` by duration + fps):
 
     reads  <data_bank>/<labor_subdir>/<project_alias>_{timing_label}_Optimum_ANN.pth
-        -- the trained estimator checkpoint (weights only).
+        -- the trained estimator checkpoint (weights only). Override with
+        ``--checkpoint`` to build from a specific file, e.g. a provenance-named
+        backup ``..._Optimum_ANN_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pth``.
     writes <data_bank>/<posit_subdir>/<project_alias>_{timing_label}_Posterior.pkl
-        -- the constructed DirectPosterior, ready for downstream sampling.
+        -- the constructed DirectPosterior, ready for downstream sampling. When the
+        source is a backup checkpoint the output name is derived to match
+        (``Optimum_ANN`` -> ``Posterior``, ``.pth`` -> ``.pkl``), so the posterior
+        tracks the weights it came from; override with ``--posterior``.
 
 Usage:
+    # canonical checkpoint -> canonical posterior:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py \\
         --total-time-seconds 2.0
+    # a specific backup checkpoint -> its matching backup posterior:
+    MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py \\
+        --total-time-seconds 2.0 \\
+        --checkpoint SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pth
 
     On a Slurm cluster this runs ad hoc, outside the standard four-stage
     dispatcher -- in the weight-transfer or checkpoint-recovery situations it is
@@ -97,8 +107,23 @@ def main(args: argparse.Namespace) -> None:
     div = "=" * 72
 
     timing_label = timing.label
-    checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)   # source weights
-    posterior_path = paths.posterior_path(data_bank_root, timing_label)     # output
+    # Source checkpoint: an explicit --checkpoint (a backup, or a file copied in
+    # for weight transfer; a bare filename resolves under Labor/), else canonical.
+    if args.checkpoint:
+        checkpoint_path = Path(args.checkpoint)
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = data_bank_root / paths.labor_subdir / checkpoint_path
+    else:
+        checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)   # source weights
+    # Output posterior: an explicit --posterior, else derived from the checkpoint
+    # name (canonical -> canonical; a descriptor-named backup -> the matching backup
+    # posterior), so the .pkl always tracks the .pth it was built from.
+    if args.posterior:
+        posterior_path = Path(args.posterior)
+        if not posterior_path.is_absolute():
+            posterior_path = data_bank_root / paths.posit_subdir / posterior_path
+    else:
+        posterior_path = paths.posterior_path_for_checkpoint(checkpoint_path, data_bank_root)  # output
 
     print(div)
     print(f" {paths.project_alias} — Construction (posterior from checkpoint)")
@@ -258,6 +283,21 @@ def parse_args(argv=None) -> argparse.Namespace:
         required=True,
         help="Video duration in seconds; determines n_frames for the network. "
              "Must match the value used to produce the checkpoint being loaded.",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Source Optimum_ANN checkpoint to build the posterior from. A bare "
+             "filename resolves under <data_bank>/Labor/; an absolute path is used "
+             "as-is. Default: the canonical "
+             "<project_alias>_{timing_label}_Optimum_ANN.pth. Point this at a "
+             "provenance-named backup to rebuild that specific posterior.",
+    )
+    parser.add_argument(
+        "--posterior", type=str, default=None,
+        help="Explicit output path for the constructed posterior (a bare filename "
+             "resolves under <data_bank>/Posit/). Default: derived from the "
+             "checkpoint name (Optimum_ANN -> Posterior, .pth -> .pkl), so a backup "
+             "checkpoint yields the matching backup posterior.",
     )
     parser.add_argument(
         "--seed", type=int, default=None,

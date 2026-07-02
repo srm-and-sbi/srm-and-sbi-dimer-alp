@@ -22,7 +22,9 @@ Usage:
 """
 
 import argparse
+import math
 import random
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -325,7 +327,7 @@ def main(args: argparse.Namespace) -> None:
     if args.verbose:
         log_memory_state(prefix="[Pre-training]")
 
-    losses_train, losses_test, losses_replay = train_loop(
+    losses_train, losses_test, losses_replay, optimum_loss_test = train_loop(
         estimator=training_setup["estimator"],
         model=training_setup["model"],
         train_loader=training_setup["train_loader"],
@@ -369,6 +371,28 @@ def main(args: argparse.Namespace) -> None:
         posterior_path.parent.mkdir(parents=True, exist_ok=True)
         save_posterior(posterior, prior_device, posterior_path)
         print(f"Posterior saved to {posterior_path}")
+
+        # ---- Auto-backup: provenance-named copies of the just-saved best ------
+        # A finished run overwrites the canonical checkpoint + posterior (the names
+        # every downstream stage loads). Copy both to backups whose filename embeds
+        # this run's provenance -- train/test set sizes, epochs, and the checkpoint's
+        # best TEST loss -- since the bare state_dict and posterior pickle carry no
+        # such metadata. The canonical files stay the live objects; a backup is
+        # restored later by copying it back onto the canonical name. Keyed on the
+        # TEST loss, so it is skipped for a run with no TEST set.
+        if args.test_tasks > 0 and math.isfinite(optimum_loss_test):
+            train_videos = len(training_setup["train_loader"].dataset)
+            test_videos = len(training_setup["val_loader"].dataset)
+            ckpt_backup = paths.backup_checkpoint_path(
+                data_bank_root, timing_label, train_videos, test_videos,
+                args.epochs, optimum_loss_test)
+            posterior_backup = paths.backup_posterior_path(
+                data_bank_root, timing_label, train_videos, test_videos,
+                args.epochs, optimum_loss_test)
+            shutil.copy2(checkpoint_path, ckpt_backup)
+            shutil.copy2(posterior_path, posterior_backup)
+            print(f"Backup checkpoint saved to {ckpt_backup}")
+            print(f"Backup posterior saved to {posterior_backup}")
 
     # ---- Diagnostics: confirm outputs written, figure, summary ----------
     if reporter.enabled:

@@ -187,7 +187,9 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
 posterior at `<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl`.
 One epoch on a handful of (video, theta) pairs will not produce a useful
 posterior, but it exercises the full training and save path, including the
-network construction and the data loader.
+network construction and the data loader. This command loads no TEST set, so it
+writes only the canonical pair; a run with `--test-tasks > 0` additionally writes
+a provenance-named backup of each (see PROJECT_CONTEXT §3 and the HPC runbook §7).
 
 **Requires**: the RDS and DLI smoke tests (sections 2.1 and 2.2) must have run
 first with `--task-simulations 5` (or higher). With too few simulations the dataset is too
