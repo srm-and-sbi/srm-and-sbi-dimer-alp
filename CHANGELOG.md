@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.12 - 2026-07-05
+
+Fail-fast guard on non-finite training loss, with a trip-only diagnostic breadcrumb.
+Additive and behavior-neutral while losses are finite: it changes behavior only when a
+training loss becomes NaN or Inf, where it now aborts cleanly (before backward/step)
+instead of continuing to train on the non-finite value.
+
+### Added
+
+- **Non-finite training-loss guard** (`inference_support.py`, `train_loop`). Each
+  training batch checks its loss; on a non-finite value it aborts with a clear
+  `[FINITE-GUARD]` message (epoch, batch, rank) before `backward()`/`step()`, so the
+  NaN cannot propagate into the optimizer or drive a downstream out-of-bounds GPU
+  access. `--resurrect` resumes from the last checkpoint on the next submission. The
+  check reuses the per-batch `loss.item()` sync, so the finite path is unchanged.
+- **Trip-only diagnostic breadcrumb** (`_diagnose_nonfinite_loss`). On the failing
+  batch only, it logs whether any model parameter is already non-finite (weights
+  diverged vs. a non-finite forward on finite weights) and the finite-status and range
+  of the input `video_batch` / `theta_batch` (a corrupt input). It runs only at the
+  failure, so it adds nothing to normal training.
+
 ## 0.2.11 - 2026-07-02
 
 Automatic provenance backups for the trained artifacts, and a Construction path

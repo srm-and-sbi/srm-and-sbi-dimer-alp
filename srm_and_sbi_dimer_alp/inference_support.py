@@ -620,6 +620,29 @@ def compute_validation_loss(estimator: nn.Module,
 # Training loop
 # =============================================================================
 
+def _diagnose_nonfinite_loss(model, video_batch, theta_batch, loss_value, epoch, batch, rank):
+    """Trip-only breadcrumb for a non-finite training loss (see the finite guard in
+    train_loop). Runs only on the failing batch, so it adds nothing to the finite path.
+    Separates three causes: weights already diverged, a non-finite forward on finite
+    weights, or a corrupt input batch. Prints to the log; the caller then aborts."""
+    with torch.no_grad():
+        bad = [name for name, p in model.named_parameters() if not torch.isfinite(p).all()]
+        v_fin = bool(torch.isfinite(video_batch).all())
+        t_fin = bool(torch.isfinite(theta_batch).all())
+        v_lo, v_hi = video_batch.min().item(), video_batch.max().item()
+        t_lo, t_hi = theta_batch.min().item(), theta_batch.max().item()
+    weights_note = (f"{len(bad)} non-finite (e.g. {bad[:3]}) -> weights already diverged"
+                    if bad else "0 non-finite -> weights finite; NaN arose in this forward")
+    print(
+        f"[FINITE-GUARD] non-finite training loss ({loss_value}) at "
+        f"epoch {epoch}, batch {batch}, rank {rank}. Trip-only breadcrumb:\n"
+        f"[FINITE-GUARD]   parameters: {weights_note}\n"
+        f"[FINITE-GUARD]   video_batch: all_finite={v_fin} range=[{v_lo:.3e}, {v_hi:.3e}]\n"
+        f"[FINITE-GUARD]   theta_batch: all_finite={t_fin} range=[{t_lo:.3e}, {t_hi:.3e}]",
+        flush=True,
+    )
+
+
 def train_loop(estimator: nn.Module,
                model: nn.Module,
                train_loader: DataLoader,
@@ -753,9 +776,19 @@ def train_loop(estimator: nn.Module,
             theta_batch = theta_batch.to(device)
             optimizer.zero_grad()
             loss = torch.mean(model(theta_batch, condition=video_batch))
+            loss_value = loss.item()   # single host sync, reused below
+            if not np.isfinite(loss_value):
+                # Fail-fast: abort before the NaN propagates through backward/step
+                # (a NaN can drive an out-of-bounds GPU access -> "memory access fault").
+                # --resurrect resumes from the last checkpoint on the next submission.
+                _diagnose_nonfinite_loss(model, video_batch, theta_batch,
+                                         loss_value, epoch + 1, b, topo.rank)
+                raise RuntimeError(
+                    f"[FINITE-GUARD] non-finite training loss; aborting before backward/step "
+                    f"(epoch {epoch + 1}, batch {b}, rank {topo.rank}).")
             loss.backward()
             optimizer.step()
-            batch_train_losses.append(loss.item())
+            batch_train_losses.append(loss_value)
             # Always-on within-epoch heartbeat (~4/epoch), rank 0 only.
             if is_main and (b % heartbeat == 0 or b == n_batches):
                 print(f"  epoch {epoch + 1}/{epochs}: batch {b}/{n_batches}  "
