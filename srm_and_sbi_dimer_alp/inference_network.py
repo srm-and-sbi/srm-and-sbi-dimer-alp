@@ -229,14 +229,17 @@ class Complex3DCNN(nn.Module):
               |   1. 3D CNN backbone
               |      ----------------
               |      Stack of `n_conv_layers` blocks of:
-              |        Conv3d(kernel=(3,3,3), padding=1)  -- preserves T, H, W
+              |        Conv3d(kernel=(k,3,3))              -- first block strides time by
+              |                                               `s` (k = max(3, s)) to reduce T
+              |                                               toward temporal_target_frames;
+              |                                               later blocks preserve T, H, W
               |        BatchNorm3d
               |        Mish activation
               |        MaxPool3d(kernel=(1,2,2))           -- halves H, W; T preserved
               |      Channels double at each layer:
               |        in_channels -> start_channels -> ... -> start_channels * 2^(n-1)
               v
-        features:        [B, C, T, H', W']
+        features:        [B, C, T', H', W']   (T' = reduced temporal length)
               |
               |   2. Spatial averaging
               |      -----------------
@@ -261,8 +264,9 @@ class Complex3DCNN(nn.Module):
           particle's appearance and its motion across a few frames).
         - The temporal transformer captures LONG-RANGE temporal dependencies
           across many frames, which small 3D conv kernels cannot reach.
-        - Spatial pooling reduces dimensionality before the attention stage,
-          where each step is O(T^2) in memory and compute.
+        - Spatial pooling -- and, for long videos, the first conv's temporal
+          stride -- reduce dimensionality before the attention stage, whose
+          cost grows with the (reduced) temporal length T'.
 
     Args:
         n_frames: Number of temporal frames in the input video. The network
@@ -281,8 +285,19 @@ class Complex3DCNN(nn.Module):
             TemporalTransformer (CLS token output). If False, average over T.
         attention_heads: Number of attention heads in each AttentionBlock.
             Must divide `start_channels * 2^(n_conv_layers-1)`.
-        verbose: If True, print the inferred output shape and feature dim at
-            construction time.
+        temporal_target_frames: Target temporal length, in FRAMES, for long
+            videos. The video is reduced by an integer factor
+            `s = n_frames // temporal_target_frames`, folded into the first
+            conv's temporal stride (with the temporal kernel widened to
+            `max(3, s)` so kernel >= stride and no frame is skipped), so the
+            activations and the transformer sequence stay bounded regardless of
+            duration. Videos with `n_frames <= temporal_target_frames` are left
+            unchanged (`s = 1`: the first block reduces to the original
+            (3,3,3)/stride-1 conv, so short videos and the 2 s baseline are
+            bit-identical to the un-reduced network). Because
+            `n_frames = duration_seconds * frame_rate`, a given target maps to a
+            different physical duration per frame rate (100 frames = 2 s @ 50
+            FPS = 1 s @ 100 FPS = 4 s @ 25 FPS). `None` disables the reduction.
     """
 
     def __init__(self,
@@ -293,23 +308,50 @@ class Complex3DCNN(nn.Module):
                  start_channels: int = 8,
                  use_temporal_attention: bool = True,
                  attention_heads: int = 2,
+                 temporal_target_frames: int = None,
                  verbose: bool = False):
         super().__init__()
         self.use_temporal_attention = use_temporal_attention
+
+        # ---- Temporal reduction factor (folded into the first conv) ---------
+        # Long videos are reduced toward `temporal_target_frames` by striding
+        # the FIRST conv block in time, so activations and the transformer
+        # sequence stay bounded regardless of duration. The factor is an integer
+        #     s = n_frames // temporal_target_frames   (floor; >= target retained)
+        # and it is 1 -- a no-op -- whenever the video is already at or below the
+        # target, so short videos and the 2 s baseline are left untouched. The
+        # first conv's temporal kernel is widened to `max(3, s)` so that
+        # kernel >= stride: every input frame falls inside some window and none
+        # is skipped (learnable temporal pooling, never decimation).
+        temporal_stride = 1
+        if temporal_target_frames and n_frames > temporal_target_frames:
+            temporal_stride = n_frames // temporal_target_frames
+        self.temporal_stride = temporal_stride
+        first_kernel_t = max(3, temporal_stride)
+        first_pad_t = 1 if temporal_stride == 1 else 0
+        # Invariant: kernel >= stride guarantees no input frame is dropped
+        # between windows. (max(3, s) >= s always; asserted to catch regressions.)
+        assert first_kernel_t >= temporal_stride
 
         # ---- 3D CNN backbone ------------------------------------------------
         layers = []
         in_channels = input_channels
         out_channels = start_channels
-        for _ in range(n_conv_layers):
+        for layer_index in range(n_conv_layers):
+            # Only the first block strides time (by `temporal_stride`); every
+            # later block keeps the original (3,3,3)/stride-1 temporal behavior.
+            if layer_index == 0:
+                kernel_t, stride_t, pad_t = first_kernel_t, temporal_stride, first_pad_t
+            else:
+                kernel_t, stride_t, pad_t = 3, 1, 1
             layers.extend([
                 nn.Conv3d(in_channels, out_channels,
-                          kernel_size=(3, 3, 3),
-                          stride=(1, 1, 1),
-                          padding=(1, 1, 1)),
+                          kernel_size=(kernel_t, 3, 3),
+                          stride=(stride_t, 1, 1),
+                          padding=(pad_t, 1, 1)),
                 nn.BatchNorm3d(out_channels),
                 nn.Mish(),
-                nn.MaxPool3d(kernel_size=(1, 2, 2)),  # spatial /2 each block; T preserved
+                nn.MaxPool3d(kernel_size=(1, 2, 2)),  # spatial /2 each block; time via block-1 stride
             ])
             in_channels = out_channels
             out_channels *= 2
@@ -317,14 +359,16 @@ class Complex3DCNN(nn.Module):
 
         # ---- Infer output shape via dummy forward pass ----------------------
         # The post-conv channel count drives the embedding dimension of the
-        # temporal transformer. Spatial dims are hardcoded to 256x256 to match
-        # the simulation grid; if the simulation grid size changes, update here.
+        # temporal transformer (it is independent of the temporal length).
+        # Spatial dims are hardcoded to 256x256 to match the simulation grid;
+        # if the simulation grid size changes, update here.
         with torch.no_grad():
             dummy_input = torch.zeros(1, input_channels, n_frames, 256, 256)
             dummy_output = self.features(dummy_input)
             pre_pool_shape = dummy_output.shape
-            _, channels, _, _, _ = dummy_output.shape
+            _, channels, reduced_frames, _, _ = dummy_output.shape
             self.feature_dim = channels
+            self.reduced_frames = reduced_frames   # temporal length seen by the transformer
 
         # ---- Optional temporal transformer ----------------------------------
         if use_temporal_attention:
@@ -336,8 +380,12 @@ class Complex3DCNN(nn.Module):
 
         if verbose:
             attn_part = f", {n_attn_layers} attention layers" if use_temporal_attention else ""
+            reduce_part = (
+                f"; temporal x{temporal_stride} ({n_frames} -> {self.reduced_frames} frames)"
+                if temporal_stride > 1 else "; no temporal reduction"
+            )
             print(
-                f"Complex3DCNN initialized: {n_conv_layers} CNN layers{attn_part}; "
+                f"Complex3DCNN initialized: {n_conv_layers} CNN layers{attn_part}{reduce_part}; "
                 f"pre-pool shape {pre_pool_shape}; feature dim {self.feature_dim}"
             )
 

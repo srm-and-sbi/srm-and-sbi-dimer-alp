@@ -591,6 +591,19 @@ class InferenceNetwork:
       transformer that summarizes the conv-stack output across time.
     - `start_channels`: output channels of the first conv block (becomes
       `start_channels * 2^(n_conv_layers - 1)` at the deepest layer).
+    - `temporal_target_frames`: the temporal length, in FRAMES, that a video is
+      reduced toward before the transformer, to bound memory for long
+      recordings. A video of `n_frames` frames is reduced by an integer factor
+      `s = n_frames // temporal_target_frames`, folded into the first conv's
+      temporal stride; videos with `n_frames <= temporal_target_frames` are left
+      untouched (`s = 1`, bit-identical to the un-reduced network, so the 2 s
+      baseline is unaffected). Because `n_frames = duration_seconds * frame_rate`,
+      this frame count corresponds to a different physical duration at different
+      frame rates: 100 frames is 2 s at 50 FPS, 1 s at 100 FPS, or 4 s at 25 FPS.
+      The recommended value is ~100 frames -- a memory / temporal-resolution
+      balance at the sequence level, independent of FPS; values far outside
+      ~50-200 either over-compress the motion signal (too small) or let memory
+      grow again (too large). Set to `None` to disable temporal reduction.
 
     The network returns the CLS-token embedding directly, which feeds the
     downstream MAF density estimator.
@@ -601,6 +614,8 @@ class InferenceNetwork:
     start_channels: int = 8
     use_temporal_attention: bool = True
     attention_heads: int = 4
+    temporal_target_frames: int = 100             # reduce longer videos toward ~this many frames
+    #                                               (see class docstring); None disables reduction.
 
 
 @dataclass(frozen=True)

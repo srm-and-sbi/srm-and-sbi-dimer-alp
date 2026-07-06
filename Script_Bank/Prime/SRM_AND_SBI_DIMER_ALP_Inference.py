@@ -205,7 +205,8 @@ def main(args: argparse.Namespace) -> None:
           f"patience={training_cfg.scheduler_patience})")
     print(f"  embedding : Complex3DCNN(n_conv={network_cfg.n_conv_layers}, "
           f"n_attn={network_cfg.n_attn_layers}, "
-          f"start_ch={network_cfg.start_channels}) "
+          f"start_ch={network_cfg.start_channels}, "
+          f"temporal_target_frames={network_cfg.temporal_target_frames}) "
           f"+ TemporalTransformer(heads={network_cfg.attention_heads})")
     print("  estimator : MAF (z_score=structured, dropout=0.1, batch_norm=True)")
     if args.resurrect:
@@ -273,6 +274,7 @@ def main(args: argparse.Namespace) -> None:
         start_channels=network_cfg.start_channels,
         use_temporal_attention=network_cfg.use_temporal_attention,
         attention_heads=network_cfg.attention_heads,
+        temporal_target_frames=network_cfg.temporal_target_frames,
         verbose=args.verbose,
     )
     embedding_net = torch.compile(embedding_net).to(device)

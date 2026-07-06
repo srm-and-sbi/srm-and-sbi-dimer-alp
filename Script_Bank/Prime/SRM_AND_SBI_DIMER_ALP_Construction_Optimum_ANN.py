@@ -220,6 +220,7 @@ def main(args: argparse.Namespace) -> None:
         start_channels=network_cfg.start_channels,
         use_temporal_attention=network_cfg.use_temporal_attention,
         attention_heads=network_cfg.attention_heads,
+        temporal_target_frames=network_cfg.temporal_target_frames,
         verbose=args.verbose,
     )
     embedding_net = torch.compile(embedding_net).to(device)

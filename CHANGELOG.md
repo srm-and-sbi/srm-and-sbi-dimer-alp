@@ -5,6 +5,47 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.14 - 2026-07-06
+
+Make the embedding network duration-general by bounding its temporal length. Long
+videos are reduced toward a configurable target frame count before the temporal
+transformer, so the first-conv activations (the memory bottleneck, linear in the
+number of frames) stay bounded for any recording length. The reduction is a
+learnable strided convolution folded into the first conv block, and it is a no-op
+for videos at or below the target, so short videos and the 2 s baseline stay
+bit-identical to the un-reduced network.
+
+### Added
+
+- **Temporal reduction in the CNN backbone** (`inference_network.py`,
+  `Complex3DCNN`, new `temporal_target_frames` argument). A video of `n_frames`
+  frames is reduced by an integer factor `s = n_frames // temporal_target_frames`,
+  applied as the temporal stride of the first conv block, with that block's
+  temporal kernel widened to `max(3, s)` so `kernel >= stride` and no input frame
+  is skipped (learnable temporal pooling, not decimation). The reduced length is
+  computed and asserted at construction. `forward()` is unchanged: the reduction
+  lives inside the existing conv stack.
+- **`temporal_target_frames` network-config field** (`parameterization.py`,
+  `InferenceNetwork`), default 100 frames, `None` to disable. Documented in
+  frames with its dependence on duration and frame rate
+  (`n_frames = duration_seconds * frame_rate`; 100 frames is 2 s at 50 FPS, 1 s at
+  100 FPS, or 4 s at 25 FPS). Threaded into the Inference and Construction build
+  sites and reported in the Inference run banner.
+
+### Changed
+
+- Videos longer than `temporal_target_frames` (e.g. 5 s = 250 frames at 50 FPS)
+  now train and infer at a bounded temporal length instead of running the CNN over
+  every frame. Videos at or below the target (1 s, 2 s at 50 FPS) are unchanged.
+  Evaluation and Experiment inherit the reduced network automatically, since they
+  unpickle the trained posterior (which carries the embedding net).
+- Consequence: the first conv's temporal behavior now depends on `(n_frames,
+  temporal_target_frames)`, so a reduced long-video network differs from an
+  un-reduced one of the same nominal duration (for 10 s+ the first-conv kernel also
+  changes shape). This affects only long-video models, which had no memory-viable
+  un-reduced baseline to resume from; the 2 s baseline and its checkpoints are
+  unaffected.
+
 ## 0.2.13 - 2026-07-06
 
 Restore the embedding-network hyperparameters to the reference configuration: a
