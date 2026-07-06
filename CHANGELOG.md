@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.13 - 2026-07-06
+
+Restore the embedding-network hyperparameters to the reference configuration: a
+deeper CNN backbone and a larger temporal transformer, raising the CLS/flow
+conditioning embedding from 64 to 128. Profiling showed the transformer attention
+is not the memory constraint (the CNN activations are), so there is no memory
+reason to keep the network shrunk relative to the reference.
+
+### Changed
+
+- Embedding-network defaults (`parameterization.py`): `n_conv_layers` 4 -> 5
+  (embedding dimension `start_channels * 2^(n_conv_layers-1)` = 64 -> 128),
+  `n_attn_layers` 1 -> 2, `attention_heads` 2 -> 4. `start_channels` (8) and the
+  spatial-only pooling are unchanged.
+- Consequence: checkpoints trained under the previous 64/1/2 configuration are not
+  load-compatible with the new 128/2/4 network, so `--resurrect` cannot resume them.
+  They remain usable as standalone artifacts for downstream sampling.
+
 ## 0.2.12 - 2026-07-05
 
 Fail-fast guard on non-finite training loss, with a trip-only diagnostic breadcrumb.

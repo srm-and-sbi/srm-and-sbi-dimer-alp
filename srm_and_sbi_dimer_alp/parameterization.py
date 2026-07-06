@@ -596,11 +596,11 @@ class InferenceNetwork:
     downstream MAF density estimator.
     """
     input_channels: int = 1
-    n_conv_layers: int = 4
-    n_attn_layers: int = 1
+    n_conv_layers: int = 5
+    n_attn_layers: int = 2
     start_channels: int = 8
     use_temporal_attention: bool = True
-    attention_heads: int = 2
+    attention_heads: int = 4
 
 
 @dataclass(frozen=True)
