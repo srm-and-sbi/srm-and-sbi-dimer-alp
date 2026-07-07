@@ -85,7 +85,8 @@ def write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path: Path,
     print(f"\nRecovery arrays saved to {recovery_array_path}")
 
     # ---- Recovery report -------------------------------------------------
-    guide = eval_cfg.error_guide
+    guide = eval_cfg.error_guide                   # 0.3 ~= log10(2): within a factor of 2
+    guide_tight = eval_cfg.error_guide_tight        # 0.15 ~= log10(sqrt(2)): within a factor of ~1.41
     reporter.check("eval_set_nonempty", n_samples > 0,
                    f"{n_samples} EVAL samples recovered",
                    note="the held-out EVAL namespace yielded at least one "
@@ -108,11 +109,13 @@ def write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path: Path,
                  "report shows the scatter and the error table; conditional "
                  "quantile bands populate only with a larger EVAL set.")
 
-    headers, rows = recovery_table(PARAMETERIZATION, true_log10, inferred_log10, guide)
+    headers, rows = recovery_table(PARAMETERIZATION, true_log10, inferred_log10,
+                                   guide, guide_tight)
     reporter.table(
         "MAP recovery (per parameter, log10 units)", headers, rows,
-        note=f"error = inferred - true in log10 units; 'within +/-{guide:g}' is the "
-             "fraction of EVAL videos recovered inside the guide band.")
+        note=f"error = inferred - true in log10 units; 'within +/-{guide:g}' "
+             f"(factor 2) and 'within +/-{guide_tight:g}' (factor sqrt(2)) are the "
+             "fractions of EVAL videos recovered inside each nested tolerance band.")
 
     # View B: posterior calibration (coverage of truth by credible intervals).
     if post_q is not None:
@@ -135,7 +138,8 @@ def write_recovery_outputs(reporter, args, eval_cfg, recovery_array_path: Path,
                     true_log10[:, i], inferred_log10[:, i],
                     (post_q[:, i, :] if post_q is not None else None),
                     prior_range, label, n_bins=n_bins, min_count=min_count,
-                    error_guide=guide, error_ylim_floor=eval_cfg.error_ylim_floor,
+                    error_guide=guide, error_guide_tight=guide_tight,
+                    error_ylim_floor=eval_cfg.error_ylim_floor,
                     error_ylim_quantile=eval_cfg.error_ylim_quantile, bin_mode=bin_mode,
                     show_map=do_map, show_posterior=(post_q is not None)),
                 caption=f"{key} ({label}). View A (MAP): panels 1-2 show inferred-vs-true "

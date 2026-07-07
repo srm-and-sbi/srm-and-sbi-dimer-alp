@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.15 - 2026-07-07
+
+Add a second, tighter recovery tolerance band to the evaluation report. The
+existing band is +/-0.3 in log10 units, which is a symmetric factor-of-2 band
+(0.3 ~= log10(2)); the new band is +/-0.15, a symmetric factor-of-sqrt(2) band
+(0.15 ~= log10(sqrt(2)), i.e. half of 0.3). Nesting the two bands shows, at a
+glance, what fraction of MAP estimates land within a factor of 2 and within a
+factor of ~1.41 of the truth. This is a reporting/plotting change only: no
+inference, evaluation, or experiment computation is affected, so figures and
+tables can be regenerated from the existing recovery arrays without recompute.
+
+### Added
+
+- **Tighter factor-sqrt(2) recovery band** across the evaluation report path.
+  `parameterization.py` (`InferenceEvaluation`) gains `error_guide_tight = 0.15`
+  alongside the existing `error_guide = 0.3`, both documented with their
+  factor-2 / factor-sqrt(2) derivation. `evaluation.py` (`recovery_stats`,
+  `recovery_table`) computes and tabulates `frac_within_guide_tight` as a new
+  `within +/-0.15` column. `visualization_inference.py` (`_draw_error_axis`,
+  `figure_recovery_combined`) draws the nested band as a second horizontal
+  guide line labeled "factor sqrt(2)". The Evaluation entry point
+  (`SRM_AND_SBI_DIMER_ALP_Evaluation.py`) reads `error_guide_tight` from config
+  and threads it through the table and figure. Docstrings state that 0.3 and
+  0.15 come from log10(2) and log10(sqrt(2)).
+
 ## 0.2.14 - 2026-07-06
 
 Make the embedding network duration-general by bounding its temporal length. Long

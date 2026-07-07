@@ -349,18 +349,23 @@ def posterior_summary(posterior, video_chunk: np.ndarray,
 # =============================================================================
 
 def recovery_stats(true_log10: np.ndarray, inferred_log10: np.ndarray,
-                   guide: float = 0.3) -> list:
+                   guide: float = 0.3, guide_tight: float = 0.15) -> list:
     """Per-parameter recovery error statistics (in log10 units).
 
     Args:
         true_log10: ground-truth theta in log10, shape ``(N, D)``.
         inferred_log10: inferred MAP theta in log10, shape ``(N, D)``.
-        guide: half-width of the "within guide" band (log10 units).
+        guide: half-width of the "within guide" band (log10 units). The default
+            0.3 ~= log10(2), so it counts recoveries within a factor of 2 of the truth.
+        guide_tight: half-width of a tighter, nested band. The default 0.15
+            ~= log10(sqrt(2)) = guide / 2, counting recoveries within a factor of
+            sqrt(2) ~= 1.41 -- a stricter concentration measure.
 
     Returns:
         A list of ``D`` dicts, one per parameter, each with keys: ``n``,
         ``median_error``, ``mae``, ``rmse``, ``q95_abs_error``,
-        ``frac_within_guide`` (computed over the finite (true, inferred) pairs).
+        ``frac_within_guide`` (within +/-guide) and ``frac_within_guide_tight``
+        (within +/-guide_tight) -- computed over the finite (true, inferred) pairs.
     """
     true_log10 = np.asarray(true_log10, dtype=float)
     inferred_log10 = np.asarray(inferred_log10, dtype=float)
@@ -380,12 +385,14 @@ def recovery_stats(true_log10: np.ndarray, inferred_log10: np.ndarray,
                 "rmse": float(np.sqrt(np.mean(error ** 2))),
                 "q95_abs_error": float(np.quantile(abs_error, 0.95)),
                 "frac_within_guide": float(np.mean(abs_error <= guide)),
+                "frac_within_guide_tight": float(np.mean(abs_error <= guide_tight)),
             })
         else:
             stats.append({"n": 0, "median_error": float("nan"),
                           "mae": float("nan"), "rmse": float("nan"),
                           "q95_abs_error": float("nan"),
-                          "frac_within_guide": float("nan")})
+                          "frac_within_guide": float("nan"),
+                          "frac_within_guide_tight": float("nan")})
     return stats
 
 
@@ -449,16 +456,19 @@ def posterior_coverage_table(parameterization, true_log10: np.ndarray,
 
 
 def recovery_table(parameterization, true_log10: np.ndarray,
-                   inferred_log10: np.ndarray, guide: float = 0.3) -> tuple:
+                   inferred_log10: np.ndarray, guide: float = 0.3,
+                   guide_tight: float = 0.15) -> tuple:
     """Build a ``(headers, rows)`` recovery summary for the diagnostic report.
 
     One row per learnable parameter, with the error statistics from
-    ``recovery_stats``. ``parameterization`` is the learnable-only
-    ``PARAMETERIZATION`` list (its order matches the theta columns).
+    ``recovery_stats``. Two "within" columns report the fraction recovered inside
+    the +/-guide band (0.3 ~= log10(2), factor 2) and the tighter +/-guide_tight
+    band (0.15 ~= log10(sqrt(2)), factor sqrt(2)). ``parameterization`` is the
+    learnable-only ``PARAMETERIZATION`` list (its order matches the theta columns).
     """
     headers = ["parameter", "label", "n", "median err", "MAE", "RMSE",
-               "q95|err|", f"within +/-{guide:g}"]
-    stats = recovery_stats(true_log10, inferred_log10, guide)
+               "q95|err|", f"within +/-{guide:g}", f"within +/-{guide_tight:g}"]
+    stats = recovery_stats(true_log10, inferred_log10, guide, guide_tight)
     rows = []
     for para, st in zip(parameterization, stats):
         rows.append([
@@ -470,5 +480,6 @@ def recovery_table(parameterization, true_log10: np.ndarray,
             f"{st['rmse']:.3f}",
             f"{st['q95_abs_error']:.3f}",
             f"{st['frac_within_guide'] * 100:.0f}%",
+            f"{st['frac_within_guide_tight'] * 100:.0f}%",
         ])
     return headers, rows

@@ -658,7 +658,16 @@ class InferenceEvaluation:
     learning_rate_maximum_factor: int = 128        # 2^7; lr = lr_min * factor
     tolerance_factor: float = 1.0                  # tolerance = lr_min * factor
     # Recovery-report rendering:
-    error_guide: float = 0.3                       # +/- guide lines on the error view (log10)
+    # Recovery tolerance bands, given as log10 half-widths -- each is the log10 of
+    # a linear accuracy factor, so a point inside the band is recovered to within
+    # that factor of the truth. Both are drawn as +/- guide lines on the error view
+    # and reported as "fraction within" columns of the recovery table:
+    #   error_guide       = 0.3  ~= log10(2)       -> within a factor of 2 of the truth
+    #   error_guide_tight = 0.15 ~= log10(sqrt(2)) -> within a factor of sqrt(2) ~= 1.41
+    #                              (0.15 = 0.3 / 2), a tighter concentration reference
+    #                              nested inside the factor-2 band.
+    error_guide: float = 0.3
+    error_guide_tight: float = 0.15
     error_ylim_floor: float = 0.5                  # min half-range for the error y-axis (log10)
     error_ylim_quantile: float = 0.95              # |error| quantile setting the error y-axis
     quantile_bins: int = 20                        # conditional-quantile bins over true value

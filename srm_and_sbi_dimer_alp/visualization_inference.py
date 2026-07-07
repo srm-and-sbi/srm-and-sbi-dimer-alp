@@ -181,13 +181,16 @@ def _draw_recovery_axis(ax, true_log10, inferred_log10, prior_range=None,
 
 def _draw_error_axis(ax, true_log10, inferred_log10, prior_range=None,
                      n_bins=20, min_count=50, error_guide=0.3,
-                     error_ylim_floor=0.5, error_ylim_quantile=0.95,
-                     bin_mode="quantile"):
+                     error_guide_tight=0.15, error_ylim_floor=0.5,
+                     error_ylim_quantile=0.95, bin_mode="quantile"):
     """Draw the residual-error view (inferred - true, log10) + bands on ``ax``.
 
-    A zero line marks perfect recovery and dashed guides at ``+/- error_guide``
-    mark the tolerance band; the y-axis spans ``+/- max(error_ylim_floor,
-    quantile(|error|, error_ylim_quantile))``.
+    A zero line marks perfect recovery. Two nested tolerance bands are drawn as
+    +/- guide lines, each the log10 of a linear accuracy factor:
+    ``+/- error_guide`` (0.3 ~= log10(2): within a factor of 2) and the tighter
+    ``+/- error_guide_tight`` (0.15 ~= log10(sqrt(2)): within a factor of ~1.41).
+    The y-axis spans ``+/- max(error_ylim_floor, quantile(|error|,
+    error_ylim_quantile))``.
     """
     x = np.asarray(true_log10, dtype=float).ravel()
     y = np.asarray(inferred_log10, dtype=float).ravel()
@@ -198,8 +201,13 @@ def _draw_error_axis(ax, true_log10, inferred_log10, prior_range=None,
                 else (float(np.floor(np.min(x))), float(np.ceil(np.max(x)))))
     half = max(error_ylim_floor, float(np.quantile(np.abs(error), error_ylim_quantile)))
     ax.axhline(0.0, color="k", linestyle="--", alpha=0.75)
-    ax.axhline(+error_guide, color="k", linestyle=":", alpha=0.60)
+    # Factor-2 band (0.3 = log10 2) and the tighter factor-sqrt(2) band (0.15 = log10 sqrt 2).
+    ax.axhline(+error_guide, color="k", linestyle=":", alpha=0.60,
+               label=rf"$\pm${error_guide:g} (factor 2)")
     ax.axhline(-error_guide, color="k", linestyle=":", alpha=0.60)
+    ax.axhline(+error_guide_tight, color="k", linestyle=(0, (1, 3)), alpha=0.45,
+               label=rf"$\pm${error_guide_tight:g} (factor $\sqrt{{2}}$)")
+    ax.axhline(-error_guide_tight, color="k", linestyle=(0, (1, 3)), alpha=0.45)
     ax.scatter(x, error, s=7, color="tab:blue", alpha=0.25)
     centers, q05, q25, q50, q75, q95 = _conditional_quantiles(
         x, error, n_bins, min_count, bin_mode, prior_range)
@@ -253,7 +261,8 @@ def _draw_posterior_recovery_axis(ax, true_log10, map_inferred, post_median,
 
 def figure_recovery_combined(true_log10, inferred_log10, post_q,
                              prior_range=None, label="", n_bins=20, min_count=50,
-                             error_guide=0.3, error_ylim_floor=0.5,
+                             error_guide=0.3, error_guide_tight=0.15,
+                             error_ylim_floor=0.5,
                              error_ylim_quantile=0.95, bin_mode="quantile",
                              show_map=True, show_posterior=False):
     """Combined recovery figure for one parameter: View A (MAP) + View B (posterior).
@@ -274,8 +283,10 @@ def figure_recovery_combined(true_log10, inferred_log10, post_q,
         _draw_recovery_axis(ax_rec, true_log10, inferred_log10, prior_range,
                             n_bins, min_count, bin_mode)
         _draw_error_axis(ax_err, true_log10, inferred_log10, prior_range, n_bins,
-                         min_count, error_guide, error_ylim_floor,
-                         error_ylim_quantile, bin_mode)
+                         min_count, error_guide=error_guide,
+                         error_guide_tight=error_guide_tight,
+                         error_ylim_floor=error_ylim_floor,
+                         error_ylim_quantile=error_ylim_quantile, bin_mode=bin_mode)
     else:
         _draw_placeholder(ax_rec, "View A not computed\n(--summary posterior)")
         _draw_placeholder(ax_err, "View A not computed\n(--summary posterior)")
