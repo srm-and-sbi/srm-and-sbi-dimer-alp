@@ -41,7 +41,7 @@ import os
 import pickle
 import random
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -114,7 +114,8 @@ class VideoDataset(Dataset):
                  compress: bool = True,
                  indices: Optional[np.ndarray] = None,
                  augment: bool = True,
-                 split: str = "TRAIN"):
+                 split: str = "TRAIN",
+                 return_index: bool = False):
         video_paths = []
         theta_paths = []
         for task_alias in range(tasks):
@@ -139,6 +140,10 @@ class VideoDataset(Dataset):
         self.augment = augment
         self.indices = indices if indices is not None else np.arange(self.data_canons)
         self.train_test_flag = "Train" if augment else "Test"
+        # When True, __getitem__ also yields the stable (task_index, sim_index)
+        # identifier of each example (used only by the test-loss-distribution
+        # loader); the default preserves the (video, theta) contract.
+        self.return_index = return_index
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -160,6 +165,12 @@ class VideoDataset(Dataset):
 
         if self.augment:
             video = self._spatial_augment(video)
+        if self.return_index:
+            # (task_index, sim_index) is the stable, extension-safe identifier of
+            # this example; it rides through shuffling and DDP sharding so the
+            # per-example test loss can be keyed by it downstream. (data_index is
+            # the sim index within the task file.)
+            return task_index, data_index, video, theta
         return video, theta
 
     @staticmethod
@@ -335,7 +346,8 @@ def build_datasets(train_tasks: int,
                    data_bank_root: Path,
                    timing_label: str,
                    compress: bool = True,
-                   test_tasks: int = 0
+                   test_tasks: int = 0,
+                   test_return_index: bool = False,
                    ) -> tuple:
     """Load the TRAIN and TEST namespaces as separate datasets.
 
@@ -367,7 +379,7 @@ def build_datasets(train_tasks: int,
         test_dataset = VideoDataset(
             tasks=test_tasks, data_bank_root=data_bank_root,
             timing_label=timing_label, compress=compress,
-            augment=False, split="TEST",
+            augment=False, split="TEST", return_index=test_return_index,
         )
     return train_dataset, test_dataset
 
@@ -379,7 +391,8 @@ def setup_training(estimator: nn.Module,
                    compress: bool = True,
                    batch_size: Optional[int] = None,
                    learning_rate: Optional[float] = None,
-                   test_tasks: int = 0) -> dict:
+                   test_tasks: int = 0,
+                   test_loss_distribution: bool = False) -> dict:
     """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
     Args:
@@ -447,6 +460,7 @@ def setup_training(estimator: nn.Module,
     train_dataset, test_dataset = build_datasets(
         train_tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress, test_tasks=test_tasks,
+        test_return_index=test_loss_distribution,
     )
     # ---- DataLoader worker budget (rank- and loader-aware) -------------------
     # Each DDP rank builds its OWN loaders, and persistent_workers keeps the train +
@@ -581,7 +595,8 @@ def build_replay_loader(train_loader: DataLoader, topo) -> DataLoader:
 def compute_validation_loss(estimator: nn.Module,
                             loader: DataLoader,
                             device: torch.device,
-                            verbose: bool = False) -> float:
+                            verbose: bool = False,
+                            collect: bool = False):
     """Compute mean loss over a loader in eval mode.
 
     The estimator is set to eval mode (dropout disabled, batch-norm uses running
@@ -592,28 +607,75 @@ def compute_validation_loss(estimator: nn.Module,
     function does not toggle the flag (which would not reach a persistent loader's
     workers anyway).
 
+    Batches may be the plain ``(video, theta)`` form or, from a ``return_index``
+    dataset, ``(task_index, sim_index, video, theta)``; both are accepted. The
+    mean is formed from the per-example loss exactly as before (a mean of
+    per-batch means), so the returned mean is unchanged in either case.
+
     Args:
         estimator: The posterior estimator. Set to eval mode internally.
-        loader: DataLoader over (video, theta) pairs, with augmentation off.
+        loader: DataLoader over (video, theta) [or (task, sim, video, theta)] batches.
         device: Device to move batches to.
         verbose: If True, print the loader's augmentation flag.
+        collect: If True, also return this process's per-example
+            ``(task_index, sim_index, loss, theta)`` shard (requires a
+            ``return_index`` loader). Used to build the test-loss distribution.
 
     Returns:
-        Mean loss across all batches, as a Python float.
+        ``collect=False``: mean loss across all batches, as a Python float.
+        ``collect=True``: ``(mean, task, sim, loss, theta)`` with numpy arrays for
+        this process's shard (``loss`` per example, ``theta`` shape (n, n_params)).
     """
     if verbose:
         print(f"Data augmentation? {loader.dataset.augment}")
 
     losses_per_batch = []
+    tasks, sims, per_example, thetas = [], [], [], []
     estimator.eval()
     with torch.no_grad():
-        for video_batch, theta_batch in loader:
+        for batch in loader:
+            if len(batch) == 4:
+                task_batch, sim_batch, video_batch, theta_batch = batch
+            else:
+                video_batch, theta_batch = batch
+                task_batch = sim_batch = None
             video_batch = video_batch.to(device)
             theta_batch = theta_batch.to(device)
-            batch_loss = torch.mean(estimator.loss(theta_batch, condition=video_batch))
-            losses_per_batch.append(batch_loss.item())
+            example_loss = estimator.loss(theta_batch, condition=video_batch)
+            losses_per_batch.append(torch.mean(example_loss).item())
+            if collect:
+                if task_batch is None:
+                    raise ValueError(
+                        "compute_validation_loss(collect=True) requires a "
+                        "return_index loader yielding (task, sim, video, theta).")
+                per_example.append(example_loss.detach().cpu().numpy())
+                thetas.append(theta_batch.detach().cpu().numpy())
+                tasks.append(np.asarray(task_batch))
+                sims.append(np.asarray(sim_batch))
 
-    return float(np.mean(losses_per_batch))
+    mean = float(np.mean(losses_per_batch))
+    if not collect:
+        return mean
+    return (mean,
+            np.concatenate(tasks), np.concatenate(sims),
+            np.concatenate(per_example), np.concatenate(thetas, axis=0))
+
+
+def _gather_test_loss(task, sim, loss, theta, topo):
+    """Gather per-rank ``(task, sim, loss, theta)`` shards across DDP ranks into
+    full arrays available on every rank. Identity when not distributed. Any
+    DistributedSampler boundary-padding duplicates are de-duplicated downstream
+    by ``TestLossDistribution.from_epoch`` (keyed by ``(task, sim)``)."""
+    if not topo.is_distributed:
+        return task, sim, loss, theta
+    import torch.distributed as dist
+    parts = [None] * topo.world_size
+    dist.all_gather_object(parts, (task, sim, loss, theta))
+    task = np.concatenate([p[0] for p in parts])
+    sim = np.concatenate([p[1] for p in parts])
+    loss = np.concatenate([p[2] for p in parts])
+    theta = np.concatenate([p[3] for p in parts], axis=0)
+    return task, sim, loss, theta
 
 
 # =============================================================================
@@ -657,7 +719,9 @@ def train_loop(estimator: nn.Module,
                resurrect: bool = False,
                replay_loss: bool = False,
                heartbeat_every: Optional[int] = None,
-               verbose: bool = False) -> tuple:
+               verbose: bool = False,
+               test_loss_distribution: bool = False,
+               on_new_best: Optional[Callable] = None) -> tuple:
     """Run the training loop with optimum-checkpoint tracking and optional RESURRECT.
 
     Args:
@@ -797,13 +861,23 @@ def train_loop(estimator: nn.Module,
 
         # ---- Losses (TRAIN + TEST both sharded across ranks, then all-reduced) ----
         epoch_train = _reduce_mean(float(np.mean(batch_train_losses)))
+        tld_shard = None
         if has_val:
             # TEST loss in eval mode. Distributed -> each rank measures its shard
             # of the (DistributedSampler-sharded) TEST set and the per-rank means
             # are all-reduced, so every rank gets the same selection metric,
             # computed in parallel instead of serially on rank 0. Single worker
             # -> _reduce_mean is the identity over the full set (unchanged).
-            epoch_test = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
+            if test_loss_distribution:
+                # One pass: the same batch-mean drives epoch_test (unchanged), and
+                # the per-example shard is retained for a possible new-best commit.
+                val_mean, t_task, t_sim, t_loss, t_theta = compute_validation_loss(
+                    estimator, val_loader, device, verbose=False, collect=True)
+                epoch_test = _reduce_mean(val_mean)
+                tld_shard = (t_task, t_sim, t_loss, t_theta)
+            else:
+                epoch_test = _reduce_mean(
+                    compute_validation_loss(estimator, val_loader, device, verbose=False))
         else:
             epoch_test = float("nan")
         # Replay loss = eval-mode TRAIN loss (augmentation off), opt-in; each rank
@@ -823,6 +897,16 @@ def train_loop(estimator: nn.Module,
                 optimum_loss_test = epoch_test
                 if is_main:
                     torch.save(estimator.state_dict(), str(checkpoint_path))
+                # Commit the sibling best-artifacts (posterior + test-loss
+                # distribution) and their new-best backups at this improvement, so
+                # a crash leaves a complete best-so-far set. The gather is a
+                # collective: EVERY rank calls it (the new-best decision is
+                # identical across ranks, epoch_test being all-reduced); only rank 0
+                # writes, inside on_new_best.
+                if tld_shard is not None and on_new_best is not None:
+                    gathered = _gather_test_loss(*tld_shard, topo)
+                    if is_main:
+                        on_new_best(epoch + 1, epoch_test, gathered)
         elif is_main:
             torch.save(estimator.state_dict(), str(checkpoint_path))
 

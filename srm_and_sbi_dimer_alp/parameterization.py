@@ -214,6 +214,7 @@ class Paths:
     video_set_pattern: str = "{project_alias}_{timing_label}_Video_Set_TASK_{task_alias}_{split}.{ext}"
     checkpoint_pattern: str = "{project_alias}_{timing_label}_Optimum_ANN.pth"
     posterior_pattern: str = "{project_alias}_{timing_label}_Posterior.pkl"
+    test_loss_distribution_pattern: str = "{project_alias}_{timing_label}_Test_Loss_Distribution.npz"
     recovery_pattern: str = "{project_alias}_{timing_label}_MAP_Recovery"
     experiment_recovery_pattern: str = "{project_alias}_{timing_label}_MAP_Experiment"
     # Real microscopy videos are external raw data (not produced by this pipeline),
@@ -295,6 +296,15 @@ class Paths:
         )
         return data_bank_root / self.posit_subdir / filename
 
+    def test_loss_distribution_path(self, data_bank_root: Path, timing_label: str) -> Path:
+        """Full path for the best-epoch test-loss distribution (.npz), a
+        scientific deliverable alongside the posterior it characterizes."""
+        filename = self.test_loss_distribution_pattern.format(
+            project_alias=self.project_alias,
+            timing_label=timing_label,
+        )
+        return data_bank_root / self.posit_subdir / filename
+
     # ---- Backup / archival artifact names --------------------------------
     # A finished training run overwrites the canonical checkpoint + posterior above
     # (the names every downstream stage loads). To keep an identifiable, restorable
@@ -347,6 +357,19 @@ class Paths:
                               epochs: int, test_loss: float) -> Path:
         """Provenance-named backup of the posterior, alongside the canonical one."""
         base = self.posterior_pattern.format(
+            project_alias=self.project_alias, timing_label=timing_label)
+        stem, ext = base.rsplit(".", 1)
+        descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)
+        return data_bank_root / self.posit_subdir / f"{stem}_{descriptor}.{ext}"
+
+    def backup_test_loss_distribution_path(self, data_bank_root: Path, timing_label: str,
+                                           train_videos: int, test_videos: int,
+                                           epochs: int, test_loss: float) -> Path:
+        """Provenance-named backup of the test-loss distribution, alongside the
+        canonical one. ``epochs`` carries the epoch this best occurred at for a
+        new-best backup, or the total planned epochs for the finish backup (the
+        two coexist), exactly like the posterior/checkpoint backups."""
+        base = self.test_loss_distribution_pattern.format(
             project_alias=self.project_alias, timing_label=timing_label)
         stem, ext = base.rsplit(".", 1)
         descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)

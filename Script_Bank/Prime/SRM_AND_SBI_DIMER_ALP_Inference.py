@@ -49,7 +49,9 @@ from srm_and_sbi_dimer_alp.inference_support import (
     setup_training,
     train_loop,
 )
-from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming, build_prior
+from srm_and_sbi_dimer_alp.parameterization import (
+    PARAMETERS, PARAMETERIZATION, PARAMETERIZATION_RAW, RunTiming, build_prior)
+from srm_and_sbi_dimer_alp.test_loss_distribution import TestLossDistribution
 from srm_and_sbi_dimer_alp.utils import console_log_context, log_memory_state
 
 
@@ -121,6 +123,7 @@ def main(args: argparse.Namespace) -> None:
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
     posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
 
     print("\nOutput destinations:")
     print(f"  data_bank_root  : {data_bank_root}")
@@ -291,6 +294,9 @@ def main(args: argparse.Namespace) -> None:
     ).to(device)
 
     # ---- Training pipeline -----------------------------------------------
+    # The per-example test-loss distribution is recorded only when a TEST set is
+    # present (it summarizes the per-epoch model-selection signal).
+    use_tld = args.test_loss_distribution and args.test_tasks > 0
     print("\nLoading training data (TRAIN + TEST videos)...", flush=True)
     training_setup = setup_training(
         estimator=posterior_estimator,
@@ -301,6 +307,7 @@ def main(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         test_tasks=args.test_tasks,
+        test_loss_distribution=use_tld,
     )
 
     if reporter.enabled:
@@ -329,6 +336,53 @@ def main(args: argparse.Namespace) -> None:
     if args.verbose:
         log_memory_state(prefix="[Pre-training]")
 
+    # ---- New-best commit callback (rank 0; train_loop guards the call) ----
+    # At each new best, write the posterior + test-loss-distribution canonicals
+    # and copy the three provenance backups (Epoch_{current}), matching the
+    # checkpoint's cadence so a crash leaves a complete best-so-far set.
+    commit_new_best = None
+    if use_tld:
+        tld_manifest = {
+            "project_alias": paths.project_alias,
+            "timing_label": timing_label,
+            "test_set_id": f"TEST/{timing_label}",
+            "theta_space": "log10",
+            "theta_keys": [p["KEY"] for p in PARAMETERIZATION],  # learnable = the theta columns, in order
+            "parameter_table": [   # FULL table (learnable + fixed) with roles, declaration order
+                {"key": p["KEY"],
+                 "role": "learnable" if p["PRIOR_RANGE"] is not None else "fixed",
+                 "value": p["VALUE"],
+                 "prior_range": p["PRIOR_RANGE"],
+                 "log_flag": p["LOG_FLAG"], "log_base": p["LOG_BASE"]}
+                for p in PARAMETERIZATION_RAW],
+            "train_videos": len(training_setup["train_loader"].dataset),
+            "test_videos": len(training_setup["val_loader"].dataset),
+            "epochs_planned": args.epochs,
+            "torch_version": torch.__version__,
+        }
+
+        def commit_new_best(best_epoch, best_test_loss, gathered):
+            task, sim, loss, theta = gathered
+            prior_cpu = build_prior(device="cpu")
+            prior_cpu, _, _ = process_prior(prior_cpu)
+            posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
+            prior_device = build_prior(device=str(training_setup["device"]))
+            posterior_path.parent.mkdir(parents=True, exist_ok=True)
+            save_posterior(posterior, prior_device, posterior_path)
+            snap = TestLossDistribution.from_epoch(
+                best_epoch, task, sim, loss, theta,
+                manifest=tld_manifest, best_test_loss=best_test_loss)
+            snap.flush(tld_path)
+            tv, ev = tld_manifest["train_videos"], tld_manifest["test_videos"]
+            shutil.copy2(checkpoint_path, paths.backup_checkpoint_path(
+                data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
+            shutil.copy2(posterior_path, paths.backup_posterior_path(
+                data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
+            shutil.copy2(tld_path, paths.backup_test_loss_distribution_path(
+                data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
+            print(f"  [new best] committed artifacts + backups at epoch "
+                  f"{best_epoch} (test loss {best_test_loss:.5f})", flush=True)
+
     losses_train, losses_test, losses_replay, optimum_loss_test = train_loop(
         estimator=training_setup["estimator"],
         model=training_setup["model"],
@@ -345,6 +399,8 @@ def main(args: argparse.Namespace) -> None:
         replay_loss=args.replay_loss,
         heartbeat_every=args.heartbeat,
         verbose=args.verbose,
+        test_loss_distribution=use_tld,
+        on_new_best=commit_new_best,
     )
 
     if reporter.enabled:
@@ -395,6 +451,16 @@ def main(args: argparse.Namespace) -> None:
             shutil.copy2(posterior_path, posterior_backup)
             print(f"Backup checkpoint saved to {ckpt_backup}")
             print(f"Backup posterior saved to {posterior_backup}")
+            # Finish backup of the test-loss distribution, named with the total
+            # epochs run (Epoch_{total}); it coexists with the Epoch_{current}
+            # new-best backups. The canonical was written at the last new best (or
+            # by a prior resurrected run), so this copies it; skip if absent.
+            if use_tld and tld_path.exists():
+                tld_backup = paths.backup_test_loss_distribution_path(
+                    data_bank_root, timing_label, train_videos, test_videos,
+                    args.epochs, optimum_loss_test)
+                shutil.copy2(tld_path, tld_backup)
+                print(f"Backup test-loss distribution saved to {tld_backup}")
 
     # ---- Diagnostics: confirm outputs written, figure, summary ----------
     if reporter.enabled:
@@ -479,6 +545,13 @@ def parse_args(argv=None) -> argparse.Namespace:
              "running stats -- with augmentation disabled), for a directly comparable "
              "train-vs-test generalization signal. Off by default: a full extra pass "
              "over TRAIN each epoch, expensive on large datasets.",
+    )
+    parser.add_argument(
+        "--test-loss-distribution", action=argparse.BooleanOptionalAction, default=True,
+        help="Record the best epoch's per-example TEST-loss distribution (keyed by "
+             "(task_index, sim_index)) as a self-describing .npz, committed with the "
+             "posterior/checkpoint at each new best and backed up at finish. On by "
+             "default when a TEST set is present; --no-test-loss-distribution disables it.",
     )
     parser.add_argument(
         "--heartbeat", type=int, default=None,
