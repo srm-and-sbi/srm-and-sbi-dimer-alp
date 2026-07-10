@@ -51,6 +51,7 @@ Public interface
     build_prior(device)             -- BoxUniform over the learnable imaging params
     build_nuisance_prior(device)    -- BoxUniform over the nuisance-from-spec RDS params
     theta_lower_bound / theta_upper_bound             -- learnable log10 bounds
+    flag_out_of_bounds(theta, low, high)              -- flag/measure learnable values outside the prior box
     nuisance_lower_bound / nuisance_upper_bound       -- nuisance log10 bounds
 
 Assembling the concrete argument vectors the theta-driven forward models
@@ -61,6 +62,7 @@ the subset/index maps here are the building blocks.
 
 import dataclasses
 
+import numpy as np
 import torch
 from sbi.utils import BoxUniform
 
@@ -270,6 +272,36 @@ def theta_lower_bound() -> list[float]:
 def theta_upper_bound() -> list[float]:
     """Upper bounds of the learnable imaging prior, in log10 space."""
     return [entry['PRIOR_RANGE'][1] for entry in DETECTOR_PARAMETERIZATION]
+
+
+def flag_out_of_bounds(theta_log10, low=None, high=None):
+    """Flag learnable-parameter values outside the prior box (log10 space).
+
+    Args:
+        theta_log10: array-like of log10 parameter values; the last axis is the
+            parameter axis (length == the number of learnable imaging parameters).
+        low, high: prior bounds in log10 space; default to ``theta_lower_bound()``
+            / ``theta_upper_bound()``.
+
+    Returns:
+        ``(out_of_bounds, signed_margin)``, both ``numpy`` arrays shaped like
+        ``theta_log10``. ``out_of_bounds`` is a boolean mask (True where a value is
+        below ``low`` or above ``high``). ``signed_margin`` is the signed distance
+        outside the box, in log10 units: negative below the lower bound, positive
+        above the upper bound, and 0 inside — so its magnitude is how far
+        out-of-prior a value sits. Used to flag — never silently clip — MAP
+        estimates that drift past a prior edge (the seed-then-optimize step is
+        unconstrained), symmetric to the Nuisance input-side clipping. Inputs are
+        assumed finite (a MAP estimate always is); a NaN would be reported as
+        out-of-bounds with a NaN margin.
+    """
+    theta = np.asarray(theta_log10, dtype=float)
+    lo = np.asarray(theta_lower_bound() if low is None else low, dtype=float)
+    hi = np.asarray(theta_upper_bound() if high is None else high, dtype=float)
+    below = np.minimum(theta - lo, 0.0)   # < 0 only where theta < lo
+    above = np.maximum(theta - hi, 0.0)   # > 0 only where theta > hi
+    signed_margin = below + above          # at most one term is non-zero
+    return signed_margin != 0.0, signed_margin
 
 
 def nuisance_lower_bound() -> list[float]:

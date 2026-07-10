@@ -524,7 +524,63 @@ a backed-up location.
 
 ---
 
-## 8. Do not
+## 8. Detector calibration workflow (own submission machinery)
+
+The **Detector calibration workflow** is a complete workflow parallel to the
+canonical pipeline: it runs the same four-step process (simulate → infer →
+evaluate → experiment) but infers the imaging (diffraction-limited-imaging)
+parameters with the physics frozen to pure diffusion, so those parameters are
+calibrated for production rather than hand-tuned. It has its **own committed
+submission machinery**, filename-namespaced (`SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*`)
+and coexisting with the canonical wrappers in this directory — the same
+filename-alias scheme as the `_DETECTOR` data and entry scripts. It is a separate,
+parallel workflow: it is **never wired into the canonical `Submit.sh` dispatcher
+or the four canonical stage wrappers**, and they are never wired into it.
+
+| Detector script | Role | Compute |
+|---|---|---|
+| `..._DETECTOR_HPC_Simulation.sh` | generation: diffusion-only RDS (B1) → imaging-from-theta DLI (B2), packed per node, `--array` fan-out, per-split `SEED` | CPU |
+| `..._DETECTOR_HPC_Inference.sh` | train the imaging posterior (B3); >1 GPU → DDP via `torchrun`; saves the version-portable A5 estimator | GPU |
+| `..._DETECTOR_HPC_Evaluation.sh` | imaging MAP recovery on the held-out EVAL set (B5); >1 GPU → shard + a separate `--merge` step | GPU |
+| `..._DETECTOR_HPC_Submit.sh` | the Detector dispatcher — dry-run-first single-job submit builder | — |
+
+(The Experiment, gap-simulation, and coverage wrappers join this set as those
+stages are built.)
+
+**Dispatcher.** `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Submit.sh` mirrors the
+canonical `Submit.sh` — dry-run first (`DRYRUN=1` prints the exact `sbatch` line;
+`DRYRUN=0` submits) — for the Detector stages, and renders the `_DETECTOR`
+job-name `SRM_AND_SBI_DIMER_ALP_DETECTOR_<timing_label>_<Stage>[_<SPLIT>]`.
+
+**Two GPU modes (Goethe), pinned by the dispatcher** so an exclusive whole-node
+allocation never launches more workers than intended: `GPU_PART=gpu_test` → 4 GPUs
+(checks; `gpu:4`, `SRM_AND_SBI_GPUS=4`); `GPU_PART=gpu` → 8 GPUs (production;
+`gpu:8`, `SRM_AND_SBI_GPUS=8`).
+
+**Per-split seeds.** Generation takes a `SEED` per split; use distinct seeds so
+the TRAIN/TEST/EVAL imaging theta are independent (the Detector draws its RDS
+nuisance and imaging theta from `SeedSequence(SEED).spawn(2)`).
+
+**Chaining** (with `DEP=afterok:<jobid>[:...]`) — the check-run sequence
+(2 s, 16/4/2 tasks × 10 sims, 5 epochs, per-split seeds 42/43/44), all DRY-RUN by
+default; capture each printed job id and feed it to the next `DEP`:
+
+    cd /path/to/srm-and-sbi-dimer-alp
+    S=Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Submit.sh
+    # generation (CPU test partition), one job per split:
+    PART=test NTPN=16 bash $S simulation SPLIT=train SEED=42 TASK_COUNT=16 TASK_SIMS=10 TOTAL_TIME=2.0
+    PART=test NTPN=4  bash $S simulation SPLIT=test  SEED=43 TASK_COUNT=4  TASK_SIMS=10 TOTAL_TIME=2.0
+    PART=test NTPN=2  bash $S simulation SPLIT=eval  SEED=44 TASK_COUNT=2  TASK_SIMS=10 TOTAL_TIME=2.0
+    # train (afterok gen train+test), then evaluate (afterok train + gen eval):
+    GPU_PART=gpu_test DEP=afterok:<gen-train>:<gen-test> bash $S inference  TRAIN_TASKS=16 TEST_TASKS=4 EPOCHS=5 BATCH=8 TOTAL_TIME=2.0
+    GPU_PART=gpu_test DEP=afterok:<inference>:<gen-eval> bash $S evaluation EVAL_TASKS=2 POOL_MODE=unrestricted TOTAL_TIME=2.0
+
+Respect the check-partition QOS (e.g. Goethe `test`: at most 3 submitted / 2
+running / 2 nodes per user) — consolidate generation accordingly.
+
+---
+
+## 9. Do not
 
 - **Do not invent job or log names.** Use exactly
   `SRM_AND_SBI_DIMER_ALP_<timing_label>_<Stage>[_<SPLIT>]` (§3). No invented

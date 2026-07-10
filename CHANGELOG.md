@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.19 - 2026-07-10
+
+Give the Detector calibration workflow its own committed HPC submission
+machinery, and add two additive helpers the later Detector stages build on. The
+Detector is a complete workflow parallel to the canonical pipeline; its
+submission is now committed and generic (filename-namespaced, coexisting with the
+canonical wrappers), never wired into the canonical `Submit.sh` dispatcher.
+
+### Added
+
+- **Committed Detector HPC submission machinery** in `Script_Bank/HPC/`,
+  filename-namespaced `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*` alongside the
+  canonical wrappers (documented in the HPC runbook §8): `..._Simulation.sh`
+  (diffusion-only RDS → imaging DLI, packed per node, `--array` fan-out, per-split
+  `SEED`), `..._Inference.sh` (data-parallel training via `torchrun`; saves the A5
+  estimator), `..._Evaluation.sh` (sharded MAP recovery + a separate `--merge`
+  step), and `..._Submit.sh` (dry-run-first dispatcher with the two Goethe GPU
+  modes pinned — `gpu_test`=4 GPUs for checks, `gpu`=8 for production). Retires
+  the scratch smoke drivers.
+- **`detector_parameterization.flag_out_of_bounds`** — flags, never silently
+  clips, learnable-parameter values outside the prior box, returning a boolean
+  mask and the signed log10 margin.
+- **`artifacts.load_estimator_manifest`** — reads a saved estimator artifact's
+  manifest (rebuild spec, parameter keys, prior bounds, torch version, weights
+  checksum, provenance) without rebuilding the estimator or touching a GPU.
+
+### Changed
+
+- **Detector Evaluation `--pool-mode`** now defaults to the config value
+  (`bounded`), matching the canonical Evaluation; both `bounded` and
+  `unrestricted` remain one flag away.
+
 ## 0.2.18 - 2026-07-10
 
 Make the Detector evaluation multi-GPU sharded, matching the canonical

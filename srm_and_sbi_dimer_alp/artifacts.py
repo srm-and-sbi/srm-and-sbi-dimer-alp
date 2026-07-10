@@ -146,3 +146,20 @@ def load_estimator(path, device: str = "cpu") -> DirectPosterior:
         device=device,
     )
     return DirectPosterior(estimator, prior)
+
+
+def load_estimator_manifest(path) -> dict:
+    """Return a `save_estimator` artifact's manifest without rebuilding the estimator.
+
+    Reads only the stored metadata — the rebuild spec, ``parameter_keys``, torch
+    version, weights checksum (``weights_sha256``), and caller metadata (timing
+    label, best test loss, source conditions/accessions, ...) — plus the prior
+    bounds as plain lists. Provenance is otherwise unreachable, since
+    ``load_estimator`` returns only a ``DirectPosterior`` and discards the
+    manifest. No torch load, no GPU, no estimator reconstruction.
+    """
+    with np.load(path, allow_pickle=False) as data:
+        manifest = json.loads(str(data["manifest"]))
+        manifest["prior_low"] = data["prior_low"].tolist()
+        manifest["prior_high"] = data["prior_high"].tolist()
+    return manifest

@@ -187,7 +187,7 @@ def main(args: argparse.Namespace) -> None:
     numb_steps = args.numb_steps or eval_cfg.numb_steps
     lr = eval_cfg.learning_rate_minimum * eval_cfg.learning_rate_maximum_factor
     tolerance = eval_cfg.learning_rate_minimum * eval_cfg.tolerance_factor
-    pool_mode = args.pool_mode
+    pool_mode = args.pool_mode or eval_cfg.pool_mode
 
     print(div)
     print(f" {paths.project_alias} — Detector Evaluation (imaging MAP recovery)")
@@ -284,9 +284,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--total-time-seconds", type=float, required=True)
     p.add_argument("--eval-tasks", type=int, default=1, help="EVAL-namespace Detector tasks.")
     p.add_argument("--max-sims", type=int, default=0, help="Cap sims per task (0 = all).")
-    p.add_argument("--pool-mode", type=str, default="unrestricted",
+    p.add_argument("--pool-mode", type=str, default=None,
                    choices=["bounded", "unrestricted"],
-                   help="Candidate-pool sampler; 'unrestricted' suits smoke/undertrained posteriors.")
+                   help="Candidate-pool sampler, exactly as the canonical Evaluation: "
+                        "'bounded' (rejection-sample within the prior; correct for a trained "
+                        "posterior) or 'unrestricted' (sample the flow directly, no rejection; "
+                        "for smoke tests / undertrained posteriors that would stall). "
+                        "Default: the config value (bounded).")
     p.add_argument("--theta-prex-size", type=int, default=0, help="Candidate pool size (0 = config).")
     p.add_argument("--elite-prex-size", type=int, default=0, help="Optimization seeds (0 = config).")
     p.add_argument("--numb-steps", type=int, default=0, help="Max gradient-ascent steps (0 = config).")
