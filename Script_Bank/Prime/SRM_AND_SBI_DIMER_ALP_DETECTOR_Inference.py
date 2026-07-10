@@ -1,7 +1,8 @@
 """Entry-point (Detector workflow): train the imaging-parameter posterior estimator.
 
-Special-situation entry point of the Detector calibration workflow
-(DETECTOR_WORKFLOW.md §9.2, B3). Mirrors the canonical
+Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B3) — a
+complete calibration workflow parallel to the canonical pipeline, with its own
+committed submission machinery. Mirrors the canonical
 ``SRM_AND_SBI_DIMER_ALP_Inference.py`` — same MAF-on-Complex3DCNN estimator, same
 ``setup_training``/``train_loop`` machinery — with three Detector differences:
 

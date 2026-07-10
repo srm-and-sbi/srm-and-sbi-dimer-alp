@@ -1,7 +1,8 @@
 """Entry-point script (Detector workflow): render videos with imaging drawn from theta.
 
-Special-situation entry point of the Detector calibration workflow
-(DETECTOR_WORKFLOW.md §9.2, B2). Reads the diffusion-only trajectories produced
+Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B2) — a
+complete calibration workflow parallel to the canonical pipeline, with its own
+committed submission machinery. Reads the diffusion-only trajectories produced
 by the Detector RDS stage (B1), draws the imaging parameters per simulation from
 the Detector prior (these are the calibration's inference target and the training
 label), and renders each video with `render_detector_video`

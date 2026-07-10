@@ -1,8 +1,8 @@
 """Entry-point script (Detector workflow): generate diffusion-only trajectories.
 
-Special-situation entry point of the Detector calibration workflow
-(DETECTOR_WORKFLOW.md §9.2, B1) — structured like the Construction stage, run ad
-hoc, outside the Submit.sh dispatcher and the four canonical stage wrappers.
+Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B1) — a
+complete calibration workflow parallel to the canonical pipeline, with its own
+committed submission machinery.
 
 Mirrors the canonical `SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py`, with two
 differences: it draws the reaction-diffusion parameters from the Detector RDS

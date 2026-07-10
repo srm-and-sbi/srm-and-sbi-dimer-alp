@@ -89,7 +89,7 @@ optical and sensor effects from the biological reaction-diffusion parameters,
 reduces the dimensionality of each inference problem, improves posterior
 geometry, and speeds convergence.
 
-### Stage 1: Detector Parameters (this repository, special-situation calibration workflow)
+### Stage 1: Detector Parameters (this repository — the Detector calibration workflow)
 
 **Input:** Synthetic videos from a diffusion-only model (reactions disabled;
 pure Brownian motion), rendered through the same imaging model.
@@ -100,9 +100,10 @@ brightness flicker — with the physics frozen so the imaging model is
 identifiable.
 
 **Output:** A posterior over `β` and a versioned, provenanced imaging-parameter
-artifact. This calibration runs as a special-situation entry point in this
-repository — structured like the Construction stage, outside the `Submit.sh`
-dispatcher and the canonical stage wrappers — not as a canonical pipeline stage.
+artifact. This calibration is a complete workflow parallel to the canonical
+pipeline, run in this repository with its own committed submission machinery,
+separate from — never wired into — the canonical `Submit.sh` dispatcher and its
+stage wrappers.
 The calibrated values are the basis for the detector parameters Stage 2 applies;
 the mechanism that seeds them into production is developed alongside this
 workflow.

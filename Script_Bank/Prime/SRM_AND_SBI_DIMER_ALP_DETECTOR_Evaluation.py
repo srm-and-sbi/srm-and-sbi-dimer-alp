@@ -1,7 +1,8 @@
 """Entry-point (Detector workflow): MAP-recovery of imaging parameters on EVAL.
 
-Special-situation entry point of the Detector calibration workflow
-(DETECTOR_WORKFLOW.md §9.2, B5). Mirrors the canonical
+Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B5) — a
+complete calibration workflow parallel to the canonical pipeline, with its own
+committed submission machinery. Mirrors the canonical
 ``SRM_AND_SBI_DIMER_ALP_Evaluation.py`` — the same seed-then-optimize
 ``evaluation.map_estimate`` + ``recovery_table`` machinery, and the same
 multi-GPU sharding — applied to the held-out ``_DETECTOR`` EVAL namespace, to
