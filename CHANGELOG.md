@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.18 - 2026-07-10
+
+Make the Detector evaluation multi-GPU sharded, matching the canonical
+Evaluation. The initial Detector Evaluation ran single-process; the downstream
+stages must mirror the canonical multi-GPU stages they are modeled on, so
+evaluation now shards the held-out EVAL tasks round-robin across one worker per
+GPU (under `torchrun`) and a separate `--merge` step concatenates the per-shard
+arrays into one recovery report — the same shard-then-merge structure as the
+canonical Evaluation. Proven on Goethe with the standard multi-GPU setup:
+generation on the `test` partition, 4-GPU data-parallel training and a two-way
+sharded evaluation + merge on `gpu_test`, all stages clean (the imaging posterior
+learned; MAP recovery combined over the held-out EVAL namespace).
+
+### Changed
+
+- **`Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Evaluation.py`** — multi-GPU
+  sharded recovery mirroring the canonical Evaluation: round-robin `my_tasks` per
+  worker, per-shard `.npz` writes, and a `--merge` combine step (single process,
+  no GPU) that concatenates the shards into the report and removes them. The
+  single-worker path is unchanged (writes the report directly). A worker assigned
+  no tasks writes no shard.
+
 ## 0.2.17 - 2026-07-10
 
 Add the Detector calibration workflow: a special-situation set of entry points
