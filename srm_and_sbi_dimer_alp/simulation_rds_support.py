@@ -53,6 +53,7 @@ from .parameterization import (
 
 def build_system(theta: np.ndarray,
                  particle_species_names: Optional[Tuple[str, ...]] = None,
+                 pure_diffusion: bool = False,
                  verbose: bool = False) -> "readdy.ReactionDiffusionSystem":
     """Build a ReaDDy ReactionDiffusionSystem for the three-species DIMER model.
 
@@ -63,6 +64,12 @@ def build_system(theta: np.ndarray,
         particle_species_names: Optional override for the species names.
             Defaults to `PARAMETERS.simulation.rds.particle_species_names` —
             the standard ('A', 'B', 'C').
+        pure_diffusion: If False (default) the full reactive system is built,
+            identical to the previous behavior. If True, the three species and
+            their diffusion constants are still registered, but the four
+            reaction channels are skipped — a diffusion-only system used by the
+            Detector calibration workflow (see DETECTOR_WORKFLOW.md sec. 4).
+            Initial particle placement and the imaging pipeline are unaffected.
         verbose: If True, print diffusion constants and reaction rates to stdout.
 
     Returns:
@@ -146,52 +153,54 @@ def build_system(theta: np.ndarray,
         )
         stem.add_species(name=species_name, diffusion_constant=diffusion_constant)
 
-    # --- Diffusion-limited dimerization rate -------------------------------
-    D_R = 2 * diffusion_rates[0]                          # um^2 / s
-    rho_CAP_um = capture_radius * 1e-3                    # nm -> um
-    kappa_ON_CAP = 4 * np.pi * D_R * rho_CAP_um           # um^3 / s
-    kappa_ON = R_ON * kappa_ON_CAP                        # um^3 / s
-    V_CAP = (4 / 3) * np.pi * pow(rho_CAP_um, 3)          # um^3
-    lamb_ON = (kappa_ON / V_CAP) / readdy.units.second    # 1/s
-    lamb_OFF = kappa_OFF / readdy.units.second
-    lamb_IMMOBILITY = kappa_IMMOBILITY / readdy.units.second
-    lamb_MOBILITY = kappa_MOBILITY / readdy.units.second
+    if not pure_diffusion:
+        # --- Diffusion-limited dimerization rate ---------------------------
+        D_R = 2 * diffusion_rates[0]                          # um^2 / s
+        rho_CAP_um = capture_radius * 1e-3                    # nm -> um
+        kappa_ON_CAP = 4 * np.pi * D_R * rho_CAP_um           # um^3 / s
+        kappa_ON = R_ON * kappa_ON_CAP                        # um^3 / s
+        V_CAP = (4 / 3) * np.pi * pow(rho_CAP_um, 3)          # um^3
+        lamb_ON = (kappa_ON / V_CAP) / readdy.units.second    # 1/s
+        lamb_OFF = kappa_OFF / readdy.units.second
+        lamb_IMMOBILITY = kappa_IMMOBILITY / readdy.units.second
+        lamb_MOBILITY = kappa_MOBILITY / readdy.units.second
 
-    # --- Add the four reactions --------------------------------------------
-    # The four channels implement the reversible dimerization / mobilization
-    # scheme: A + A <-> B (dimerization / dissociation) and B <-> C
-    # (immobilization / mobilization). A=monomer, B=mobile dimer, C=immobile
-    # dimer. See the DIMER reaction model in PROJECT_CONTEXT.md.
+        # --- Add the four reactions ----------------------------------------
+        # The four channels implement the reversible dimerization / mobilization
+        # scheme: A + A <-> B (dimerization / dissociation) and B <-> C
+        # (immobilization / mobilization). A=monomer, B=mobile dimer, C=immobile
+        # dimer. See the DIMER reaction model in PROJECT_CONTEXT.md.
 
-    # A + A -> B : forward dimerization (microscopic rate lamb_ON, derived from
-    # R_ON relative to the diffusion-limited Smoluchowski cap).
-    stem.reactions.add_fusion(
-        name="A + A => B", type_from1="A", type_from2="A", type_to="B",
-        rate=lamb_ON, educt_distance=capture_radius, weight1=0.5, weight2=0.5,
-    )
-    # B -> A + A : reverse dissociation (macroscopic rate kappa_OFF).
-    stem.reactions.add_fission(
-        name="B => A + A", type_from="B", type_to1="A", type_to2="A",
-        rate=lamb_OFF, product_distance=capture_radius, weight1=0.5, weight2=0.5,
-    )
-    # B -> C : immobilization, mobile dimer becomes immobile (rate kappa_IMMOBILITY).
-    stem.reactions.add_conversion(
-        name="B => C", type_from="B", type_to="C", rate=lamb_IMMOBILITY,
-    )
-    # C -> B : mobilization, immobile dimer becomes mobile again (rate kappa_MOBILITY).
-    stem.reactions.add_conversion(
-        name="C => B", type_from="C", type_to="B", rate=lamb_MOBILITY,
-    )
+        # A + A -> B : forward dimerization (microscopic rate lamb_ON, derived from
+        # R_ON relative to the diffusion-limited Smoluchowski cap).
+        stem.reactions.add_fusion(
+            name="A + A => B", type_from1="A", type_from2="A", type_to="B",
+            rate=lamb_ON, educt_distance=capture_radius, weight1=0.5, weight2=0.5,
+        )
+        # B -> A + A : reverse dissociation (macroscopic rate kappa_OFF).
+        stem.reactions.add_fission(
+            name="B => A + A", type_from="B", type_to1="A", type_to2="A",
+            rate=lamb_OFF, product_distance=capture_radius, weight1=0.5, weight2=0.5,
+        )
+        # B -> C : immobilization, mobile dimer becomes immobile (rate kappa_IMMOBILITY).
+        stem.reactions.add_conversion(
+            name="B => C", type_from="B", type_to="C", rate=lamb_IMMOBILITY,
+        )
+        # C -> B : mobilization, immobile dimer becomes mobile again (rate kappa_MOBILITY).
+        stem.reactions.add_conversion(
+            name="C => B", type_from="C", type_to="B", rate=lamb_MOBILITY,
+        )
 
     if verbose:
         rates_by_species = dict(zip(particle_species_names, diffusion_rates))
         print(f"  Diffusion rates per species (um^2/s): {rates_by_species}")
-        print("  Reaction rates:")
-        print(f"    A+A -> B (dimerization):     macroscopic={kappa_ON:.6g} um^3/s "
-              f"(cap={kappa_ON_CAP:.6g}, R_ON={R_ON:.6g})")
-        print(f"    B   -> A+A (dissociation):   macroscopic={kappa_OFF:.6g} 1/s")
-        print(f"    B   -> C (immobilization):   macroscopic={kappa_IMMOBILITY:.6g} 1/s")
-        print(f"    C   -> B (mobilization):     macroscopic={kappa_MOBILITY:.6g} 1/s")
+        if not pure_diffusion:
+            print("  Reaction rates:")
+            print(f"    A+A -> B (dimerization):     macroscopic={kappa_ON:.6g} um^3/s "
+                  f"(cap={kappa_ON_CAP:.6g}, R_ON={R_ON:.6g})")
+            print(f"    B   -> A+A (dissociation):   macroscopic={kappa_OFF:.6g} 1/s")
+            print(f"    B   -> C (immobilization):   macroscopic={kappa_IMMOBILITY:.6g} 1/s")
+            print(f"    C   -> B (mobilization):     macroscopic={kappa_MOBILITY:.6g} 1/s")
 
     return stem
 

@@ -60,7 +60,7 @@ def tee_stdout(path: Path):
         handle.close()
 
 
-def console_log_context(args, stage: str):
+def console_log_context(args, stage: str, paths=None, data_bank_root=None):
     """Return a context manager that tees stdout to the run's ``console.log``.
 
     Under ``--debug-dump`` (``args.debug_dump`` truthy) the transcript is written
@@ -69,11 +69,21 @@ def console_log_context(args, stage: str):
     under ``--dry-run``, which performs no real work to transcribe -- a no-op
     context. ``args`` is expected to carry ``total_time_seconds`` and optionally
     ``split`` (RDS / DLI); both are read defensively.
+
+    ``paths`` / ``data_bank_root`` select the namespace and both default to the
+    canonical ``PARAMETERS.paths`` / ``PARAMETERS.machine.data_bank_root``
+    (byte-identical to previous behavior). A Detector stage passes its aliased
+    Paths (``detector_parameterization.detector_paths(...)``) so the ``run_label``
+    carries the ``_DETECTOR`` tag and the transcript lands in a
+    Detector-identifiable Debug directory, never colliding with the canonical one.
     """
     if not getattr(args, "debug_dump", False) or getattr(args, "dry_run", False):
         return contextlib.nullcontext()
     # Imported here (not at module top) to avoid a circular import at load time.
     from .parameterization import PARAMETERS, RunTiming
+    paths = paths if paths is not None else PARAMETERS.paths
+    if data_bank_root is None:
+        data_bank_root = PARAMETERS.machine.data_bank_root
     total_time_seconds = getattr(args, "total_time_seconds", None)
     if total_time_seconds is None:
         raise ValueError(
@@ -85,8 +95,8 @@ def console_log_context(args, stage: str):
     )
     split = getattr(args, "split", None)
     split = split.upper() if split else None
-    path = PARAMETERS.paths.debug_run_dir(
-        PARAMETERS.machine.data_bank_root, timing.label, stage, split) / "console.log"
+    path = paths.debug_run_dir(
+        data_bank_root, timing.label, stage, split) / "console.log"
     return tee_stdout(path)
 
 

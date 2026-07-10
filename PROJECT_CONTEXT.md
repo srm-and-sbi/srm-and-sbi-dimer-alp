@@ -89,16 +89,23 @@ optical and sensor effects from the biological reaction-diffusion parameters,
 reduces the dimensionality of each inference problem, improves posterior
 geometry, and speeds convergence.
 
-### Stage 1: Detector Parameters (separate sibling, planned future work)
+### Stage 1: Detector Parameters (this repository, special-situation calibration workflow)
 
-**Input:** Synthetic videos from a simple-diffusion model (no reactions; pure
-Brownian motion).
+**Input:** Synthetic videos from a diffusion-only model (reactions disabled;
+pure Brownian motion), rendered through the same imaging model.
 
-**Objective:** Infer detector parameters (`β`) — PSF width, photon efficiency,
-noise levels — from video observations.
+**Objective:** Infer detector parameters (`β`) — camera gain, offset,
+read-noise, and photon conversion; PSF widths; emitter brightness; and
+brightness flicker — with the physics frozen so the imaging model is
+identifiable.
 
-**Output:** A posterior over `β`. The posterior mean initializes the detector
-model for Stage 2.
+**Output:** A posterior over `β` and a versioned, provenanced imaging-parameter
+artifact. This calibration runs as a special-situation entry point in this
+repository — structured like the Construction stage, outside the `Submit.sh`
+dispatcher and the canonical stage wrappers — not as a canonical pipeline stage.
+The calibrated values are the basis for the detector parameters Stage 2 applies;
+the mechanism that seeds them into production is developed alongside this
+workflow.
 
 ### Stage 2: RDS Parameters (this repository)
 

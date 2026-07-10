@@ -5,6 +5,80 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.17 - 2026-07-10
+
+Add the Detector calibration workflow: a special-situation set of entry points
+(structured like Construction — outside the `Submit.sh` dispatcher and the four
+canonical stage wrappers) that calibrates the diffraction-limited-imaging model
+by inferring it with the physics frozen to pure diffusion, so the imaging
+parameters are justified and reproducible for review rather than hand-tuned. The
+imaging parameters become the inference target and the reaction-diffusion
+parameters are marginalized as a nuisance. Detector data namespaces separately by
+a `_DETECTOR` prefix, so it can never overwrite canonical artifacts. Validated
+end-to-end on a 2 s, 16/4/2×10, 5-epoch smoke on the GPU server (RDS → DLI →
+Inference → Evaluation, all clean; the imaging posterior learned; MAP recovery on
+the held-out EVAL namespace). The Experiment stage (MAP on real videos + the
+real-vs-synthetic MMD/C2ST gap) is deferred to a follow-up.
+
+### Added
+
+- **Detector parameter scheme + machinery.** `detector_parameterization.py` — a
+  value-based role table (imaging parameters learnable; diffusion + counts
+  nuisance-from-spec; geometry, brightness quantiles, `delta_frame`,
+  `numb_photo_bleach`, `dimer_mule` fixed), with a sentinel-based role resolver,
+  learnable + nuisance prior builders, and the `_DETECTOR` path alias.
+  `nuisance.py` — a samplable, self-describing `Nuisance` artifact (parameter-key
+  manifest; never-silent clipping; stored distribution numerics). `artifacts.py`
+  — a self-describing, torch-version-portable estimator format (compile-stripped
+  state_dict + rebuild spec + metadata; eager-rebuild loader) that sidesteps the
+  `torch.compile` pickle lock of the canonical posterior.
+- **Adapted forward models.** `detector_simulation_rds_support.py` (diffusion-only
+  RDS drawn from the nuisance) and `detector_simulation_dli_support.py` (imaging
+  drawn from θ), each reusing the canonical building blocks by import.
+- **Detector entry scripts** (`Script_Bank/Prime`, `_DETECTOR`-namespaced):
+  `Simulation_RDS`, `Simulation_DLI`, `Inference` (saves the A5 estimator),
+  `Evaluation` (imaging-θ MAP recovery on EVAL).
+
+### Changed
+
+- Three small, generic, behavior-preserving, default-canonical injections into
+  shared machinery so the Detector can reuse it: `build_system(pure_diffusion=…)`
+  in `simulation_rds_support.py` (default `False` = the previous reactive path);
+  an optional `paths=` on `VideoDataset` / `build_datasets` / `setup_training` in
+  `inference_support.py`; and an optional `paths=` / `data_bank_root=` on
+  `console_log_context` in `utils.py` (so a Detector `--debug-dump` transcript is
+  `_DETECTOR`-tagged). Each defaults to the canonical configuration, so existing
+  stages are byte-identical.
+- `PROJECT_CONTEXT.md` §3: Stage 1 (detector parameters) reclassified from a
+  separate future sibling to this repository's in-repo special-situation
+  calibration workflow.
+
+## 0.2.16 - 2026-07-10
+
+Add optional, flag-gated instrumentation that captures the per-example test-loss
+distribution at the best epoch, so estimator generalization can be studied
+beyond the single mean test-loss scalar. Each stored example is keyed by its
+`(task_index, sim_index)` pair and carries the associated theta, with a
+self-describing manifest (the full parameter table). The three best-epoch
+artifacts — posterior, optimum-ANN checkpoint, and test-loss distribution —
+share one store/backup lifecycle. The training metric (`epoch_test`) is
+unchanged; `--no-test-loss-distribution` reproduces the prior behavior exactly.
+
+### Added
+
+- **Best-epoch test-loss distribution** (`--test-loss-distribution`, default on).
+  New module `test_loss_distribution.py` (pair-keyed per-example loss + theta +
+  manifest; `.npz` serialization; per-epoch summary and a new-best extended
+  statistics card). `parameterization.py` gains the canonical and
+  provenance-backup path helpers (`test_loss_distribution_path`,
+  `backup_test_loss_distribution_path`) mirroring the posterior/checkpoint
+  naming. `inference_support.py` collects the per-example losses in one pass
+  (test loader only) with a distributed all-gather and `(task, sim)` dedup, plus
+  a new-best commit hook. The Inference entry point
+  (`SRM_AND_SBI_DIMER_ALP_Inference.py`) commits all three artifacts at each new
+  best (with `Epoch_{current}` backups) and writes an `Epoch_{total}` backup at
+  finish.
+
 ## 0.2.15 - 2026-07-07
 
 Add a second, tighter recovery tolerance band to the evaluation report. The

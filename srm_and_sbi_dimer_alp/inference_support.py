@@ -115,16 +115,23 @@ class VideoDataset(Dataset):
                  indices: Optional[np.ndarray] = None,
                  augment: bool = True,
                  split: str = "TRAIN",
-                 return_index: bool = False):
+                 return_index: bool = False,
+                 paths=None):
+        # `paths` selects the filename namespace. Default is the canonical
+        # PARAMETERS.paths (byte-identical to previous behavior); the Detector
+        # workflow passes an aliased Paths (project_alias + "_DETECTOR") so it
+        # loads its own namespaced data. Only the filename prefix changes; the
+        # directory (data_bank_root) is still the caller's argument.
+        paths = paths if paths is not None else PARAMETERS.paths
         video_paths = []
         theta_paths = []
         for task_alias in range(tasks):
             video_paths.append(
-                str(PARAMETERS.paths.video_set_path(
+                str(paths.video_set_path(
                     task_alias, data_bank_root, timing_label, compress, split))
             )
             theta_paths.append(
-                str(PARAMETERS.paths.theta_set_path(
+                str(paths.theta_set_path(
                     task_alias, data_bank_root, timing_label, compress, split))
             )
 
@@ -348,6 +355,7 @@ def build_datasets(train_tasks: int,
                    compress: bool = True,
                    test_tasks: int = 0,
                    test_return_index: bool = False,
+                   paths=None,
                    ) -> tuple:
     """Load the TRAIN and TEST namespaces as separate datasets.
 
@@ -373,6 +381,7 @@ def build_datasets(train_tasks: int,
         tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress,
         augment=PARAMETERS.inference.training.augmentation, split="TRAIN",
+        paths=paths,
     )
     test_dataset = None
     if test_tasks > 0:
@@ -380,6 +389,7 @@ def build_datasets(train_tasks: int,
             tasks=test_tasks, data_bank_root=data_bank_root,
             timing_label=timing_label, compress=compress,
             augment=False, split="TEST", return_index=test_return_index,
+            paths=paths,
         )
     return train_dataset, test_dataset
 
@@ -392,7 +402,8 @@ def setup_training(estimator: nn.Module,
                    batch_size: Optional[int] = None,
                    learning_rate: Optional[float] = None,
                    test_tasks: int = 0,
-                   test_loss_distribution: bool = False) -> dict:
+                   test_loss_distribution: bool = False,
+                   paths=None) -> dict:
     """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
     Args:
@@ -460,7 +471,7 @@ def setup_training(estimator: nn.Module,
     train_dataset, test_dataset = build_datasets(
         train_tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress, test_tasks=test_tasks,
-        test_return_index=test_loss_distribution,
+        test_return_index=test_loss_distribution, paths=paths,
     )
     # ---- DataLoader worker budget (rank- and loader-aware) -------------------
     # Each DDP rank builds its OWN loaders, and persistent_workers keeps the train +
