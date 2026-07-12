@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.23 - 2026-07-12
+
+Add the Detector generation controller for staged, multi-node production data generation.
+
+### Added
+
+- **`SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Generate_Controller.sh`** — the Detector
+  variant of the canonical generation controller (a verbatim copy plus three forced
+  deviations: the Detector Simulation launcher as `SIM`, `_DETECTOR` job-names, and a
+  distinct state file). Drives the staged, QOS-gated multi-node production generation
+  — submit the TRAIN+TEST arrays within the in-system cap, hard-gate EVAL until they
+  all COMPLETE, resurrect-safe re-run of any failed node — for the Detector 2S/5S
+  datasets. Selected via `CASES=2s|5s|both`; replaces the ad-hoc smoke orchestrator.
+
 ## 0.2.22 - 2026-07-12
 
 Rename the Detector's persisted RDS-nuisance set for clarity and document the
