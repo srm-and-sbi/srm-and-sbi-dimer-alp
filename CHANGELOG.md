@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.20 - 2026-07-12
+
+Reconcile the Detector workflow to the canonical workflow. Every Detector Prime
+script and HPC wrapper is rebuilt as a verbatim copy of its canonical counterpart
+plus only the justified deviations — the imaging inference target, the
+version-portable A5 estimator, and `_DETECTOR` coexistence namespacing. The two
+are now parallel, essentially-identical SBI pipelines sharing the same essential
+machinery by import; they diverge only where the science requires it. This
+corrects divergences that earlier from-scratch drafts had introduced (confirmed
+by a full process-direction + parity sanity check).
+
+### Fixed
+
+- **Generation seed convention.** The Detector generation forced a fixed seed
+  (mandatory `SEED` in the wrapper + dispatcher, plus a spurious
+  `SeedSequence.spawn` in the Prime scripts), freezing the per-video placement,
+  PSF, brightness, and EMCCD-noise realizations across an entire split — degenerate
+  for SBI. Restored the canonical seedless convention (`--seed` optional, default
+  `None` → a fresh realization per video; plain `np.random.default_rng`).
+- **Inference checkpoint directory** is created before the first save (was missing;
+  crashed a fresh Detector run) — inherited from the canonical copy.
+- **Synthetic video bit depth** back to 8-bit (16-bit is the raw experimental
+  storage format, down-converted on load).
+- **Debug-transcript namespacing:** all four Detector stages write their
+  `--debug-dump` console transcript to the `_DETECTOR` namespace, not the canonical
+  one.
+
+### Changed
+
+- **Detector Prime scripts** rebuilt as canonical copies + only the forced/A5
+  deviations, restoring the full canonical machinery earlier drafts had dropped
+  (the `DiagnosticReporter` report, posterior coverage / View B / `--summary`, the
+  per-example test-loss distribution, the debug CLI). Inference and Evaluation
+  persist the estimator via the version-portable A5 format (`artifacts`) in place
+  of the torch-version-locked pickle.
+- **Detector HPC wrappers + dispatcher** rebuilt as verbatim canonical copies +
+  `_DETECTOR` filename aliasing only — dropping the mandatory `SEED`, the GPU-mode
+  auto-pin, and a divergent `set -eo pipefail`, and restoring `--summary` /
+  `POOL_MODE` and the canonical GPU-count derivation.
+
+### Added
+
+- `--dry-run` on the canonical generation Primes (`Simulation_RDS`,
+  `Simulation_DLI`), mirroring `Inference`/`Evaluation`, so every Prime entry point
+  honors the documented dry-run convention. Additive and behavior-preserving.
+
 ## 0.2.19 - 2026-07-10
 
 Give the Detector calibration workflow its own committed HPC submission

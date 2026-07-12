@@ -169,6 +169,31 @@ def main(args: argparse.Namespace) -> None:
         task_indices = list(range(args.tasks))
     n_rows = max(task_indices) + 1
 
+    # ---- Dry run: resolve the planned task/sim workload + output destinations
+    # and exit before theta sampling, the ReaDDy loop, and any directory creation
+    # -- so it computes nothing and writes nothing. Reuses the script's own
+    # already-resolved timing / task-index / path expressions. RDS is the first
+    # stage, so it has no inputs to probe -- only the writes it would produce.
+    if args.dry_run:
+        n_tasks = len(task_indices)
+        planned = n_tasks * args.task_simulations
+        task_span = (f"{task_indices[0]}" if n_tasks == 1
+                     else f"{task_indices[0]}..{task_indices[-1]}")
+        print(f"[DRY RUN] plans {n_tasks} task(s) (index {task_span}) x "
+              f"{args.task_simulations} sim(s) = {planned} trajectory(ies), "
+              f"split _{split}.")
+        for task in task_indices:
+            theta_set_path = paths.theta_set_path(
+                task, data_bank_root, timing_label, compress, split)
+            traj_dir = paths.trajectory_dir(
+                task, data_bank_root, timing_label, split)
+            print(f"  writes theta set    (task {task}): {theta_set_path}")
+            print(f"  writes trajectories (task {task}): {traj_dir}/  "
+                  f"({args.task_simulations} .h5 file(s))")
+        print("\n[DRY RUN] configuration validated; all outputs resolved.")
+        print("[DRY RUN] no trajectories generated.")
+        return
+
     # ---- Sample theta sets in log space, exponentiate to physical space --
     # The learnable theta vector holds the DIMER physical quantities: initial
     # A/B/C particle counts (count_alp/bet/chi); the monomer diffusion
@@ -428,6 +453,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--no-compress", action="store_true",
         help="Save theta sets as .npy instead of compressed .zarr.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate configuration and inputs, print what would be read/written, then exit "
+             "without running the stage (no GPU, no compute). Use before a queue submission or a long local run.",
     )
     parser.add_argument(
         "--verbose", action="store_true",

@@ -178,6 +178,48 @@ def main(args: argparse.Namespace) -> None:
     # reading that task's RDS trajectories + theta set; otherwise all of --tasks.
     task_indices = [args.task_id] if args.task_id is not None else list(range(args.tasks))
 
+    # ---- Dry run: resolve the planned workload + input/output destinations and
+    # exit before the render loop and any directory creation -- so it computes
+    # nothing and writes nothing. Reuses the script's own already-resolved timing /
+    # task-index / path expressions; only calls .exists() to probe the RDS inputs
+    # (theta sets + trajectories) this stage would read.
+    if args.dry_run:
+        n_tasks = len(task_indices)
+        planned = n_tasks * args.task_simulations
+        task_span = (f"{task_indices[0]}" if n_tasks == 1
+                     else f"{task_indices[0]}..{task_indices[-1]}")
+        print(f"[DRY RUN] plans {n_tasks} task(s) (index {task_span}) x "
+              f"{args.task_simulations} sim(s) = {planned} video(s), "
+              f"split _{split}.")
+        missing = 0
+        for task in task_indices:
+            theta_set_path = paths.theta_set_path(
+                task, data_bank_root, timing_label, compress, split)
+            theta_ok = theta_set_path.exists()
+            if not theta_ok:
+                missing += 1
+            traj_present = 0
+            for sim in range(args.task_simulations):
+                traj_path = paths.trajectory_path(
+                    task, sim, data_bank_root, timing_label, split)
+                if traj_path.exists():
+                    traj_present += 1
+                else:
+                    missing += 1
+            video_set_path = paths.video_set_path(
+                task, data_bank_root, timing_label, compress, split)
+            print(f"  reads theta set     (task {task}): {theta_set_path}  "
+                  f"[{'OK' if theta_ok else 'MISSING'}]")
+            print(f"  reads trajectories  (task {task}): "
+                  f"{traj_present}/{args.task_simulations} present")
+            print(f"  writes video set    (task {task}): {video_set_path}")
+        if missing:
+            print(f"\n[DRY RUN] configuration validated; {missing} input(s) MISSING.")
+        else:
+            print("\n[DRY RUN] configuration validated; all inputs present.")
+        print("[DRY RUN] no videos rendered.")
+        return
+
     for loop_i, task in enumerate(task_indices):
         task_alias = task
         print(f"{SOCK} Task {task_alias}  ({loop_i + 1}|{len(task_indices)}) {SOCK}")
@@ -438,6 +480,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--no-compress", action="store_true",
         help="Save video sets as .npy instead of compressed .zarr.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate configuration and inputs, print what would be read/written, then exit "
+             "without running the stage (no GPU, no compute). Use before a queue submission or a long local run.",
     )
     parser.add_argument(
         "--verbose", action="store_true",
