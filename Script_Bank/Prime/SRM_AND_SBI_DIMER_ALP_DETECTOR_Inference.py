@@ -377,8 +377,10 @@ def main(args: argparse.Namespace) -> None:
 
     # ---- New-best commit callback (rank 0; train_loop guards the call) ----
     # At each new best, write the A5 estimator + test-loss-distribution canonicals
-    # and copy the three provenance backups (Epoch_{current}), matching the
-    # checkpoint's cadence so a crash leaves a complete best-so-far set.
+    # (the live objects downstream stages + --resurrect read; always the current
+    # best). Provenance backups (Epoch_{current}) are copied here only under
+    # --backup-every-best; by default the single kept backup is written once at
+    # finish, so a normal run leaves one backup, not one per improving epoch.
     commit_new_best = None
     if use_tld:
         tld_manifest = {
@@ -421,17 +423,22 @@ def main(args: argparse.Namespace) -> None:
                 best_epoch, task, sim, loss, theta,
                 manifest=tld_manifest, best_test_loss=best_test_loss)
             snap.flush(tld_path)
-            tv, ev = tld_manifest["train_videos"], tld_manifest["test_videos"]
-            shutil.copy2(checkpoint_path, paths.backup_checkpoint_path(
-                data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
-            est_backup = estimator_path.with_name(
-                f"{estimator_path.stem}_{paths.backup_descriptor(tv, ev, best_epoch, best_test_loss)}"
-                f"{estimator_path.suffix}")
-            shutil.copy2(estimator_path, est_backup)
-            shutil.copy2(tld_path, paths.backup_test_loss_distribution_path(
-                data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
-            print(f"  [new best] committed artifacts + backups at epoch "
-                  f"{best_epoch} (test loss {best_test_loss:.5f})", flush=True)
+            if args.backup_every_best:
+                tv, ev = tld_manifest["train_videos"], tld_manifest["test_videos"]
+                shutil.copy2(checkpoint_path, paths.backup_checkpoint_path(
+                    data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
+                est_backup = estimator_path.with_name(
+                    f"{estimator_path.stem}_{paths.backup_descriptor(tv, ev, best_epoch, best_test_loss)}"
+                    f"{estimator_path.suffix}")
+                shutil.copy2(estimator_path, est_backup)
+                shutil.copy2(tld_path, paths.backup_test_loss_distribution_path(
+                    data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
+                print(f"  [new best] committed live artifacts + per-epoch backups at "
+                      f"epoch {best_epoch} (test loss {best_test_loss:.5f})", flush=True)
+            else:
+                print(f"  [new best] committed live artifacts at epoch {best_epoch} "
+                      f"(test loss {best_test_loss:.5f}); backup deferred to finish",
+                      flush=True)
 
     losses_train, losses_test, losses_replay, optimum_loss_test = train_loop(
         estimator=training_setup["estimator"],
@@ -520,7 +527,8 @@ def main(args: argparse.Namespace) -> None:
             shutil.copy2(estimator_path, estimator_backup)
             print(f"Backup estimator saved to {estimator_backup}")
             # Finish backup of the test-loss distribution, named with the total
-            # epochs run (Epoch_{total}); it coexists with the Epoch_{current}
+            # epochs run (Epoch_{total}). By default this finish backup is the single
+            # kept backup; under --backup-every-best it coexists with the per-epoch
             # new-best backups. The canonical was written at the last new best (or
             # by a prior resurrected run), so this copies it; skip if absent.
             if use_tld and tld_path.exists():
@@ -620,6 +628,15 @@ def parse_args(argv=None) -> argparse.Namespace:
              "(task_index, sim_index)) as a self-describing .npz, committed with the "
              "posterior/checkpoint at each new best and backed up at finish. On by "
              "default when a TEST set is present; --no-test-loss-distribution disables it.",
+    )
+    parser.add_argument(
+        "--backup-every-best", action="store_true",
+        help="Write a provenance-named backup (checkpoint + A5 estimator + test-loss "
+             "distribution, tagged with the epoch and TEST loss) at EVERY new-best "
+             "epoch. Default off: only the single finish backup is kept, while the "
+             "live canonical artifacts still update at each new best (crash-safe, "
+             "resurrect-ready). Turn on for the full per-epoch backup history when "
+             "debugging a training run.",
     )
     parser.add_argument(
         "--heartbeat", type=int, default=None,

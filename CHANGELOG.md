@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.21 - 2026-07-12
+
+Cap training-run backup proliferation with an opt-in flag, applied identically to
+both the canonical and Detector Inference Primes (shared behavior; nothing is ever
+deleted — intermediate backups simply are not written by default).
+
+### Changed
+
+- **Backup retention.** A training run now keeps a single provenance-named backup
+  triplet (checkpoint + posterior/estimator + test-loss distribution) — the finish
+  backup — instead of one per improving epoch. The live canonical artifacts still
+  update at every new best (crash-safe, `--resurrect`-ready); only the per-epoch
+  backup *copies* are no longer written by default.
+
+### Added
+
+- **`--backup-every-best`** (Inference, both workflows): opt back into a backup at
+  every new-best epoch for the full per-epoch history when debugging a training run.
+
 ## 0.2.20 - 2026-07-12
 
 Reconcile the Detector workflow to the canonical workflow. Every Detector Prime
