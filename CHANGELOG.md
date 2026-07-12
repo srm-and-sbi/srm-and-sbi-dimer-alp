@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.22 - 2026-07-12
+
+Rename the Detector's persisted RDS-nuisance set for clarity and document the
+nuisance-set naming convention. Filename-token change only; no behavior change.
+
+### Changed
+
+- **Nuisance set filename.** The Detector's per-task RDS-nuisance set token changes
+  `Nuisance_RDS_Set` → `Nuisance_RDS_Theta_Set` — reading unambiguously as a
+  `Theta_Set` variant (parallel to the learnable theta set) holding the marginalized
+  RDS-domain draws. It still lives in `Theta/`, still derived from the canonical
+  theta-set path (no dedicated directory, no new path code); the samplable
+  `Nuisance_RDS` object name is unchanged.
+
+### Documentation
+
+- Documented the persisted nuisance-set naming pattern
+  `{project_alias}_{timing_label}_Nuisance_<DOMAIN>_Theta_Set_TASK_{n}_{split}.{ext}`
+  (Prime docstring + `DETECTOR_WORKFLOW.md` §7), distinguishing the samplable object
+  from the persisted set file, and recording the forward production/canonical
+  convention `Nuisance_DLI_Theta_Set` (imaging marginalized).
+
 ## 0.2.21 - 2026-07-12
 
 Cap training-run backup proliferation with an opt-in flag, applied identically to

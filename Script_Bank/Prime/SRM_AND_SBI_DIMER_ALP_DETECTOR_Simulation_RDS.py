@@ -22,7 +22,7 @@ Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
     <data_bank>/<video_subdir>/<trajectory_repo>/<project_alias>_{timing_label}_TASK_{n}/
         <project_alias>_{timing_label}_TASK_{n}_SIM_{m}.h5              -- per-simulation trajectory
     <data_bank>/<theta_subdir>/
-        <project_alias>_{timing_label}_Nuisance_RDS_Set_TASK_{n}.zarr   -- per-task RDS-nuisance set
+        <project_alias>_{timing_label}_Nuisance_RDS_Theta_Set_TASK_{n}.zarr   -- per-task RDS-nuisance theta set
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py \\
@@ -75,10 +75,12 @@ _UNIT_DISPLAY = {
 
 def _nuisance_set_path(paths, task_alias, data_bank_root, timing_label, compress, split):
     """Detector RDS-nuisance provenance file: the theta-set path with the object
-    token swapped ``Theta_Set`` -> ``Nuisance_RDS_Set`` (reuses the canonical path
-    pattern; no new path code)."""
+    token swapped ``Theta_Set`` -> ``Nuisance_RDS_Theta_Set`` (reuses the canonical
+    path pattern; no new path code). The name reads as a Theta_Set variant holding
+    the marginalized RDS-domain nuisance draws, parallel to the learnable Theta_Set;
+    the symmetric production convention is ``Nuisance_DLI_Theta_Set``."""
     base = paths.theta_set_path(task_alias, data_bank_root, timing_label, compress, split)
-    return base.with_name(base.name.replace("Theta_Set", "Nuisance_RDS_Set"))
+    return base.with_name(base.name.replace("Theta_Set", "Nuisance_RDS_Theta_Set"))
 
 
 def main(args: argparse.Namespace) -> None:
@@ -152,7 +154,7 @@ def main(args: argparse.Namespace) -> None:
           f"{paths.trajectory_repo}/{paths.project_alias}_{timing_label}_TASK_{{n}}/"
           f"{paths.project_alias}_{timing_label}_TASK_{{n}}_SIM_{{m}}.h5")
     print(f"  nuisance sets   : <data_bank>/{paths.theta_subdir}/"
-          f"{paths.project_alias}_{timing_label}_Nuisance_RDS_Set_TASK_{{n}}.{output_fmt}")
+          f"{paths.project_alias}_{timing_label}_Nuisance_RDS_Theta_Set_TASK_{{n}}.{output_fmt}")
 
     if args.verbose:
         print(f"\nRDS nuisance prior spec ({len(det.DETECTOR_NUISANCE)} parameters, "
