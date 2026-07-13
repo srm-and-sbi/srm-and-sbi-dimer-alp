@@ -19,7 +19,8 @@ pass, gathers and de-duplicates them across ranks, and hands plain arrays to
 :meth:`TestLossDistribution.from_epoch`. That keeps this container unit-testable
 in isolation and reusable regardless of the training backend.
 
-See ``ESTIMATOR_GENERALIZATION_METHODS.md`` for the design and the naming rule.
+See the Validation and Diagnostics section of ``PROJECT_CONTEXT.md`` for the
+design rationale and the estimator-generalization methodology.
 """
 
 from __future__ import annotations

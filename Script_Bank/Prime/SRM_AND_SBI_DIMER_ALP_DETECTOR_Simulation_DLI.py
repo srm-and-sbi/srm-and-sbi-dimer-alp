@@ -1,6 +1,6 @@
 """Entry-point script (Detector workflow): render videos with imaging drawn from theta.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B2) — a
+Part of the Detector calibration workflow (see the implementation plan in DETECTOR_WORKFLOW.md) — a
 complete calibration workflow parallel to the canonical pipeline, with its own
 committed submission machinery.
 
@@ -8,14 +8,13 @@ Mirrors the canonical ``SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py``, with one
 governing difference: the imaging parameters are the Detector's inference target,
 so this stage draws them per simulation from the Detector imaging prior (the 11
 learnable imaging parameters) rather than reading them from the fixed table, and
-renders each video with ``render_detector_video`` (``detector_simulation_dli_support``,
-A3) — which reuses the canonical DLI building blocks but sources the imaging
+renders each video with ``render_detector_video`` (``detector_simulation_dli_support``) — which reuses the canonical DLI building blocks but sources the imaging
 parameters from theta. The canonical ``simulate_dli`` orchestrator is not called
 or modified. The drawn imaging theta is persisted as the Theta_Set — it is the
 training label the estimator learns to invert.
 
 The trajectories consumed here are the diffusion-only trajectories produced by
-the Detector RDS stage (B1). Detector data namespaces separately from canonical
+the Detector RDS stage. Detector data namespaces separately from canonical
 data by the ``_DETECTOR`` runtime-prefix qualifier (see
 ``detector_parameterization.detector_paths``), so nothing collides with canonical.
 
@@ -153,7 +152,7 @@ def main(args: argparse.Namespace) -> None:
 
     print("\nDLI runtime defaults:")
     print(f"  dimer_mule              : {dli_cfg.dimer_mule}   "
-          f"(√2; brightness boost for dimers — see PROJECT_CONTEXT.md §4)")
+          f"(√2; brightness boost for dimers — see PROJECT_CONTEXT.md)")
     print(f"  darkcounts              : {dli_cfg.darkcounts}                    "
           f"(baseline; no per-pixel dark current)")
     print(f"  sqrt_2sigma_dist_label  : {dli_cfg.sqrt_2sigma_dist_label}            "
@@ -182,7 +181,7 @@ def main(args: argparse.Namespace) -> None:
     run_start = time.time()
 
     # --task-id K renders exactly one task (HPC array fan-out: one task per job),
-    # reading that task's diffusion-only trajectories (B1); otherwise all of --tasks.
+    # reading that task's diffusion-only trajectories (from the Detector RDS stage); otherwise all of --tasks.
     task_indices = [args.task_id] if args.task_id is not None else list(range(args.tasks))
 
     # ---- Draw the imaging theta for every task up front (the inference target /
@@ -201,7 +200,7 @@ def main(args: argparse.Namespace) -> None:
     # exit before the render loop and any directory creation -- so it computes
     # nothing and writes nothing. Reuses the script's own already-resolved timing /
     # task-index / path expressions; only calls .exists() to probe the trajectory
-    # inputs (from B1) this stage would read (the imaging theta is drawn here, not
+    # inputs (from the Detector RDS stage) this stage would read (the imaging theta is drawn here, not
     # read), and prints the imaging-theta labels + planned theta/video outputs.
     if args.dry_run:
         n_tasks = len(task_indices)

@@ -1,7 +1,7 @@
 """Entry-point script (Detector calibration workflow): generate diffusion-only
 ReaDDy reaction-diffusion trajectories.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md sec. 9.2, B1) —
+Part of the Detector calibration workflow (see the implementation plan in DETECTOR_WORKFLOW.md) —
 a complete workflow parallel to the canonical pipeline. This stage draws the
 DIMER model's reaction-diffusion parameters from the Detector RDS *nuisance*
 (three species counts + three diffusion coefficients) rather than from the

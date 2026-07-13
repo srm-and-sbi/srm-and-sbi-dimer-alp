@@ -1,4 +1,4 @@
-"""Self-describing, version-portable estimator artifact (DETECTOR_WORKFLOW.md §7, A5).
+"""Self-describing, version-portable estimator artifact (see the nuisance and artifact design in DETECTOR_WORKFLOW.md).
 
 The canonical `save_posterior` pickles the live `DirectPosterior`; because the
 embedding is `torch.compile`d before training, that pickle bakes in

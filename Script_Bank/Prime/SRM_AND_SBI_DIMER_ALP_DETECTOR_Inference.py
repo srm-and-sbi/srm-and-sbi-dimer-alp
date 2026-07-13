@@ -1,6 +1,6 @@
 """Entry-point (Detector workflow): train the imaging-parameter posterior estimator.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B3) — a
+Part of the Detector calibration workflow (see the implementation plan in DETECTOR_WORKFLOW.md) — a
 complete calibration workflow parallel to the canonical pipeline, with its own
 committed submission machinery. It mirrors the canonical
 ``SRM_AND_SBI_DIMER_ALP_Inference.py`` — the same MAF-on-Complex3DCNN estimator,
@@ -9,7 +9,7 @@ model-selection, test-loss-distribution, and new-best commit cadence — with th
 Detector-specific differences below:
 
   1. It reads the ``_DETECTOR``-namespaced ``(video, imaging-theta)`` pairs written
-     by the Detector DLI stage (B2), by passing ``paths = detector_paths(...)`` to
+     by the Detector DLI stage, by passing ``paths = detector_paths(...)`` to
      ``build_datasets`` and ``setup_training``. The estimator's parameter dimension
      is therefore the 11 learnable imaging parameters (``theta_dim = 11``), not the
      canonical RDS set, and the prior, bounds, and per-parameter metadata are
@@ -17,11 +17,11 @@ Detector-specific differences below:
      distinguishes the learnable imaging parameters from the marginalized RDS
      nuisance rows.
   2. It persists the trained estimator via the self-describing, version-portable
-     A5 format (``artifacts.save_estimator``) — a compile-stripped state_dict +
+     format (``artifacts.save_estimator``) — a compile-stripped state_dict +
      rebuild spec + metadata — in place of the canonical pickled ``DirectPosterior``,
-     which bakes in ``torch.compile`` internals and is torch-version-locked. The A5
+     which bakes in ``torch.compile`` internals and is torch-version-locked. The version-portable
      artifact is the Detector's estimator; the canonical ``save_posterior`` path is
-     left untouched (DETECTOR_WORKFLOW.md §7).
+     left untouched (see the nuisance and artifact design in DETECTOR_WORKFLOW.md).
   3. All outputs are ``_DETECTOR``-namespaced (via the aliased ``project_alias``),
      so they never collide with canonical inference artifacts.
 
@@ -32,7 +32,7 @@ duration + fps):
     <data_bank>/<labor_subdir>/<alias>_DETECTOR_{timing_label}_Optimum_ANN.pth
         -- the best-so-far estimator checkpoint (overwritten on each new optimum).
     <data_bank>/<posit_subdir>/<alias>_DETECTOR_{timing_label}_Estimator.npz
-        -- the A5 version-portable estimator artifact (the Detector's posterior artifact).
+        -- the version-portable estimator artifact (the Detector's posterior artifact).
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py \\
@@ -75,7 +75,7 @@ from srm_and_sbi_dimer_alp.utils import console_log_context, log_memory_state
 
 
 def _estimator_path(paths, data_bank_root, timing_label):
-    """Detector A5 estimator-artifact path (Posit, Detector-aliased)."""
+    """Detector estimator-artifact path (Posit, Detector-aliased)."""
     return (data_bank_root / paths.posit_subdir /
             f"{paths.project_alias}_{timing_label}_Estimator.npz")
 
@@ -148,7 +148,7 @@ def main(args: argparse.Namespace) -> None:
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
     tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
-    estimator_path = _estimator_path(paths, data_bank_root, timing_label)   # A5 artifact (Detector)
+    estimator_path = _estimator_path(paths, data_bank_root, timing_label)   # version-portable estimator artifact (Detector)
     imaging_keys = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
     theta_dim = len(imaging_keys)                               # 11 learnable imaging params
     video_shape = (timing.frame_count, geom.root_size_px, geom.root_size_px)
@@ -160,7 +160,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"  reads thetas    : <data_bank>/{paths.theta_subdir}/"
           f"{paths.project_alias}_{timing_label}_Theta_Set_TASK_{{{task_range}}}.zarr")
     print(f"  writes ckpt     : {checkpoint_path}")
-    print(f"  writes estimator: {estimator_path}   (A5, version-portable)")
+    print(f"  writes estimator: {estimator_path}   (version-portable)")
 
     # ---- Dry-run preview --------------------------------------------------
     # Validate configuration and report the resolved inputs, then exit before
@@ -283,7 +283,7 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError(
             f"Detector theta labels have width {theta_dummy.shape[1]} but the Detector "
             f"imaging parameterization has {theta_dim} learnable params {imaging_keys}. "
-            f"Check that B2 wrote imaging-theta labels (not RDS).")
+            f"Check that the DLI stage wrote imaging-theta labels (not RDS).")
 
     if reporter.enabled:
         reporter.checkpoint(
@@ -302,7 +302,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ---- Embedding network -----------------------------------------------
     # The Complex3DCNN and build_maf kwargs are captured verbatim into dicts so the
-    # A5 estimator artifact can rebuild the (uncompiled) network under any torch.
+    # The version-portable estimator artifact can rebuild the (uncompiled) network under any torch.
     network_cfg = PARAMETERS.inference.network
     embedding_args = dict(
         n_frames=timing.frame_count,
@@ -376,7 +376,7 @@ def main(args: argparse.Namespace) -> None:
         log_memory_state(prefix="[Pre-training]")
 
     # ---- New-best commit callback (rank 0; train_loop guards the call) ----
-    # At each new best, write the A5 estimator + test-loss-distribution canonicals
+    # At each new best, write the estimator artifact + test-loss-distribution canonicals
     # (the live objects downstream stages + --resurrect read; always the current
     # best). Provenance backups (Epoch_{current}) are copied here only under
     # --backup-every-best; by default the single kept backup is written once at
@@ -478,8 +478,8 @@ def main(args: argparse.Namespace) -> None:
     # Every rank reloaded the best-on-TEST estimator in train_loop, so rank 0's
     # copy is the selected model; only it writes the shared posterior file.
     if topo.is_main:
-        # ---- A5 estimator artifact (the Detector's version-portable posterior) ------
-        # Persist the selected estimator in the self-describing, torch-portable A5
+        # ---- Estimator artifact (the Detector's version-portable posterior) ------
+        # Persist the selected estimator in the self-describing, torch-portable
         # format (compile-stripped state_dict + rebuild spec + metadata) — in place
         # of the version-locked canonical pickle. embedding_args / maf_args /
         # theta_dim / video_shape are the exact construction spec captured above; the
@@ -503,10 +503,10 @@ def main(args: argparse.Namespace) -> None:
             prior_low=det.theta_lower_bound(), prior_high=det.theta_upper_bound(),
             path=estimator_path, metadata=metadata,
         )
-        print(f"Detector estimator (A5) saved to {estimator_path}")
+        print(f"Detector estimator artifact saved to {estimator_path}")
 
         # ---- Auto-backup: provenance-named copies of the just-saved best ------
-        # A finished run overwrites the canonical checkpoint + A5 estimator (the
+        # A finished run overwrites the canonical checkpoint + estimator artifact (the
         # names every downstream stage loads). Copy them to backups whose filename
         # embeds this run's provenance -- train/test set sizes, epochs, and the
         # checkpoint's best TEST loss -- since the bare state_dict carries no such
@@ -521,7 +521,7 @@ def main(args: argparse.Namespace) -> None:
                 args.epochs, optimum_loss_test)
             shutil.copy2(checkpoint_path, ckpt_backup)
             print(f"Backup checkpoint saved to {ckpt_backup}")
-            # Provenance-named backup of the A5 estimator artifact (same descriptor).
+            # Provenance-named backup of the estimator artifact (same descriptor).
             estimator_backup = estimator_path.with_name(
                 f"{estimator_path.stem}_{paths.backup_descriptor(train_videos, test_videos, args.epochs, optimum_loss_test)}{estimator_path.suffix}")
             shutil.copy2(estimator_path, estimator_backup)
@@ -631,7 +631,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--backup-every-best", action="store_true",
-        help="Write a provenance-named backup (checkpoint + A5 estimator + test-loss "
+        help="Write a provenance-named backup (checkpoint + estimator artifact + test-loss "
              "distribution, tagged with the epoch and TEST loss) at EVERY new-best "
              "epoch. Default off: only the single finish backup is kept, while the "
              "live canonical artifacts still update at each new best (crash-safe, "

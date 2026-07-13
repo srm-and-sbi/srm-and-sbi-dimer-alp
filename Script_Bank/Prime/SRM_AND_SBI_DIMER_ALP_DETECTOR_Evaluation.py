@@ -1,6 +1,6 @@
 """Entry-point (Detector workflow): MAP-recovery of imaging parameters on EVAL.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, B5) — a
+Part of the Detector calibration workflow (see the implementation plan in DETECTOR_WORKFLOW.md) — a
 complete calibration workflow parallel to the canonical pipeline, with its own
 committed submission machinery. Mirrors the canonical
 ``SRM_AND_SBI_DIMER_ALP_Evaluation.py``: it loads the trained imaging estimator
@@ -22,7 +22,7 @@ shard, and a separate ``--merge`` step (single process, no GPU) concatenates the
 shards into the final report + arrays. With one worker it writes the report
 directly (no shard, no merge).
 
-Detector differences: the estimator is loaded from the A5 version-portable
+Detector differences: the estimator is loaded from the version-portable
 artifact (``artifacts.load_estimator``) rather than a pickled posterior; the
 prior, parameter table, and data paths are the Detector's (``det.build_prior``,
 ``det.DETECTOR_PARAMETERIZATION``, ``det.detector_paths(...)``); every input and
@@ -79,7 +79,7 @@ from srm_and_sbi_dimer_alp.visualization_inference import figure_recovery_combin
 
 
 def _estimator_path(paths, data_bank_root, timing_label):
-    """Detector A5 estimator-artifact path (Posit, Detector-aliased)."""
+    """Detector estimator-artifact path (Posit, Detector-aliased)."""
     return (data_bank_root / paths.posit_subdir /
             f"{paths.project_alias}_{timing_label}_Estimator.npz")
 
@@ -347,7 +347,7 @@ def main(args: argparse.Namespace) -> None:
         print(f"  --posterior-samples  : {posterior_samples}")
     progress_path = recovery_dir / "progress.log"
     print("\nOutput destinations:")
-    print(f"  reads estimator (A5) : {estimator_path}")
+    print(f"  reads estimator artifact : {estimator_path}")
     print(f"  reads EVAL      : <data_bank>/{paths.video_subdir}/"
           f"{paths.project_alias}_{timing_label}_Video_Set_TASK_{{0..{args.eval_tasks - 1}}}_EVAL.zarr")
     print(f"  writes report   : {recovery_dir}")
@@ -361,7 +361,7 @@ def main(args: argparse.Namespace) -> None:
         eval_video_path = paths.video_set_path(0, data_bank_root, timing_label, compress, "EVAL")
         eval_theta_path = paths.theta_set_path(0, data_bank_root, timing_label, compress, "EVAL")
         inputs = [
-            ("estimator (A5)", estimator_path),
+            ("estimator artifact", estimator_path),
             ("EVAL video set (task 0)", eval_video_path),
             ("EVAL theta set (task 0)", eval_theta_path),
         ]
@@ -393,7 +393,7 @@ def main(args: argparse.Namespace) -> None:
         _merge_shards(reporter, args, eval_cfg, recovery_dir, recovery_array_path, run_start)
         return
 
-    reporter.check_file("estimator (A5)", estimator_path)
+    reporter.check_file("estimator artifact", estimator_path)
 
     topo = resolve_topology()
     device = topo.device

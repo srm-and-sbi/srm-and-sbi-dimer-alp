@@ -1,6 +1,6 @@
 """Nuisance artifact: a samplable, self-describing marginalized parameter block.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §7, A4). A
+Part of the Detector calibration workflow (see the nuisance and artifact design in DETECTOR_WORKFLOW.md). A
 `Nuisance` supplies draws for a parameter block that is marginalized rather than
 inferred, and carries its own `parameter_keys` manifest so a draw is
 self-labeling. It serves two roles: `Nuisance_RDS` (the reaction-diffusion
@@ -42,7 +42,7 @@ class Nuisance:
     Underlying forms (`kind`):
       - ``"box"``     — a `BoxUniform` over ``[low, high]`` (from ``from_spec``);
       - ``"samples"`` — a stored sample-set, resampled with replacement (from
-        ``from_samples`` or, materialized, from ``from_posterior``).
+        ``from_samples``; posterior draws are materialized to a sample-set before storage).
     ``low``/``high`` always define the clip box (and, for ``"box"``, the support).
     """
 
@@ -89,21 +89,6 @@ class Nuisance:
         """Nuisance backed by a stored sample-set (resampled with replacement)."""
         return cls(parameter_keys, low, high, space, domain, kind="samples",
                    samples=samples, clip_to_prior=clip_to_prior)
-
-    @classmethod
-    def from_posterior(cls, parameter_keys, posterior, low, high, n_materialize=10000,
-                       x=None, space="log10", domain="DLI", clip_to_prior=True):
-        """Materialize a sample-set from a (conditioned) posterior, then store it.
-
-        Draws ``n_materialize`` samples from ``posterior`` (conditioned on ``x`` if
-        given), so the persisted artifact is a reconstructible sample-set rather
-        than a torch/sbi object. Clipping to the box is applied at sample time.
-        """
-        with torch.no_grad():
-            drawn = (posterior.sample((n_materialize,), x=x) if x is not None
-                     else posterior.sample((n_materialize,)))
-        return cls.from_samples(parameter_keys, drawn.cpu().numpy(), low, high,
-                                space=space, domain=domain, clip_to_prior=clip_to_prior)
 
     # ---- sampling --------------------------------------------------------
     def _raw(self, n):

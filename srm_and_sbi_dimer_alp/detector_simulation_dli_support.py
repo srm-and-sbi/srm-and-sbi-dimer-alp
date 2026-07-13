@@ -1,6 +1,6 @@
 """Detector DLI forward model (adapted): render videos with imaging drawn from θ.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, A3). The
+Part of the Detector calibration workflow (see the implementation plan in DETECTOR_WORKFLOW.md). The
 Detector infers the imaging parameters, so this module renders synthetic videos
 with the imaging parameters taken from the sampled θ rather than the fixed
 parameter table. It reuses the canonical DLI *building blocks* by import — the

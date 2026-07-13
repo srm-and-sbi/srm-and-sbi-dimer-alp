@@ -312,7 +312,7 @@ batch × ~1 GiB at 500 frames, so batch 32 OOMs a GPU with ~64 GB of VRAM at lon
 posterior's probability mass can fall outside the prior box, and the default
 `bounded` rejection sampling stalls on it. Pass `POOL_MODE=unrestricted` for any
 smoke or undertrained-posterior evaluation; `bounded` is only for a fully
-trained posterior. (See `VALIDATION.md` §3.4.)
+trained posterior. (See the MAP-recovery validation in `VALIDATION.md`.)
 
 ```bash
 sbatch --partition=gpu_test --gres=gpu:1 --time=01:00:00 \

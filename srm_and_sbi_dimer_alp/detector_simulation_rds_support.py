@@ -1,6 +1,6 @@
 """Detector RDS forward model (adapted): diffusion-only three-species simulation.
 
-Part of the Detector calibration workflow (DETECTOR_WORKFLOW.md §9.2, A2). The
+Part of the Detector calibration workflow (see the implementation plan in DETECTOR_WORKFLOW.md). The
 Detector infers the imaging parameters with the reaction-diffusion parameters
 marginalized as a nuisance, so this module runs the reaction-diffusion simulator
 in its diffusion-only mode and sources the reaction-diffusion parameters from the
@@ -30,7 +30,7 @@ def draw_nuisance_physical(n=None, device: str = "cpu") -> np.ndarray:
 
     Returns shape ``(6,)`` for ``n=None`` or ``(n, 6)`` for a batch, ordered as
     ``detector_parameterization.DETECTOR_NUISANCE`` (three counts + three
-    diffusion coefficients). Every nuisance row is log10 (A1 enforces this at
+    diffusion coefficients). Every nuisance row is log10 (``detector_parameterization`` enforces this at
     import), so the physical value is ``LOG_BASE ** draw``.
     """
     prior = det.build_nuisance_prior(device)

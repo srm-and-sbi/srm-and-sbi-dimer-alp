@@ -597,6 +597,92 @@ because the two answer different questions: a sharp posterior at the wrong
 location and a broad posterior at the right one are distinguishable only when
 both are shown.
 
+### Estimator generalization and test-loss interpretation
+
+The Inference stage reports one per-epoch scalar, the **mean test loss** (the
+flow's negative log-density on the held-out TEST set). That mean is a
+*consistency* check, not a generalization metric, and reading it correctly
+matters:
+
+- **It confounds two quantities.** The logarithmic score is a strictly proper
+  scoring rule whose associated divergence is the Kullback–Leibler divergence, so
+  the expected loss decomposes into an intrinsic **posterior-entropy floor** (a
+  property of the problem, not the estimator) plus the estimator's **KL error**
+  (Gneiting & Raftery 2007). The absolute mean is therefore not "the estimator's
+  error," and two runs reproducing the same mean at different TEST-set sizes
+  confirm only that the mean is well estimated (a 1/√N consistency result), not
+  that the estimator generalizes.
+- **A lower loss does not certify a better posterior.** Closeness in KL bounds
+  neither moments nor calibration (Deshpande et al. 2022); posterior faithfulness
+  is a separate measurement (below).
+- **The central-limit reading is contingent.** The per-example negative
+  log-density is unbounded above — one example where the flow assigns near-zero
+  density at the truth contributes an arbitrarily large value — so if that upper
+  tail is heavy the variance is large or undefined and the Gaussian standard error
+  breaks down. Finite variance is *testable*, not assumed.
+
+**Best-epoch test-loss distribution (instrumented).** Rather than the mean alone,
+the stage captures the best epoch's **per-example** TEST loss, keyed by the
+`(task_index, sim_index)` pair — authoritative against the on-disk task/sim
+layout and extension-stable as the TEST set grows — with a self-describing
+manifest (parameter table, prior bounds, θ-space, best epoch and loss). It is
+committed alongside the checkpoint and posterior at each new best; because the
+per-example loss is already computed to form the mean, capturing it is a
+no-reduction store and essentially free (`--test-loss-distribution`, on by
+default when a TEST set is present). Reporting is three-tier: the per-epoch mean
+and standard deviation (a spread band on the loss curve); at each new best an
+extended card (quantiles, skew, tail mass, train−test gap, bootstrap confidence
+interval); and heavier analyses post-hoc. **Model selection stays by the mean** —
+the extended statistics are diagnostic, since re-ranking checkpoints on an
+outcome-selected tail subset would be an improper score (Gneiting & Ranjan 2011).
+
+**Rigorous cross-run comparison (post-hoc).** To decide whether estimator A
+generalizes better than B, form the per-example log-score difference on the
+**shared** `(task_index, sim_index)` subset and test that its mean is zero.
+Pairing cancels the common entropy term, so the statistic isolates the difference
+of the two estimators' KL divergences to the truth (Amisano & Giacomini 2007) —
+the Diebold–Mariano test of equal predictive accuracy (Diebold & Mariano 1995),
+with the Wilcoxon signed-rank test and the paired bootstrap as heavy-tail-robust
+alternatives. Comparing the two *means* of two different-sized sets is invalid: it
+confounds the sets' intrinsic-entropy content. Whether the mean itself is
+trustworthy is checkable from the stored scores (a subsampling-rate log-log slope
+near −0.5; tail-index estimation; bootstrap skew); a heavy tail is itself the
+generalization red flag the mean concealed.
+
+**Calibration and coverage.** A low loss cannot detect an overconfident
+posterior, so faithfulness — the coverage read-out introduced above — is measured
+by the field-standard amortized-inference diagnostics: simulation-based
+calibration (rank uniformity of the true θ within posterior samples; Talts et al.
+2018, with the necessary-not-sufficient caveat of Modrák et al. 2023), expected
+coverage of credible regions (Hermans et al. 2022), TARP (necessary and
+sufficient, in the population limit, for matching the true posterior; Lemos et al.
+2023), and local C2ST for per-observation fidelity on the few real observations
+(Linhart et al. 2023). These require posterior sampling and are therefore
+periodic/post-hoc rather than per-epoch.
+
+**Scope.** All of the above measure **in-distribution** generalization — to new
+draws from the same prior-predictive. Out-of-distribution / real-data
+generalization is a different question, answered by coverage under model
+misspecification, the embedding-space real-versus-synthetic distance (MMD / C2ST,
+in `DETECTOR_WORKFLOW.md`, "Quantitative real-versus-synthetic distance"), and
+posterior-predictive checks; misspecification-robust simulation-based inference
+(Ward et al. 2022; Kelly et al. 2023 — pending independent verification) is the
+relevant literature.
+
+**References.** Gneiting & Raftery (2007), *Strictly Proper Scoring Rules,
+Prediction, and Estimation*, JASA; Deshpande et al. (2022), *Are you using test
+log-likelihood correctly?*, TMLR; Amisano & Giacomini (2007), *Comparing Density
+Forecasts via Weighted Likelihood Ratio Tests*, JBES; Diebold & Mariano (1995),
+*Comparing Predictive Accuracy*, JBES; Gneiting & Ranjan (2011), on the
+impropriety of non-constant score weighting, JBES; Talts et al. (2018),
+*Validating Bayesian Inference Algorithms with Simulation-Based Calibration* (with
+Modrák et al. 2023); Hermans et al. (2022), *A Trust Crisis in Simulation-Based
+Inference?*, TMLR; Lemos et al. (2023), *Sampling-Based Accuracy Testing of
+Posterior Estimators (TARP)*, ICML; Linhart et al. (2023), *L-C2ST*, NeurIPS (on
+the classifier two-sample test of Lopez-Paz & Oquab 2017); and, pending
+independent verification, Ward et al. (2022) and Kelly et al. (2023) on
+misspecification-robust neural posterior estimation.
+
 ### Observability and diagnostics
 
 Every stage shares one diagnostics scheme. `--debug` prints per-step

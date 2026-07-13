@@ -68,7 +68,7 @@ def build_system(theta: np.ndarray,
             identical to the previous behavior. If True, the three species and
             their diffusion constants are still registered, but the four
             reaction channels are skipped — a diffusion-only system used by the
-            Detector calibration workflow (see DETECTOR_WORKFLOW.md sec. 4).
+            Detector calibration workflow (see the pure-diffusion physics model in DETECTOR_WORKFLOW.md).
             Initial particle placement and the imaging pipeline are unaffected.
         verbose: If True, print diffusion constants and reaction rates to stdout.
 

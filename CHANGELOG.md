@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.24 - 2026-07-13
+
+Add the Detector Experiment stage (MAP on real recordings) and the standalone building
+blocks for the sim-vs-real gap check and the Nuisance_DLI, move the Detector workflow
+document into the repository, and reconcile documentation.
+
+### Added
+
+- **Detector Experiment stage** — `..._DETECTOR_Experiment.py` and its HPC wrapper
+  `..._DETECTOR_HPC_Experiment.sh` (wired into the Detector dispatcher): maximum-a-posteriori
+  estimation of the imaging parameters on real recordings per condition, a canonical
+  `Experiment` copy plus only the forced deviations (imaging-θ target, version-portable
+  estimator load, `_DETECTOR` namespacing); multi-GPU sharded, non-deterministic.
+- **`detector_embedding_space_distance.py`** — the sim-vs-real embedding-space gap measure:
+  RBF-MMD (median-heuristic bandwidth, cell-block permutation p-value) and a cell-grouped
+  C2ST (GroupKFold cross-validation, one-sided t-test on per-fold accuracies) on the trained
+  embedding, with cell-level resampling. Standalone; not yet invoked by the Experiment.
+- **`detector_nuisance_dli.py`** — the `Nuisance_DLI` construction module: emit a value-based
+  spec template pre-filled with posterior-derived suggestions, fully validate a user-finalized
+  spec (structure and values within the imaging prior box), build the pooled `Nuisance`
+  (per-parameter, posterior, or samples form), and the validating gate `require_nuisance_dli`.
+- **Nuisance_DLI analysis entry point** — `Script_Bank/Analysis/..._DETECTOR_Nuisance_DLI.py`:
+  presents the calibrated imaging posterior and emits the spec template (`--emit-template`),
+  then builds the artifact from the finalized spec (`--build`); additive, never wired into the
+  dispatcher; outputs written beside the posterior in the data-bank `Posit/` directory.
+
+### Changed
+
+- Moved **`DETECTOR_WORKFLOW.md`** into the repository as the authoritative Detector workflow
+  design, tightened for submission, with the Nuisance_DLI construction and embedding-space
+  distance sections reconciled to the code.
+- Removed the orphaned `Nuisance.from_posterior` builder — no caller; posterior draws are
+  materialized to a stored sample-set inside `build_nuisance_dli`.
+
+### Documentation
+
+- Folded the estimator-generalization methods into `PROJECT_CONTEXT.md` (paired log-scoring on
+  a shared set, calibration and coverage, in-distribution versus out-of-distribution).
+- Documentation-discipline sweep across the Detector Prime and HPC scripts, docstrings, and this
+  changelog: replaced non-self-contained "estimator (A5)" tokens with self-contained references,
+  and removed fragile section-number cross-references in favor of named-section references.
+
+Held for a follow-up — end-to-end testable only once a trained Detector estimator and a
+completed Experiment run exist: wiring the gap check into the Experiment, and matched-synthetic
+generation.
+
 ## 0.2.23 - 2026-07-12
 
 Add the Detector generation controller for staged, multi-node production data generation.
@@ -37,7 +83,7 @@ nuisance-set naming convention. Filename-token change only; no behavior change.
 
 - Documented the persisted nuisance-set naming pattern
   `{project_alias}_{timing_label}_Nuisance_<DOMAIN>_Theta_Set_TASK_{n}_{split}.{ext}`
-  (Prime docstring + `DETECTOR_WORKFLOW.md` §7), distinguishing the samplable object
+  (Prime docstring + the nuisance and artifact design in `DETECTOR_WORKFLOW.md`), distinguishing the samplable object
   from the persisted set file, and recording the forward production/canonical
   convention `Nuisance_DLI_Theta_Set` (imaging marginalized).
 
@@ -65,7 +111,7 @@ deleted — intermediate backups simply are not written by default).
 Reconcile the Detector workflow to the canonical workflow. Every Detector Prime
 script and HPC wrapper is rebuilt as a verbatim copy of its canonical counterpart
 plus only the justified deviations — the imaging inference target, the
-version-portable A5 estimator, and `_DETECTOR` coexistence namespacing. The two
+version-portable estimator artifact, and `_DETECTOR` coexistence namespacing. The two
 are now parallel, essentially-identical SBI pipelines sharing the same essential
 machinery by import; they diverge only where the science requires it. This
 corrects divergences that earlier from-scratch drafts had introduced (confirmed
@@ -89,11 +135,11 @@ by a full process-direction + parity sanity check).
 
 ### Changed
 
-- **Detector Prime scripts** rebuilt as canonical copies + only the forced/A5
+- **Detector Prime scripts** rebuilt as canonical copies + only the forced
   deviations, restoring the full canonical machinery earlier drafts had dropped
   (the `DiagnosticReporter` report, posterior coverage / View B / `--summary`, the
   per-example test-loss distribution, the debug CLI). Inference and Evaluation
-  persist the estimator via the version-portable A5 format (`artifacts`) in place
+  persist the estimator via the version-portable format (`artifacts`) in place
   of the torch-version-locked pickle.
 - **Detector HPC wrappers + dispatcher** rebuilt as verbatim canonical copies +
   `_DETECTOR` filename aliasing only — dropping the mandatory `SEED`, the GPU-mode
@@ -120,7 +166,7 @@ canonical wrappers), never wired into the canonical `Submit.sh` dispatcher.
   filename-namespaced `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*` alongside the
   canonical wrappers (documented in the HPC runbook §8): `..._Simulation.sh`
   (diffusion-only RDS → imaging DLI, packed per node, `--array` fan-out, per-split
-  `SEED`), `..._Inference.sh` (data-parallel training via `torchrun`; saves the A5
+  `SEED`), `..._Inference.sh` (data-parallel training via `torchrun`; saves the version-portable
   estimator), `..._Evaluation.sh` (sharded MAP recovery + a separate `--merge`
   step), and `..._Submit.sh` (dry-run-first dispatcher with the two Goethe GPU
   modes pinned — `gpu_test`=4 GPUs for checks, `gpu`=8 for production). Retires
@@ -191,7 +237,7 @@ real-vs-synthetic MMD/C2ST gap) is deferred to a follow-up.
   RDS drawn from the nuisance) and `detector_simulation_dli_support.py` (imaging
   drawn from θ), each reusing the canonical building blocks by import.
 - **Detector entry scripts** (`Script_Bank/Prime`, `_DETECTOR`-namespaced):
-  `Simulation_RDS`, `Simulation_DLI`, `Inference` (saves the A5 estimator),
+  `Simulation_RDS`, `Simulation_DLI`, `Inference` (saves the version-portable estimator),
   `Evaluation` (imaging-θ MAP recovery on EVAL).
 
 ### Changed
@@ -204,7 +250,7 @@ real-vs-synthetic MMD/C2ST gap) is deferred to a follow-up.
   `console_log_context` in `utils.py` (so a Detector `--debug-dump` transcript is
   `_DETECTOR`-tagged). Each defaults to the canonical configuration, so existing
   stages are byte-identical.
-- `PROJECT_CONTEXT.md` §3: Stage 1 (detector parameters) reclassified from a
+- `PROJECT_CONTEXT.md` (Inference Pipeline): Stage 1 (detector parameters) reclassified from a
   separate future sibling to this repository's in-repo special-situation
   calibration workflow.
 
@@ -483,7 +529,7 @@ Documentation corrections and a backup convention. No code or behavior change.
 
 ### Fixed
 
-- **Receptor identity (PROJECT_CONTEXT.md §2).** The system section mislabeled the
+- **Receptor identity (the system section of PROJECT_CONTEXT.md).** The system section mislabeled the
   modeled receptor as "EGFR-Like" / epidermal growth factor receptor. The pipeline's
   real-data application is the **MET receptor** (c-Met / hepatocyte growth factor
   receptor): the Experiment stage consumes MET single-particle-tracking recordings

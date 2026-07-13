@@ -141,7 +141,7 @@ def main(args: argparse.Namespace) -> None:
 
     print("\nDLI runtime defaults:")
     print(f"  dimer_mule              : {dli_cfg.dimer_mule}   "
-          f"(√2; brightness boost for dimers — see PROJECT_CONTEXT.md §4)")
+          f"(√2; brightness boost for dimers — see PROJECT_CONTEXT.md)")
     print(f"  darkcounts              : {dli_cfg.darkcounts}                    "
           f"(baseline; no per-pixel dark current)")
     print(f"  sqrt_2sigma_dist_label  : {dli_cfg.sqrt_2sigma_dist_label}            "

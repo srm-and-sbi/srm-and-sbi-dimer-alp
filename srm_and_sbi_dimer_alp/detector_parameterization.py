@@ -32,7 +32,7 @@ Three design constraints (enforced at import by ``_validate_table``):
   2. The learnable subset is ``VALUE-not-a-sentinel AND PRIOR_RANGE-not-None``.
      A nuisance-from-spec row also carries a range, so a ``PRIOR_RANGE is not
      None`` test alone (the canonical filter) would pull nuisance rows into the
-     inference prior. That is the single most important port hazard (Phase D).
+     inference prior. That is the single most important port hazard (the production port to the canonical codebase).
   3. Log semantics are explicit: every ranged row is log10 (``LOG_FLAG=True``,
      ``LOG_BASE=10``), so a draw from a range lives in log10 space and maps to
      physical space by ``LOG_BASE ** draw`` (``to_physical``). Fixed values are
@@ -56,7 +56,7 @@ Public interface
 
 Assembling the concrete argument vectors the theta-driven forward models
 (``build_system``, ``simulate_dli``) consume is finalized against those call
-sites in the Detector simulation scripts (Phase B), where ``to_physical`` and
+sites in the Detector simulation scripts, where ``to_physical`` and
 the subset/index maps here are the building blocks.
 """
 
@@ -96,12 +96,12 @@ _SENTINELS = (NUISANCE_SENTINEL, POSTERIOR_SENTINEL)
 # The "op" comment on each learnable imaging row is the production operating
 # point (the value used as a fixed constant in the canonical model); every
 # learnable range brackets it, so calibration can only refine, never contradict
-# by construction, that operating point (DETECTOR_WORKFLOW.md sec. 6.2).
+# by construction, that operating point (see the learnable imaging-parameter ranges in DETECTOR_WORKFLOW.md).
 
 _DETECTOR_RAW_NESTED: dict[str, list[dict]] = {
     # ----- RDS nuisance: biology marginalized during detector calibration -----
     # Drawn per simulation from a restricted BoxUniform; fed to the diffusion-only
-    # forward model. Ranges from DETECTOR_WORKFLOW.md sec. 6.1.
+    # forward model. Ranges from the RDS-nuisance section of DETECTOR_WORKFLOW.md.
     'count': [
         {'KEY': 'count_alp', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (1.0, 2.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'LABEL': r'$C_{A}$'},
         {'KEY': 'count_bet', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (1.0, 2.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'LABEL': r'$C_{B}$'},
@@ -117,7 +117,7 @@ _DETECTOR_RAW_NESTED: dict[str, list[dict]] = {
         {'KEY': 'capture_radius', 'VALUE': 20, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Nanometer', 'LABEL': r'$\rho_{CAP}$'},
     ],
     # ----- Learnable imaging parameters (calibration targets) -----
-    # Ranges from DETECTOR_WORKFLOW.md sec. 6.2; VALUE = 10**mid(range) (center).
+    # Ranges from the learnable-imaging-parameter section of DETECTOR_WORKFLOW.md; VALUE = 10**mid(range) (center).
     'camera': [  # EMCCD detector
         {'KEY': 'kappa_c', 'VALUE': 10**0.5, 'PRIOR_RANGE': (0.0, 1.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\kappa_{c}$'},        # op 4.75
         {'KEY': 'kappa_o', 'VALUE': 10**2.5, 'PRIOR_RANGE': (2.0, 3.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Photon', 'LABEL': r'$\kappa_{o}$'},     # op 250
@@ -333,7 +333,7 @@ def build_nuisance_prior(device: str = "cpu") -> BoxUniform:
     """BoxUniform over the nuisance-from-spec RDS box (log10 space).
 
     Covers only the inline (from-spec) nuisance rows. The supplied-distribution
-    case ('nuisance_object') is served by the Nuisance artifact (Phase A3); this
+    case ('nuisance_object') is served by the Nuisance artifact; this
     builder raises if any nuisance row lacks a range.
     """
     objects = [entry['KEY'] for entry in DETECTOR_NUISANCE
