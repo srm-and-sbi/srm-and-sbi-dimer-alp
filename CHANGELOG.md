@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.25 - 2026-07-15
+
+Add the posterior-predictive video analysis tool, and document the EMCCD readout-noise
+units discrepancy (model kept as-is).
+
+### Added
+
+- **Posterior-predictive video tool** — `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.py`
+  and the matching pure-viewer notebook `notebooks/SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.ipynb`:
+  render a synthetic video from a selected `(kind, cell, chunk)` or per-cell-median MAP imaging
+  estimate at the real recording's own length, and persist real + synthetic + provenance
+  (`*_Synthetic_Video.npz`), a static comparison figure, and the drawn trajectory. Two display
+  normalizations (`autoscale` / `percentile`); post-hoc analysis, not a canonical stage.
+
+### Changed
+
+- **Comparison figure uses the stored (clipped) synthetic** — the posterior-predictive comparison
+  figure now plots the non-negative uint16 frames that are stored and viewed, not the pre-clip
+  float, so the real-vs-synthetic histogram compares like with like. The storage clip now reports
+  the negative/overflow excursion counts (`n_under` / `n_over`) and is documented as a deliberate,
+  revisit-able choice.
+
+### Documentation
+
+- **EMCCD readout-noise units discrepancy** — the readout term scales a unit normal by
+  `variance / gain^2` (a variance where a standard deviation belongs; effective post-gain
+  standard deviation `variance / gain` rather than `sqrt(variance)`), reproducing the reference
+  implementation. The model is kept as-is (it matches real data); the discrepancy, citations, and
+  the deferred corrected form are recorded in `PROJECT_CONTEXT.md` (DLI Imaging read-noise note),
+  `DETECTOR_WORKFLOW.md` (§9.1), and the `EMCCD` docstring.
+
 ## 0.2.24 - 2026-07-13
 
 Add the Detector Experiment stage (MAP on real recordings) and the standalone building

@@ -140,23 +140,34 @@ class Detector(ABC):
 class EMCCD(Detector):
     """Electron-multiplying CCD detector model.
 
-    The EMCCD pipeline applied to a noise-free photon-count image `intensity`:
+    The pipeline applied to a noise-free photon-count image `intensity`
+    (see `add_noise`):
 
-        1. Poisson shot noise:     frames ~ Poisson(intensity)
-        2. Gaussian readout noise: frames += N(0, variance / gain^2)
-        3. Gain multiplication:    frames *= gain
-        4. Offset addition:        frames += offset    (in ADU)
+        1. Poisson shot noise:   frames  = Poisson(intensity)
+        2. Readout-noise draw:   frames += standard_normal * variance / gain^2
+        3. Gain multiplication:  frames *= gain
+        4. Offset addition:      frames += offset    (ADU)
 
     The result is an image in ADU (analog-to-digital units, i.e. detector
-    counts).
+    counts). Steps 1-4 reproduce the reference implementation
+    (https://github.com/PessoaP/simulated_tracking, `detection.py`).
+
+    Units caveat (documented, deliberately unchanged): step 2 scales a unit
+    normal by `variance / gain^2` -- a variance where a standard deviation
+    belongs -- so the effective post-gain readout standard deviation is
+    `variance / gain`, not the `sqrt(variance)` the parameter name implies. In
+    the standard EMCCD model the readout noise is a gain-independent Gaussian
+    added after the register, standard deviation `sqrt(variance)`. The term is
+    kept as written because the tuned forward model reproduces the real
+    pixel-intensity distribution and, with gain fixed, the mis-scaling is
+    absorbed into the fitted `variance` value (not observable in the rendered
+    output); see the read-noise note under DLI Imaging in PROJECT_CONTEXT.md for
+    the discrepancy, citations, and rationale.
 
     Args:
-        offset: Per-pixel baseline added after gain (ADU).
-        gain: Electron-multiplying gain factor.
-        variance: Variance of the pre-gain readout-noise Gaussian.
-            Note: in the noise step, the readout noise is divided by
-            `gain^2` BEFORE the gain multiplication so the post-gain noise
-            ends up with variance `variance / gain^2 * gain^2 = variance`.
+        offset: per-pixel baseline added after gain (ADU).
+        gain: electron-multiplying gain factor (dimensionless).
+        variance: readout-noise variance (ADU^2); see the units caveat above.
     """
 
     def __init__(self, offset: float, gain: float, variance: float):
