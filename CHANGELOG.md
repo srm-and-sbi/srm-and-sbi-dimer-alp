@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.27 - 2026-07-15
+
+Show the inferred and nuisance parameters on the posterior-predictive comparison figure, and
+add independent companion docs for three analysis scripts.
+
+### Changed
+
+- **Comparison figure info panel** — now lists this render's INFERRED imaging MAP theta
+  (absolute units, out-of-prior parameters flagged) and its NUISANCE RDS draw (absolute:
+  particle counts and diffusion), under explicit labels, alongside the existing provenance
+  notes. The particle counts in particular help attribute a real-vs-synthetic histogram
+  mismatch (for example a thinner synthetic bright tail) to the nuisance draw or the imaging
+  estimate rather than leaving it unexplained.
+
+### Added
+
+- **Companion docs for three analysis scripts** (independent, for later incorporation into the
+  general documentation): `SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.md`,
+  `SRM_AND_SBI_DIMER_ALP_Experiment_CD86_CTLA-4_Controls.md`, and
+  `SRM_AND_SBI_DIMER_ALP_Seeding_Validation.md` — each documenting the script's purpose, usage,
+  outputs, and interpretation in the established Analysis-folder style.
+
 ## 0.2.26 - 2026-07-15
 
 Improve the posterior-predictive comparison figure and add its usage/interpretation doc.

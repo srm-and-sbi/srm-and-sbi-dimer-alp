@@ -140,10 +140,16 @@ def _load_map_theta(map_npz, imaging_keys, kind, cell, chunk, source):
     return np.power(10.0, theta_log10)
 
 
-def _save_comparison_png(path, real, synth, kind, cell, sel_desc, display_norm):
+def _save_comparison_png(path, real, synth, kind, cell, sel_desc, display_norm,
+                         nuisance, imaging_physical):
     """Static real-vs-synthetic panel. Columns pair each condition -- REAL (col 0) and SYNTH
     (col 1), each showing the mid frame over its max projection; the third column holds the
-    shared pixel-intensity histogram (top) and a provenance text box (bottom).
+    shared pixel-intensity histogram (top) and a provenance text box (bottom). The text box
+    lists this render's DLI/imaging MAP parameters (out-of-prior ones flagged) and its
+    RDS-nuisance draw, both in absolute units -- the imaging theta is what drove the render,
+    and the particle counts in particular drive occupancy and the bright-pixel upper tail, so
+    together they help attribute a histogram mismatch to the imaging estimate or the nuisance
+    draw rather than leaving it unexplained.
 
     Both panels and the histogram use the STORED synthetic (``synth_u16``, clipped to the
     non-negative uint16 range), so the comparison is like-with-like against the real frames and
@@ -183,14 +189,40 @@ def _save_comparison_png(path, real, synth, kind, cell, sel_desc, display_norm):
     ax[0, 2].set_yscale("log"); ax[0, 2].set_title("pixel-intensity density (ADU)", fontsize=9)
     ax[0, 2].legend(fontsize=8)
     ax[1, 2].axis("off")
-    ax[1, 2].text(0.0, 0.5, f"real  n_frames={real.shape[0]}  {real.shape[1]}x{real.shape[2]}\n"
-                  f"synth n_frames={synth.shape[0]}  {synth.shape[1]}x{synth.shape[2]}\n\n"
-                  "motion: fresh RDS-nuisance draw\nimaging: MAP theta of the selected chunk\n"
-                  "comparison reads imaging appearance,\nnot the real trajectory.\n"
-                  "synth shown as stored (clipped to >=0)\n\n"
-                  f"shown at 16-bit; estimator calibrated\non the fixed 8-bit rescale.\n"
-                  f"display norm: {display_norm}",
-                  fontsize=9, va="center", family="monospace")
+    # INFERRED imaging MAP theta (absolute), out-of-prior parameters flagged with '*'.
+    ikeys = [e["KEY"] for e in det.DETECTOR_PARAMETERIZATION]
+    img = np.asarray(imaging_physical, dtype=float).ravel()
+    plo = np.asarray(det.theta_lower_bound(), dtype=float)
+    phi = np.asarray(det.theta_upper_bound(), dtype=float)
+    _short = {"prob_photo_bleach": "p_bleach", "lambda_rate": "lambda", "gamma_penalty": "gamma"}
+    dli = []
+    for i, k in enumerate(ikeys):
+        lv = np.log10(img[i]) if img[i] > 0 else float("-inf")
+        mark = "*" if (lv < plo[i] - 1e-9 or lv > phi[i] + 1e-9) else ""
+        dli.append(f"{_short.get(k, k)}={img[i]:.3g}{mark}")
+    dli_lines = "\n".join("  " + "  ".join(dli[j:j + 3]) for j in range(0, len(dli), 3))
+    # NUISANCE RDS draw (absolute); the particle counts drive the bright-pixel upper tail.
+    nuis = np.asarray(nuisance, dtype=float).ravel()
+    npart = []
+    for e, v in zip(det.DETECTOR_NUISANCE, nuis):
+        lab = e["LABEL"].translate({ord(c): None for c in "${}\\"})
+        npart.append(f"{lab}={v:.0f}" if str(e.get("UNIT", "")).lower().startswith("count")
+                     else f"{lab}={v:.3g}")
+    nuis_lines = "\n".join("  " + "  ".join(npart[j:j + 3]) for j in range(0, len(npart), 3))
+    ax[1, 2].text(
+        0.0, 1.0,
+        f"real  {real.shape[0]} frames  {real.shape[1]}x{real.shape[2]}\n"
+        f"synth {synth.shape[0]} frames  {synth.shape[1]}x{synth.shape[2]}\n\n"
+        f"INFERRED imaging (MAP theta, absolute):\n{dli_lines}\n  (* outside training prior)\n\n"
+        f"NUISANCE (RDS draw, absolute):\n{nuis_lines}\n"
+        "  (counts drive the bright-pixel tail)\n\n"
+        "motion: fresh RDS-nuisance draw\n"
+        "imaging: MAP theta of the selected chunk\n"
+        "comparison reads imaging appearance,\nnot the real trajectory.\n"
+        "synth shown as stored (clipped to >=0)\n"
+        "16-bit; estimator calibrated on the 8-bit rescale\n"
+        f"display norm: {display_norm}",
+        fontsize=7, va="top", family="monospace")
     fig.suptitle("Posterior-predictive video check (real vs synthetic-from-MAP)", fontsize=11)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
@@ -307,7 +339,8 @@ def main(args):
         frame_time_seconds=frame_time, n_frames=n_frames, real_tif=str(real_tif))
     sel_desc = f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median"
     _save_comparison_png(out_dir / f"{stem}_Comparison.png", real, synth_u16,
-                         args.kind, args.cell, sel_desc, args.display_norm)
+                         args.kind, args.cell, sel_desc, args.display_norm,
+                         nuisance, imaging_physical)
     print(f"Persisted clip + provenance:\n    {clips_path}")
     print(f"Static comparison figure:\n    {out_dir / (stem + '_Comparison.png')}")
     print(f"Trajectory (provenance):\n    {traj_path}")
