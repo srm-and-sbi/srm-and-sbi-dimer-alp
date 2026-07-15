@@ -325,6 +325,33 @@ done
 In short: **theta is reproducible at a fixed seed; trajectories, videos, and
 trained networks vary by design.**
 
+**Pre-launch fan-out label check.** Because generation is seedless by design,
+dataset integrity does not rest on value reproducibility past the theta stage; it
+rests on the output file labels being unique across the fan-out, so a silent label
+collision cannot let one task overwrite another's output. An ad-hoc diagnostic
+asserts exactly that before a large generation fan-out — especially an incremental
+grow that appends tasks with a task offset — and also confirms the theta sampler's
+seeding behaves as designed (two default draws differ, so no seed is silently
+forced; an explicit seed reproduces the draw bit-for-bit). Run it by hand on any
+machine with the package installed and a valid `MACHINE_PROFILE`, once per recording
+duration (the duration sets the timing label whose labels are checked):
+
+```bash
+MACHINE_PROFILE=<profile> python \
+    Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Seeding_Validation.py \
+    --total-time-seconds 2.0
+```
+
+It builds path strings and samples small in-memory arrays only — it never reads or
+writes the data bank and needs no GPU. It writes no files: it prints one
+`[PASS]`/`[FAIL]` line per check and a final `RESULT`, exiting nonzero on any
+failure so it can gate a generation launch from a script. This check is a
+standalone reproducibility diagnostic, not one of the canonical pipeline stages,
+and is kept out of the stage dispatcher. See the companion note
+`Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Seeding_Validation.md` for what each
+check covers, how to read a failure, and the precise scope of what it does and does
+not guarantee.
+
 ### 3.3 Dual-duration checks (2 s and 10 s)
 
 The codebase is duration-parameterized: the recording length is supplied per run

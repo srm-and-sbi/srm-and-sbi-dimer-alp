@@ -458,6 +458,21 @@ its companion `Experiment_Temporal_Dynamics.md` gives the full interpretation.
 `SRM_AND_SBI_DIMER_ALP_Seeding_Validation.py` checks the RNG / non-determinism
 behavior of the generation stack.
 
+`SRM_AND_SBI_DIMER_ALP_Experiment_CD86_CTLA-4_Controls.py` reuses the trained DIMER-ALP
+posterior — with no retraining — to MAP-estimate parameters from real recordings of two
+oligomeric-state control receptors, the constitutive monomer CD86 and the constitutive dimer
+CTLA-4 (BioImage Archive accession S-BIAD1369). A special-scope, ad-hoc reuse of the posterior
+on a different study's data (analogous to the Construction entry point), it clones the
+Experiment stage bar the dataset folder, output directory, and default conditions, and is kept
+out of the stage dispatcher. Run it under the inference environment (single-process or
+multi-GPU sharded, with a `--merge` pass to concatenate shards; `--dry-run` first); it writes a
+per-condition inferred-parameter `report.md`, per-parameter figures, and the reusable
+per-(cell, chunk) `.npz` arrays. Real data carry no ground truth, so the deliverable is a
+per-condition distribution rather than a recovery check, with the diffusion scale as the
+transferable quantitative read-out. Usage and interpretation are in the companions
+`SRM_AND_SBI_DIMER_ALP_Experiment_CD86_CTLA-4_Controls.md` and
+`SRM_AND_SBI_DIMER_ALP_Experiment_CD86_CTLA-4_Controls_Temporal_Dynamics.md`.
+
 ### Configuration architecture
 
 Configuration is split into two complementary parts:

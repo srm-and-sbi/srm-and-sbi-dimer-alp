@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.28 - 2026-07-15
+
+Incorporate the three analysis-script companion docs into the general documentation (two-tier).
+
+### Documentation
+
+- **Two-tier incorporation of the analysis-script docs** — concise per-script entries added to
+  the general documentation, each pointing to its standalone companion for the detail: the
+  `Nuisance_DLI` construction into `DETECTOR_WORKFLOW.md` (§7), the CD86/CTLA-4 control-receptor
+  reuse into `PROJECT_CONTEXT.md` (§4 analyses), and the pre-launch seeding/file-label check into
+  `VALIDATION.md` (§3 reproducibility).
+
 ## 0.2.27 - 2026-07-15
 
 Show the inferred and nuisance parameters on the posterior-predictive comparison figure, and
