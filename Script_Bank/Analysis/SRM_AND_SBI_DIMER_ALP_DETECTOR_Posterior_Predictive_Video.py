@@ -141,7 +141,9 @@ def _load_map_theta(map_npz, imaging_keys, kind, cell, chunk, source):
 
 
 def _save_comparison_png(path, real, synth, kind, cell, sel_desc, display_norm):
-    """Static real-vs-synthetic panel: mid frame, max projection, pixel-intensity histogram.
+    """Static real-vs-synthetic panel. Columns pair each condition -- REAL (col 0) and SYNTH
+    (col 1), each showing the mid frame over its max projection; the third column holds the
+    shared pixel-intensity histogram (top) and a provenance text box (bottom).
 
     Both panels and the histogram use the STORED synthetic (``synth_u16``, clipped to the
     non-negative uint16 range), so the comparison is like-with-like against the real frames and
@@ -169,15 +171,17 @@ def _save_comparison_png(path, real, synth, kind, cell, sel_desc, display_norm):
         a.set_title(title, fontsize=9); a.set_xticks([]); a.set_yticks([])
 
     real_clim, synth_clim = _clim(real), _clim(synth)
+    # Columns pair each condition: col 0 = REAL (frame over max projection), col 1 = SYNTH
+    # (same), col 2 = the shared pixel-intensity histogram (top) and the provenance text (bottom).
     _frame(ax[0, 0], real[mid], f"REAL {label} cell {cell}  frame {mid}", real_clim)
+    _frame(ax[1, 0], real.max(0), "REAL  max projection", (None, None))
     _frame(ax[0, 1], synth[mid], f"SYNTH (MAP {kind} c{cell} {sel_desc})  frame {mid}", synth_clim)
-    _frame(ax[0, 2], real.max(0), "REAL  max projection", (None, None))
-    _frame(ax[1, 0], synth.max(0), "SYNTH  max projection", (None, None))
-    ax[1, 1].hist(real.ravel(), bins=120, histtype="step", density=True, color="tab:blue",
-                  label="real"); ax[1, 1].hist(synth.ravel(), bins=120, histtype="step",
+    _frame(ax[1, 1], synth.max(0), "SYNTH  max projection", (None, None))
+    ax[0, 2].hist(real.ravel(), bins=120, histtype="step", density=True, color="tab:blue",
+                  label="real"); ax[0, 2].hist(synth.ravel(), bins=120, histtype="step",
                   density=True, color="tab:orange", label="synth")
-    ax[1, 1].set_yscale("log"); ax[1, 1].set_title("pixel-intensity density (ADU)", fontsize=9)
-    ax[1, 1].legend(fontsize=8)
+    ax[0, 2].set_yscale("log"); ax[0, 2].set_title("pixel-intensity density (ADU)", fontsize=9)
+    ax[0, 2].legend(fontsize=8)
     ax[1, 2].axis("off")
     ax[1, 2].text(0.0, 0.5, f"real  n_frames={real.shape[0]}  {real.shape[1]}x{real.shape[2]}\n"
                   f"synth n_frames={synth.shape[0]}  {synth.shape[1]}x{synth.shape[2]}\n\n"

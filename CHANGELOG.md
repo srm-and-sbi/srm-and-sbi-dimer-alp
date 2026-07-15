@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.26 - 2026-07-15
+
+Improve the posterior-predictive comparison figure and add its usage/interpretation doc.
+
+### Changed
+
+- **Comparison figure pairs conditions by column** — REAL (col 0) and SYNTH (col 1) each show
+  the mid frame over its own max projection, so a frame sits directly above its max projection;
+  the shared pixel-intensity histogram (top) and the provenance text (bottom) fill the third
+  column.
+
+### Added
+
+- **Posterior-predictive video companion doc** —
+  `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.md`: how to run
+  the script (arguments, selection modes, dry-run), the outputs and their naming, how to read the
+  comparison figure, and a step-by-step guide to the viewer notebook.
+
 ## 0.2.25 - 2026-07-15
 
 Add the posterior-predictive video analysis tool, and document the EMCCD readout-noise
