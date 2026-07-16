@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.29 - 2026-07-16
+
+Rename the posterior-predictive "real" side to "experimental", make the notebook player render
+frame-for-frame like the static figure, and add zoom to the player.
+
+### Changed
+
+- **"EXPERIMENTAL" replaces "REAL"** throughout the posterior-predictive tool — figure titles,
+  histogram legend, info panel, the printed metadata, and the stored `.npz` key/variables
+  (`experimental`, `experimental_tif`) — for rigorous experimental-vs-synthetic naming.
+- **Consistent per-frame color scaling** — the notebook player now re-autoscales each frame (it
+  previously autoscaled to frame 0 and held it), matching the scrubber and the engine's static
+  figure, so a given frame renders identically in every view. `autoscale` = each frame's own
+  min/max; `percentile` = a fixed whole-clip `[p0.5, p99.5]` window.
+- **Softened the bright-tail caption** to "(counts or flicker may drive the bright-pixel tail)"
+  (panel and docstring) — the counts explanation is one hypothesis, the flicker generator another.
+
+### Added
+
+- **Zoom in the player** — `PLAY_ZOOM` (and a center) crop the played video to a region of
+  interest, so local experimental-vs-synthetic agreement can be inspected in motion, matching the
+  scrubber's zoom.
+
+### Documentation
+
+- Updated the posterior-predictive companion doc to the above: EXPERIMENTAL labels, the per-frame
+  color convention, the player zoom, and the inferred + nuisance provenance panel.
+
 ## 0.2.28 - 2026-07-15
 
 Incorporate the three analysis-script companion docs into the general documentation (two-tier).
