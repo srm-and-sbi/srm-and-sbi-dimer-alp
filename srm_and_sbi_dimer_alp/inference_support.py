@@ -402,6 +402,122 @@ def build_datasets(train_tasks: int,
     return train_dataset, test_dataset
 
 
+class BatchRenorm(nn.Module):
+    """Batch Renormalization (Ioffe 2017, arXiv:1702.03275): comms-free BatchNorm
+    drop-in, robust to small per-rank batches.
+
+    x_hat = (x - mu_B)/sigma_B * r + d with r, d clamped corrections toward the
+    running stats, treated as constants (stop-gradient). r_max/d_max ramp from
+    pure BatchNorm over warmup+ramp steps. Eval path identical to BatchNorm.
+    Dimension-agnostic (channel = dim 1)."""
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1,
+                 r_max=3.0, d_max=5.0, warmup_steps=100, ramp_steps=1000):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum if momentum is not None else 0.1
+        self.r_max_final = r_max
+        self.d_max_final = d_max
+        self.warmup_steps = warmup_steps
+        self.ramp_steps = max(1, ramp_steps)
+        self.weight = nn.Parameter(torch.ones(num_features))
+        self.bias = nn.Parameter(torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+    def _rd_max(self):
+        step = int(self.num_batches_tracked.item())
+        if step <= self.warmup_steps:
+            return 1.0, 0.0   # pure BatchNorm while the running stats settle
+        t = min(1.0, (step - self.warmup_steps) / self.ramp_steps)
+        return 1.0 + t * (self.r_max_final - 1.0), t * self.d_max_final
+
+    def forward(self, x):
+        shape = [1, self.num_features] + [1] * (x.ndim - 2)   # broadcast over channel dim 1
+        if self.training:
+            dims = [0] + list(range(2, x.ndim))
+            mean = x.mean(dim=dims)
+            var = x.var(dim=dims, unbiased=False)
+            std = (var + self.eps).sqrt()
+            r_max, d_max = self._rd_max()
+            run_std = (self.running_var + self.eps).sqrt()
+            r = (std.detach() / run_std).clamp(1.0 / r_max, r_max)
+            d = ((mean.detach() - self.running_mean) / run_std).clamp(-d_max, d_max)
+            x_hat = (x - mean.view(shape)) / std.view(shape) * r.view(shape) + d.view(shape)
+            with torch.no_grad():   # update running stats from this rank's local batch
+                self.running_mean += self.momentum * (mean - self.running_mean)
+                self.running_var += self.momentum * (var - self.running_var)
+                self.num_batches_tracked += 1
+        else:
+            run_std = (self.running_var + self.eps).sqrt()
+            x_hat = (x - self.running_mean.view(shape)) / run_std.view(shape)
+        return x_hat * self.weight.view(shape) + self.bias.view(shape)
+
+
+def convert_to_batch_renorm(module: nn.Module) -> nn.Module:
+    """Recursively replace every ``nn.*BatchNorm*`` with a :class:`BatchRenorm`, copying the
+    affine params + running stats. Mirrors ``convert_sync_batchnorm``'s walk, so it reaches
+    the ``BatchNorm3d`` inside the (compiled) Complex3DCNN. The MAF flow's own (nflows)
+    BatchNorm is not an ``nn._BatchNorm`` and is left untouched -- consistent with SyncBN,
+    which also only converts ``nn`` BatchNorm."""
+    out = module
+    if isinstance(module, nn.modules.batchnorm._BatchNorm):
+        out = BatchRenorm(module.num_features, eps=module.eps, momentum=module.momentum)
+        if module.affine:
+            with torch.no_grad():
+                out.weight.copy_(module.weight)
+                out.bias.copy_(module.bias)
+        with torch.no_grad():
+            out.running_mean.copy_(module.running_mean)
+            out.running_var.copy_(module.running_var)
+            if module.num_batches_tracked is not None:
+                out.num_batches_tracked.copy_(module.num_batches_tracked)
+        # The new module's params/buffers were created on CPU; match the original's device
+        # (estimator is already .to(device) when this runs) so DDP sees a single device.
+        out = out.to(module.running_mean.device)
+    for name, child in module.named_children():
+        out.add_module(name, convert_to_batch_renorm(child))
+    del module
+    return out
+
+
+def _build_node_local_group(topo):
+    """Build the per-NODE process subgroup for node-local SyncBatchNorm.
+
+    BatchNorm stats are synchronized only within a node (fast intra-node xGMI/NVLink), never
+    across nodes, so the per-step BN all-reduce cost is independent of node count -- the model
+    scales to more nodes while keeping node-batch statistics (GPUs/node x batch), which are far
+    closer to the global batch than per-rank's local batch. Returns (group, n_nodes, gpus_per_node).
+    On a single node the group is the whole world (identical to global SyncBatchNorm)."""
+    import torch.distributed as dist
+    world = topo.world_size
+    gpus_per_node = _env_int("LOCAL_WORLD_SIZE", "SLURM_NTASKS_PER_NODE", default=world) or world
+    gpus_per_node = max(1, min(gpus_per_node, world))
+    n_nodes = max(1, world // gpus_per_node)
+    my_node = topo.rank // gpus_per_node
+    my_group = None
+    # new_group is collective: EVERY rank must create EVERY subgroup, in the same order.
+    for n in range(n_nodes):
+        ranks = list(range(n * gpus_per_node, min((n + 1) * gpus_per_node, world)))
+        g = dist.new_group(ranks=ranks)
+        if n == my_node:
+            my_group = g
+    return my_group, n_nodes, gpus_per_node
+
+
+def strip_syncbn_process_groups(module: nn.Module) -> None:
+    """Set ``process_group = None`` on every SyncBatchNorm so the trained estimator can be
+    pickled (posterior save). Node-local SyncBatchNorm holds an explicit ProcessGroup, which
+    is unpicklable; the group is only needed for the per-step sync during TRAINING -- at
+    inference SyncBatchNorm normalizes with the running stats regardless. No-op for global
+    SyncBatchNorm (already None) and for BatchNorm/BatchRenorm."""
+    for m in module.modules():
+        if isinstance(m, nn.SyncBatchNorm):
+            m.process_group = None
+
+
 def setup_training(estimator: nn.Module,
                    train_tasks: int,
                    data_bank_root: Path,
@@ -411,6 +527,7 @@ def setup_training(estimator: nn.Module,
                    learning_rate: Optional[float] = None,
                    test_tasks: int = 0,
                    test_loss_distribution: bool = False,
+                   bn_mode: str = "sync",
                    paths=None) -> dict:
     """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
@@ -458,21 +575,29 @@ def setup_training(estimator: nn.Module,
     # forward returns None). Distributed -> SyncBatchNorm + DDP so gradients
     # all-reduce; single worker -> the bare module (forward == estimator.loss).
     model: nn.Module = _LossModule(estimator)
-    if topo.is_distributed:
-        # SyncBatchNorm shares the BatchNorm statistics across ranks so every
-        # replica normalizes against the full effective batch (matching the
-        # single-GPU large-batch behavior). It is ON BY DEFAULT and is the
-        # correct, validated choice. It adds a per-step collective measured at
-        # ~12-16% of a 4-GPU/5s epoch -- a minor cost, not the dominant one.
-        # Opt out with SRM_AND_SBI_NO_SYNC_BN=1: each rank then keeps its OWN
-        # local batch statistics, which is faster but changes the statistics, so
-        # re-validate posterior recovery before relying on it.
-        use_sync_bn = os.environ.get("SRM_AND_SBI_NO_SYNC_BN") != "1"
-        if use_sync_bn:
-            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    # BatchNorm mode. CONSTRAINT: the CNN's BatchNorm carries the cross-sample
+    # signal D_A recovery depends on, so every mode keeps batch statistics
+    # (per-sample norms like GroupNorm collapse D_A). Modes only change how the
+    # stats are shared across ranks: sync (global), node-local (per node),
+    # per-rank (no sync), renorm (comms-free BatchRenorm).
+    if bn_mode == "renorm":
+        model = convert_to_batch_renorm(model)
         if topo.is_main:
-            state = "ENABLED (default)" if use_sync_bn else "DISABLED (SRM_AND_SBI_NO_SYNC_BN=1)"
-            print(f"  SyncBatchNorm: {state}", flush=True)
+            print("  Normalization: BatchRenorm (comms-free, running-stat corrected)", flush=True)
+    elif topo.is_distributed and bn_mode == "node-local":
+        pg, n_nodes, gpn = _build_node_local_group(topo)
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model, process_group=pg)
+        if topo.is_main:
+            print(f"  Normalization: node-local SyncBatchNorm ({n_nodes} node(s) x {gpn} GPU; "
+                  f"sync within node only)", flush=True)
+    elif topo.is_distributed and bn_mode == "sync":
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        if topo.is_main:
+            print("  Normalization: global SyncBatchNorm (default)", flush=True)
+    elif topo.is_main:
+        where = "per-rank BatchNorm (no sync)" if topo.is_distributed else f"BatchNorm ({bn_mode}; single worker)"
+        print(f"  Normalization: {where}", flush=True)
+    if topo.is_distributed:
         model = DistributedDataParallel(model, device_ids=[topo.local_rank],
                                         output_device=topo.local_rank)
 

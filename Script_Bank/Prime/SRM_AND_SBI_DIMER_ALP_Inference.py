@@ -48,6 +48,7 @@ from srm_and_sbi_dimer_alp.inference_support import (
     resolve_topology,
     save_posterior,
     setup_training,
+    strip_syncbn_process_groups,
     train_loop,
 )
 from srm_and_sbi_dimer_alp.parameterization import (
@@ -129,6 +130,13 @@ def main(args: argparse.Namespace) -> None:
     # Early-stop threshold: --no-early-stop forces 0, else --early-stop-patience.
     early_stop_patience = 0 if args.no_early_stop else max(0, args.early_stop_patience)
 
+    # BatchNorm mode: CLI --bn-mode, else SRM_AND_SBI_BN_MODE, else the legacy
+    # SRM_AND_SBI_NO_SYNC_BN=1 (-> per-rank), else global SyncBatchNorm.
+    bn_mode = (args.bn_mode or os.environ.get("SRM_AND_SBI_BN_MODE") or "").strip().lower()
+    bn_mode = {"local": "node-local", "node_local": "node-local", "per_rank": "per-rank"}.get(bn_mode, bn_mode)
+    if bn_mode not in ("sync", "node-local", "per-rank", "renorm"):
+        bn_mode = "per-rank" if os.environ.get("SRM_AND_SBI_NO_SYNC_BN") == "1" else "sync"
+
     # Output paths (computed before the banner that reports them).
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
@@ -189,6 +197,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"  reuse model          : {resume_reason}")
     if resume_from is not None and fine_tune_lr is not None:
         print(f"  --fine-tune-lr       : {fine_tune_lr:.2e}   (warm-start initial LR)")
+    print(f"  --bn-mode            : {bn_mode}     (BatchNorm sync strategy under DDP)")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
     print(f"  --show               : {args.show}")
@@ -384,6 +393,7 @@ def main(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         test_tasks=args.test_tasks,
         test_loss_distribution=use_tld,
+        bn_mode=bn_mode,
     )
 
     if reporter.enabled:
@@ -506,6 +516,8 @@ def main(args: argparse.Namespace) -> None:
     # Every rank reloaded the best-on-TEST estimator in train_loop, so rank 0's
     # copy is the selected model; only it writes the shared posterior file.
     if topo.is_main:
+        # Drop any (node-local) SyncBatchNorm process-group refs so the estimator pickles.
+        strip_syncbn_process_groups(training_setup["estimator"])
         prior_cpu = build_prior(device="cpu")
         prior_cpu, _, _ = process_prior(prior_cpu)
         posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
@@ -658,6 +670,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Warm-start initial LR when resuming (a smaller LR fine-tunes a "
              "near-optimal model gently). Ignored from scratch. Also "
              "SRM_AND_SBI_FINE_TUNE_LR.",
+    )
+    parser.add_argument(
+        "--bn-mode", type=str, default=None,
+        choices=["sync", "node-local", "per-rank", "renorm"],
+        help="BatchNorm sync strategy under DDP: sync (default, accuracy reference), "
+             "node-local, per-rank (fastest), renorm (comms-free BatchRenorm). All "
+             "keep batch statistics. Also SRM_AND_SBI_BN_MODE.",
     )
     parser.add_argument(
         "--replay-loss", action="store_true",
