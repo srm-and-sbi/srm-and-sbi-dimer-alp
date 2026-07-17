@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import math
+import os
 import random
 import shutil
 import sys
@@ -55,6 +56,18 @@ from srm_and_sbi_dimer_alp.test_loss_distribution import TestLossDistribution
 from srm_and_sbi_dimer_alp.utils import console_log_context, log_memory_state
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Boolean from env var (1/true/yes/on, case-insensitive); unset -> default.
+
+    Seeds argparse defaults so each switch also works via env var; an explicit
+    CLI flag still wins.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def main(args: argparse.Namespace) -> None:
     """Run the full inference training pipeline per the CLI args."""
     timing = RunTiming(
@@ -71,6 +84,11 @@ def main(args: argparse.Namespace) -> None:
         random.seed(args.seed)
     torch.set_float32_matmul_precision("high")
     torch._dynamo.config.suppress_errors = True
+
+    # Kernel auto-tune: MIOpen/cuDNN picks the fastest conv kernels for the
+    # fixed input shapes (numerically equivalent; mainly helps cold kernel caches).
+    if args.autotune:
+        torch.backends.cudnn.benchmark = True
 
     # ---- Pre-run banner -------------------------------------------------
     machine = PARAMETERS.machine
@@ -108,6 +126,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"  --tasks              : {args.tasks}        (TRAIN-namespace tasks; gradient data)")
     print(f"  --test-tasks         : {args.test_tasks}        (TEST-namespace tasks; model selection, 0 = none)")
     print(f"  --seed               : {args.seed}")
+    print(f"  --autotune           : {args.autotune}     (MIOpen/cuDNN kernel auto-tuning; numerically identical)")
     print(f"  --resurrect          : {args.resurrect}")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
@@ -539,6 +558,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Master RNG seed (PyTorch + numpy + Python random). Default None "
              "-> non-deterministic (consistent with generation); pass an int for a "
              "reproducible run.",
+    )
+    parser.add_argument(
+        "--autotune", action=argparse.BooleanOptionalAction,
+        default=_env_bool("SRM_AND_SBI_AUTOTUNE", True),
+        help="MIOpen/cuDNN conv kernel auto-tuning (cudnn.benchmark); numerically "
+             "equivalent. Default on. Also SRM_AND_SBI_AUTOTUNE.",
     )
     parser.add_argument(
         "--resurrect", action="store_true",
