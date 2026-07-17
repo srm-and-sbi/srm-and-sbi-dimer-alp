@@ -298,6 +298,16 @@ class Complex3DCNN(nn.Module):
             `n_frames = duration_seconds * frame_rate`, a given target maps to a
             different physical duration per frame rate (100 frames = 2 s @ 50
             FPS = 1 s @ 100 FPS = 4 s @ 25 FPS). `None` disables the reduction.
+        conv_downsample: How each block halves H and W:
+            - "pool" (default): Conv -> BN -> Mish -> MaxPool. The original.
+            - "pool-first": Conv -> MaxPool -> BN -> Mish (BN/Mish touch 1/4
+              of the pixels; BN statistics are computed post-pool).
+            - "stride": Conv with spatial stride (1,2,2), no MaxPool.
+            Composes with temporal_target_frames (block-1 temporal stride is
+            independent of the spatial layout). A checkpoint only loads into a
+            model built with the SAME mode (the module layout differs).
+        verbose: If True, print the inferred output shape and feature dim at
+            construction time.
     """
 
     def __init__(self,
@@ -309,9 +319,16 @@ class Complex3DCNN(nn.Module):
                  use_temporal_attention: bool = True,
                  attention_heads: int = 2,
                  temporal_target_frames: int = None,
+                 conv_downsample: str = "pool",
                  verbose: bool = False):
         super().__init__()
         self.use_temporal_attention = use_temporal_attention
+        if conv_downsample not in ("pool", "pool-first", "stride"):
+            raise ValueError(
+                f"conv_downsample must be 'pool', 'pool-first' or 'stride', "
+                f"got {conv_downsample!r}"
+            )
+        self.conv_downsample = conv_downsample
 
         # ---- Temporal reduction factor (folded into the first conv) ---------
         # Long videos are reduced toward `temporal_target_frames` by striding
@@ -337,6 +354,7 @@ class Complex3DCNN(nn.Module):
         layers = []
         in_channels = input_channels
         out_channels = start_channels
+        spatial_stride = 2 if conv_downsample == "stride" else 1
         for layer_index in range(n_conv_layers):
             # Only the first block strides time (by `temporal_stride`); every
             # later block keeps the original (3,3,3)/stride-1 temporal behavior.
@@ -344,15 +362,18 @@ class Complex3DCNN(nn.Module):
                 kernel_t, stride_t, pad_t = first_kernel_t, temporal_stride, first_pad_t
             else:
                 kernel_t, stride_t, pad_t = 3, 1, 1
-            layers.extend([
-                nn.Conv3d(in_channels, out_channels,
-                          kernel_size=(kernel_t, 3, 3),
-                          stride=(stride_t, 1, 1),
-                          padding=(pad_t, 1, 1)),
-                nn.BatchNorm3d(out_channels),
-                nn.Mish(),
-                nn.MaxPool3d(kernel_size=(1, 2, 2)),  # spatial /2 each block; time via block-1 stride
-            ])
+            conv = nn.Conv3d(in_channels, out_channels,
+                             kernel_size=(kernel_t, 3, 3),
+                             stride=(stride_t, spatial_stride, spatial_stride),
+                             padding=(pad_t, 1, 1))
+            bn = nn.BatchNorm3d(out_channels)
+            act = nn.Mish()
+            if conv_downsample == "stride":
+                layers.extend([conv, bn, act])
+            elif conv_downsample == "pool-first":
+                layers.extend([conv, nn.MaxPool3d(kernel_size=(1, 2, 2)), bn, act])
+            else:  # "pool" -- spatial /2 each block; time via block-1 stride
+                layers.extend([conv, bn, act, nn.MaxPool3d(kernel_size=(1, 2, 2))])
             in_channels = out_channels
             out_channels *= 2
         self.features = nn.Sequential(*layers)

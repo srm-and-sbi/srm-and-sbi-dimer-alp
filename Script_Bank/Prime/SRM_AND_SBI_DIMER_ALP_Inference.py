@@ -137,6 +137,16 @@ def main(args: argparse.Namespace) -> None:
     if bn_mode not in ("sync", "node-local", "per-rank", "renorm"):
         bn_mode = "per-rank" if os.environ.get("SRM_AND_SBI_NO_SYNC_BN") == "1" else "sync"
 
+    # Conv downsample mode: CLI --conv-downsample, else SRM_AND_SBI_CONV_DOWNSAMPLE,
+    # else "pool" (the original architecture). A checkpoint only loads into the
+    # mode that produced it, so Construction must use the same value.
+    conv_downsample = (args.conv_downsample
+                       or os.environ.get("SRM_AND_SBI_CONV_DOWNSAMPLE") or "").strip().lower()
+    conv_downsample = {"poolfirst": "pool-first", "pool_first": "pool-first",
+                       "strided": "stride"}.get(conv_downsample, conv_downsample)
+    if conv_downsample not in ("pool", "pool-first", "stride"):
+        conv_downsample = "pool"
+
     # DataLoader workers per loader per rank: --num-workers, else
     # SRM_AND_SBI_NUM_WORKERS, else None (profile budget, auto-divided).
     num_workers_override = args.num_workers
@@ -208,6 +218,7 @@ def main(args: argparse.Namespace) -> None:
     if resume_from is not None and fine_tune_lr is not None:
         print(f"  --fine-tune-lr       : {fine_tune_lr:.2e}   (warm-start initial LR)")
     print(f"  --bn-mode            : {bn_mode}     (BatchNorm sync strategy under DDP)")
+    print(f"  --conv-downsample    : {conv_downsample}     (block downsampling: pool | pool-first | stride)")
     nw_state = (f"{num_workers_override}/loader/rank (override)" if num_workers_override is not None
                else "profile budget (auto-divided)")
     print(f"  --num-workers        : {nw_state}")
@@ -377,6 +388,7 @@ def main(args: argparse.Namespace) -> None:
         use_temporal_attention=network_cfg.use_temporal_attention,
         attention_heads=network_cfg.attention_heads,
         temporal_target_frames=network_cfg.temporal_target_frames,
+        conv_downsample=conv_downsample,
         verbose=args.verbose,
     )
     embedding_net = torch.compile(embedding_net).to(device)
@@ -707,6 +719,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="BatchNorm sync strategy under DDP: sync (default, accuracy reference), "
              "node-local, per-rank (fastest), renorm (comms-free BatchRenorm). All "
              "keep batch statistics. Also SRM_AND_SBI_BN_MODE.",
+    )
+    parser.add_argument(
+        "--conv-downsample", type=str, default=None,
+        choices=["pool", "pool-first", "stride"],
+        help="How each conv block halves H and W: pool (default, the original), "
+             "pool-first (pool before BN/Mish), stride (strided conv, no MaxPool). "
+             "Checkpoints only load into the same mode. Also SRM_AND_SBI_CONV_DOWNSAMPLE.",
     )
     parser.add_argument(
         "--replay-loss", action="store_true",
