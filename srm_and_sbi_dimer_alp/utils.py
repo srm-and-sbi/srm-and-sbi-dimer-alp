@@ -39,6 +39,26 @@ class _Tee:
             stream.flush()
 
 
+def build_zarr_compressor(default: str = "zstd:9:bitshuffle"):
+    """Blosc compressor for .zarr writes, selectable via SRM_AND_SBI_ZARR_CODEC.
+
+    Format ``cname:clevel:shuffle`` (any Blosc codec; shuffle one of
+    noshuffle|shuffle|bitshuffle), or ``none`` for no compression. The default
+    is the existing production codec."""
+    import numcodecs
+    spec = os.environ.get("SRM_AND_SBI_ZARR_CODEC", default).strip()
+    if spec.lower() in ("none", "off", ""):
+        return None
+    parts = spec.split(":")
+    cname = parts[0] or "zstd"
+    clevel = int(parts[1]) if len(parts) > 1 and parts[1] else 9
+    shuf = parts[2].lower() if len(parts) > 2 and parts[2] else "bitshuffle"
+    shuffle = {"noshuffle": numcodecs.Blosc.NOSHUFFLE,
+               "shuffle": numcodecs.Blosc.SHUFFLE,
+               "bitshuffle": numcodecs.Blosc.BITSHUFFLE}.get(shuf, numcodecs.Blosc.BITSHUFFLE)
+    return numcodecs.Blosc(cname=cname, clevel=clevel, shuffle=shuffle)
+
+
 @contextmanager
 def tee_stdout(path: Path):
     """Mirror everything written to ``stdout`` into ``path`` for the duration.

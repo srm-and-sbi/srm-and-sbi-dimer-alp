@@ -50,8 +50,8 @@ from srm_and_sbi_dimer_alp.parameterization import (
 from srm_and_sbi_dimer_alp.simulation_dli_support import simulate_dli
 from srm_and_sbi_dimer_alp.simulation_rds_support import extract_trajectory_poses
 from srm_and_sbi_dimer_alp.utils import (
-    SINK, SOCK, console_log_context, log_memory_state, probe_resources,
-    log_resource_limits)
+    SINK, SOCK, build_zarr_compressor, console_log_context, log_memory_state,
+    probe_resources, log_resource_limits)
 
 
 _DTYPE_FOR_BITS = {8: np.uint8, 16: np.uint16}
@@ -244,9 +244,7 @@ def main(args: argparse.Namespace) -> None:
             root_size_px,
         )
         if compress:
-            compressor = numcodecs.Blosc(
-                cname="zstd", clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE,
-            )
+            compressor = build_zarr_compressor()   # SRM_AND_SBI_ZARR_CODEC (default zstd:9:bitshuffle)
             video_store = zarr.open(
                 store=str(video_set_path),
                 mode="w",

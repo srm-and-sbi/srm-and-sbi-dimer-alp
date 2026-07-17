@@ -53,8 +53,8 @@ from srm_and_sbi_dimer_alp.parameterization import (
 )
 from srm_and_sbi_dimer_alp.simulation_rds_support import build_simulation, build_system
 from srm_and_sbi_dimer_alp.utils import (
-    SINK, SOCK, console_log_context, log_memory_state, probe_resources,
-    log_resource_limits)
+    SINK, SOCK, build_zarr_compressor, console_log_context, log_memory_state,
+    probe_resources, log_resource_limits)
 
 
 # Short-form unit labels for terminal display (the canonical PARAMETERIZATION
@@ -233,9 +233,7 @@ def main(args: argparse.Namespace) -> None:
         theta_set_data = theta_sets[task]  # shape (task_simulations, n_params)
 
         if compress:
-            compressor = numcodecs.Blosc(
-                cname="zstd", clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE,
-            )
+            compressor = build_zarr_compressor()   # SRM_AND_SBI_ZARR_CODEC (default zstd:9:bitshuffle)
             theta_store = zarr.open(
                 store=str(theta_set_path),
                 mode="w",
