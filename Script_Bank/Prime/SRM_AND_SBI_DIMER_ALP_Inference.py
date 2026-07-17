@@ -137,6 +137,12 @@ def main(args: argparse.Namespace) -> None:
     if bn_mode not in ("sync", "node-local", "per-rank", "renorm"):
         bn_mode = "per-rank" if os.environ.get("SRM_AND_SBI_NO_SYNC_BN") == "1" else "sync"
 
+    # DataLoader workers per loader per rank: --num-workers, else
+    # SRM_AND_SBI_NUM_WORKERS, else None (profile budget, auto-divided).
+    num_workers_override = args.num_workers
+    if num_workers_override is None:
+        num_workers_override = _env_int("SRM_AND_SBI_NUM_WORKERS", None)
+
     # Output paths (computed before the banner that reports them).
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
@@ -198,6 +204,9 @@ def main(args: argparse.Namespace) -> None:
     if resume_from is not None and fine_tune_lr is not None:
         print(f"  --fine-tune-lr       : {fine_tune_lr:.2e}   (warm-start initial LR)")
     print(f"  --bn-mode            : {bn_mode}     (BatchNorm sync strategy under DDP)")
+    nw_state = (f"{num_workers_override}/loader/rank (override)" if num_workers_override is not None
+               else "profile budget (auto-divided)")
+    print(f"  --num-workers        : {nw_state}")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
     print(f"  --show               : {args.show}")
@@ -394,6 +403,7 @@ def main(args: argparse.Namespace) -> None:
         test_tasks=args.test_tasks,
         test_loss_distribution=use_tld,
         bn_mode=bn_mode,
+        num_workers_override=num_workers_override,
     )
 
     if reporter.enabled:
@@ -670,6 +680,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Warm-start initial LR when resuming (a smaller LR fine-tunes a "
              "near-optimal model gently). Ignored from scratch. Also "
              "SRM_AND_SBI_FINE_TUNE_LR.",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=None, metavar="N",
+        help="DataLoader workers per loader per rank (0 = synchronous). Default: the "
+             "machine profile's budget, auto-divided across ranks and loaders. Also "
+             "SRM_AND_SBI_NUM_WORKERS.",
     )
     parser.add_argument(
         "--bn-mode", type=str, default=None,

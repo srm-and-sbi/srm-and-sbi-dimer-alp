@@ -114,6 +114,9 @@ FINE_TUNE_LR_ARG=()
 BN_MODE="${BN_MODE:-}"           # sync|node-local|per-rank|renorm (empty -> script default: sync)
 BN_MODE_ARG=()
 [ -n "$BN_MODE" ] && BN_MODE_ARG=(--bn-mode "$BN_MODE")
+NUM_WORKERS="${NUM_WORKERS:-}"   # DataLoader workers/loader/rank (empty -> profile budget auto-divided)
+NUM_WORKERS_ARG=()
+[ -n "$NUM_WORKERS" ] && NUM_WORKERS_ARG=(--num-workers "$NUM_WORKERS")
 
 # GPU count PER NODE for data-parallel training: SRM_AND_SBI_GPUS override, else
 # allocated, else 1. Node count comes from the Slurm allocation (--nodes=N).
@@ -123,7 +126,7 @@ MASTER_PORT="${MASTER_PORT:-29500}"                  # rendezvous port for the m
 INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py"
 INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
              --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}"
-             "${RESURRECT_ARG[@]}" "${FRESH_ARG[@]}" "${RESUME_FROM_ARG[@]}" "${FINE_TUNE_LR_ARG[@]}" "${BN_MODE_ARG[@]}" )
+             "${RESURRECT_ARG[@]}" "${FRESH_ARG[@]}" "${RESUME_FROM_ARG[@]}" "${FINE_TUNE_LR_ARG[@]}" "${BN_MODE_ARG[@]}" "${NUM_WORKERS_ARG[@]}" )
 
 echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} fresh=${FRESH:-0} resume_from=${RESUME_FROM:-none} nodes=${NNODES} gpus/node=${GPUS} world=$((NNODES*GPUS)) seed=None | node $(hostname) ==="
 

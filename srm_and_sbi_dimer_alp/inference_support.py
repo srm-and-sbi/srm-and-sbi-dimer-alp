@@ -528,6 +528,7 @@ def setup_training(estimator: nn.Module,
                    test_tasks: int = 0,
                    test_loss_distribution: bool = False,
                    bn_mode: str = "sync",
+                   num_workers_override: Optional[int] = None,
                    paths=None) -> dict:
     """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
@@ -621,17 +622,24 @@ def setup_training(estimator: nn.Module,
     # (world_size) is bounded separately (SRM_AND_SBI_GPUS; eval/experiment cap it at
     # the task/cell count). Eval/experiment build no num_workers loaders, so this
     # budget is inference-only.
-    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-    worker_budget = PARAMETERS.machine.num_workers if PARAMETERS.machine.num_workers > 0 else cores
     n_live_loaders = 1 + (1 if test_dataset is not None else 0)   # train (+ persistent val)
-    num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
+    if num_workers_override is not None:
+        # Explicit PER-LOADER-PER-RANK count (--num-workers / SRM_AND_SBI_NUM_WORKERS),
+        # bypassing the node-wide-budget division. 0 = synchronous loading (no workers).
+        # The caller owns the OOM math: live workers = N x world_size x n_live_loaders.
+        num_workers = max(0, num_workers_override)
+        budget_note = f"override --num-workers={num_workers}/loader/rank"
+    else:
+        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+        worker_budget = PARAMETERS.machine.num_workers if PARAMETERS.machine.num_workers > 0 else cores
+        num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
+        budget_note = f"budget={worker_budget} / {topo.world_size} rank(s) / {n_live_loaders} live loader(s)"
     # persistent_workers keeps the worker pool alive across epochs (avoids the
     # per-epoch re-spawn + stack re-import that otherwise dominates each epoch).
     persistent = num_workers > 0
     if topo.is_main:
         print(f"  DataLoader: num_workers={num_workers}/loader/rank "
-              f"(budget={worker_budget} / {topo.world_size} rank(s) / {n_live_loaders} live loader(s) "
-              f"-> {num_workers * topo.world_size * n_live_loaders} live workers; "
+              f"({budget_note} -> {num_workers * topo.world_size * n_live_loaders} live workers; "
               f"persistent_workers={persistent})", flush=True)
 
     # Distributed -> shard TRAIN across ranks with a DistributedSampler (it owns
