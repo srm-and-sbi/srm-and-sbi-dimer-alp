@@ -143,9 +143,9 @@ def main(args: argparse.Namespace) -> None:
     if num_workers_override is None:
         num_workers_override = _env_int("SRM_AND_SBI_NUM_WORKERS", None)
 
-    # GPU-side normalize: ship raw uint8 videos, cast+normalize on the GPU
-    # (bit-identical result; smaller H2D and lighter CPU workers).
-    gpu_normalize = args.gpu_normalize or _env_bool("SRM_AND_SBI_GPU_NORMALIZE", False)
+    # GPU-side normalize (default ON): ship raw uint8 videos, cast+normalize on
+    # the GPU (bit-identical result). The argparse default is env-seeded.
+    gpu_normalize = args.gpu_normalize
 
     # Output paths (computed before the banner that reports them).
     timing_label = timing.label
@@ -689,9 +689,11 @@ def parse_args(argv=None) -> argparse.Namespace:
              "SRM_AND_SBI_FINE_TUNE_LR.",
     )
     parser.add_argument(
-        "--gpu-normalize", action="store_true",
+        "--gpu-normalize", action=argparse.BooleanOptionalAction,
+        default=_env_bool("SRM_AND_SBI_GPU_NORMALIZE", True),
         help="Ship raw uint8 videos and cast+normalize on the GPU instead of the CPU "
-             "worker (bit-identical result). Also SRM_AND_SBI_GPU_NORMALIZE.",
+             "worker (bit-identical result). Default on; --no-gpu-normalize reverts "
+             "to CPU normalize. Also SRM_AND_SBI_GPU_NORMALIZE.",
     )
     parser.add_argument(
         "--num-workers", type=int, default=None, metavar="N",

@@ -81,11 +81,14 @@ def normalize_video(video_raw: np.ndarray) -> np.ndarray:
 def gpu_normalize_video(video_batch: torch.Tensor) -> torch.Tensor:
     """GPU-side equivalent of :func:`normalize_video` for an on-device batch.
 
-    Integer batches: cast to float32 and divide by the dtype max (bit-identical
-    to the CPU path). Float batches pass through unchanged."""
-    if torch.is_floating_point(video_batch):
-        return video_batch
-    return video_batch.to(torch.float32).div_(float(torch.iinfo(video_batch.dtype).max))
+    Integer batches (the uint8 production case): cast to float32, divide by the
+    dtype max -- bit-identical to the CPU path. Float batches: divide per sample
+    by its own max (no-op when <= 0), matching normalize_video's float branch."""
+    if not torch.is_floating_point(video_batch):
+        return video_batch.to(torch.float32).div_(float(torch.iinfo(video_batch.dtype).max))
+    v = video_batch.to(torch.float32)
+    mx = v.amax(dim=tuple(range(1, v.ndim)), keepdim=True)   # per-sample max over non-batch dims
+    return torch.where(mx > 0, v / mx, v)
 
 
 class VideoDataset(Dataset):
@@ -638,15 +641,19 @@ def setup_training(estimator: nn.Module,
     n_live_loaders = 1 + (1 if test_dataset is not None else 0)   # train (+ persistent val)
     if num_workers_override is not None:
         # Explicit PER-LOADER-PER-RANK count (--num-workers / SRM_AND_SBI_NUM_WORKERS),
-        # bypassing the node-wide-budget division. 0 = synchronous loading (no workers).
-        # The caller owns the OOM math: live workers = N x world_size x n_live_loaders.
+        # bypassing the auto default. 0 = synchronous loading (no workers). The caller owns
+        # the OOM math: live workers = N x world_size x n_live_loaders.
         num_workers = max(0, num_workers_override)
         budget_note = f"override --num-workers={num_workers}/loader/rank"
+    elif PARAMETERS.machine.num_workers > 0:
+        # A profile that sets an explicit node-wide budget keeps the divide-across-ranks behavior.
+        num_workers = max(1, PARAMETERS.machine.num_workers // (topo.world_size * n_live_loaders))
+        budget_note = f"profile budget={PARAMETERS.machine.num_workers} / {topo.world_size} rank(s) / {n_live_loaders} loader(s)"
     else:
-        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-        worker_budget = PARAMETERS.machine.num_workers if PARAMETERS.machine.num_workers > 0 else cores
-        num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
-        budget_note = f"budget={worker_budget} / {topo.world_size} rank(s) / {n_live_loaders} live loader(s)"
+        # Measured optima: 1 worker/rank suffices with gpu_normalize (decode-only
+        # workers), 2/rank without (CPU normalize). See PR for the sweeps.
+        num_workers = 1 if gpu_normalize else 2
+        budget_note = f"auto ({'gpu-normalize on' if gpu_normalize else 'off'} -> {num_workers}/rank optimum)"
     # persistent_workers keeps the worker pool alive across epochs (avoids the
     # per-epoch re-spawn + stack re-import that otherwise dominates each epoch).
     persistent = num_workers > 0

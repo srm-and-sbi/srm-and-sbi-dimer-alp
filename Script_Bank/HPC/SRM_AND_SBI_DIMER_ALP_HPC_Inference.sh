@@ -117,8 +117,9 @@ BN_MODE_ARG=()
 NUM_WORKERS="${NUM_WORKERS:-}"   # DataLoader workers/loader/rank (empty -> profile budget auto-divided)
 NUM_WORKERS_ARG=()
 [ -n "$NUM_WORKERS" ] && NUM_WORKERS_ARG=(--num-workers "$NUM_WORKERS")
-GPU_NORMALIZE="${GPU_NORMALIZE:-}"   # set 1 to cast+normalize videos on the GPU (ship uint8)
+GPU_NORMALIZE="${GPU_NORMALIZE:-}"   # cast+normalize videos on the GPU (ship uint8). DEFAULT ON; set 0 to disable
 GPU_NORMALIZE_ARG=()
+[ "$GPU_NORMALIZE" = 0 ] && GPU_NORMALIZE_ARG=(--no-gpu-normalize)
 [ "$GPU_NORMALIZE" = 1 ] && GPU_NORMALIZE_ARG=(--gpu-normalize)
 
 # GPU count PER NODE for data-parallel training: SRM_AND_SBI_GPUS override, else
