@@ -143,6 +143,10 @@ def main(args: argparse.Namespace) -> None:
     if num_workers_override is None:
         num_workers_override = _env_int("SRM_AND_SBI_NUM_WORKERS", None)
 
+    # GPU-side normalize: ship raw uint8 videos, cast+normalize on the GPU
+    # (bit-identical result; smaller H2D and lighter CPU workers).
+    gpu_normalize = args.gpu_normalize or _env_bool("SRM_AND_SBI_GPU_NORMALIZE", False)
+
     # Output paths (computed before the banner that reports them).
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
@@ -207,6 +211,7 @@ def main(args: argparse.Namespace) -> None:
     nw_state = (f"{num_workers_override}/loader/rank (override)" if num_workers_override is not None
                else "profile budget (auto-divided)")
     print(f"  --num-workers        : {nw_state}")
+    print(f"  --gpu-normalize      : {gpu_normalize}     (ship uint8; cast+normalize on GPU)")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
     print(f"  --show               : {args.show}")
@@ -404,6 +409,7 @@ def main(args: argparse.Namespace) -> None:
         test_loss_distribution=use_tld,
         bn_mode=bn_mode,
         num_workers_override=num_workers_override,
+        gpu_normalize=gpu_normalize,
     )
 
     if reporter.enabled:
@@ -503,6 +509,7 @@ def main(args: argparse.Namespace) -> None:
         replay_loss=args.replay_loss,
         heartbeat_every=args.heartbeat,
         early_stop_patience=early_stop_patience,
+        gpu_normalize=gpu_normalize,
         verbose=args.verbose,
         test_loss_distribution=use_tld,
         on_new_best=commit_new_best,
@@ -680,6 +687,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Warm-start initial LR when resuming (a smaller LR fine-tunes a "
              "near-optimal model gently). Ignored from scratch. Also "
              "SRM_AND_SBI_FINE_TUNE_LR.",
+    )
+    parser.add_argument(
+        "--gpu-normalize", action="store_true",
+        help="Ship raw uint8 videos and cast+normalize on the GPU instead of the CPU "
+             "worker (bit-identical result). Also SRM_AND_SBI_GPU_NORMALIZE.",
     )
     parser.add_argument(
         "--num-workers", type=int, default=None, metavar="N",

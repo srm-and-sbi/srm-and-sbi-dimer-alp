@@ -78,6 +78,16 @@ def normalize_video(video_raw: np.ndarray) -> np.ndarray:
     return video / max_value if max_value > 0 else video
 
 
+def gpu_normalize_video(video_batch: torch.Tensor) -> torch.Tensor:
+    """GPU-side equivalent of :func:`normalize_video` for an on-device batch.
+
+    Integer batches: cast to float32 and divide by the dtype max (bit-identical
+    to the CPU path). Float batches pass through unchanged."""
+    if torch.is_floating_point(video_batch):
+        return video_batch
+    return video_batch.to(torch.float32).div_(float(torch.iinfo(video_batch.dtype).max))
+
+
 class VideoDataset(Dataset):
     """PyTorch Dataset over (video, theta) pairs stored across `tasks` files.
 
@@ -116,6 +126,7 @@ class VideoDataset(Dataset):
                  augment: bool = True,
                  split: str = "TRAIN",
                  return_index: bool = False,
+                 gpu_normalize: bool = False,
                  paths=None):
         # `paths` selects the filename namespace. Default is the canonical
         # PARAMETERS.paths (byte-identical to previous behavior); the Detector
@@ -151,6 +162,9 @@ class VideoDataset(Dataset):
         # identifier of each example (used only by the test-loss-distribution
         # loader); the default preserves the (video, theta) contract.
         self.return_index = return_index
+        # gpu_normalize: ship the raw uint8 video and let the training loop
+        # cast+normalize on the GPU (4x smaller H2D; result bit-identical).
+        self.gpu_normalize = gpu_normalize
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -163,12 +177,17 @@ class VideoDataset(Dataset):
         video_array = load_data(self.video_paths[task_index])
         theta_array = load_data(self.theta_paths[task_index])
 
-        # Normalize video to [0, 1] float32; log10-transform theta to match the prior's log-space.
-        video_normalized = normalize_video(video_array[data_index])
         theta_log10 = np.log10(theta_array[data_index])
-
-        video = torch.tensor(video_normalized, dtype=torch.float32)
         theta = torch.tensor(theta_log10, dtype=torch.float32)
+
+        if self.gpu_normalize:
+            # Return the raw integer video; the loop casts to float32 + normalizes on GPU.
+            # Augmentation (rot90 / flips) is a pixel permutation -> order-independent of the
+            # normalize, so it is applied here on the integer tensor unchanged.
+            video = torch.from_numpy(np.ascontiguousarray(video_array[data_index]))
+        else:
+            # Normalize video to [0, 1] float32 on the CPU (default path).
+            video = torch.tensor(normalize_video(video_array[data_index]), dtype=torch.float32)
 
         if self.augment:
             video = self._spatial_augment(video)
@@ -363,6 +382,7 @@ def build_datasets(train_tasks: int,
                    compress: bool = True,
                    test_tasks: int = 0,
                    test_return_index: bool = False,
+                   gpu_normalize: bool = False,
                    paths=None,
                    ) -> tuple:
     """Load the TRAIN and TEST namespaces as separate datasets.
@@ -389,6 +409,7 @@ def build_datasets(train_tasks: int,
         tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress,
         augment=PARAMETERS.inference.training.augmentation, split="TRAIN",
+        gpu_normalize=gpu_normalize,
         paths=paths,
     )
     test_dataset = None
@@ -397,6 +418,7 @@ def build_datasets(train_tasks: int,
             tasks=test_tasks, data_bank_root=data_bank_root,
             timing_label=timing_label, compress=compress,
             augment=False, split="TEST", return_index=test_return_index,
+            gpu_normalize=gpu_normalize,
             paths=paths,
         )
     return train_dataset, test_dataset
@@ -529,6 +551,7 @@ def setup_training(estimator: nn.Module,
                    test_loss_distribution: bool = False,
                    bn_mode: str = "sync",
                    num_workers_override: Optional[int] = None,
+                   gpu_normalize: bool = False,
                    paths=None) -> dict:
     """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
@@ -605,23 +628,13 @@ def setup_training(estimator: nn.Module,
     train_dataset, test_dataset = build_datasets(
         train_tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress, test_tasks=test_tasks,
-        test_return_index=test_loss_distribution, paths=paths,
+        test_return_index=test_loss_distribution, gpu_normalize=gpu_normalize,
+        paths=paths,
     )
-    # ---- DataLoader worker budget (rank- and loader-aware) -------------------
-    # Each DDP rank builds its OWN loaders, and persistent_workers keeps the train +
-    # validation loaders' workers alive at the same time, so the LIVE worker-process
-    # count is num_workers x world_size x n_live_loaders. Treat the configured value
-    # (or the CPU core count, when <= 0) as the node-wide TOTAL worker budget and
-    # divide it across ranks and concurrently-persistent loaders, so the product stays
-    # ~1 worker per core regardless of how many GPUs are allocated. This GENERALIZES
-    # the old single-GPU `cores // 2` default, which silently multiplied to
-    # world_size x n_live_loaders x that under DDP and exhausted host RAM at production
-    # scale (4 ranks x 16 x 2 = 128 loader processes > 480 GB). At world_size == 1 with
-    # a train+val pair it still resolves to cores // 2 per loader (single-GPU unchanged).
-    # This is the data-loading worker budget only; the GPU/shard-worker count
-    # (world_size) is bounded separately (SRM_AND_SBI_GPUS; eval/experiment cap it at
-    # the task/cell count). Eval/experiment build no num_workers loaders, so this
-    # budget is inference-only.
+    # DataLoader worker budget: each rank builds its own persistent train(+val)
+    # loaders, so live workers = num_workers x world_size x n_live_loaders. The
+    # profile value (or core count when <= 0) is the NODE-WIDE budget, divided
+    # across ranks and loaders; single-GPU resolves to the original cores // 2.
     n_live_loaders = 1 + (1 if test_dataset is not None else 0)   # train (+ persistent val)
     if num_workers_override is not None:
         # Explicit PER-LOADER-PER-RANK count (--num-workers / SRM_AND_SBI_NUM_WORKERS),
@@ -699,6 +712,7 @@ def setup_training(estimator: nn.Module,
         "scheduler": scheduler,
         "device": device,
         "topo": topo,
+        "gpu_normalize": gpu_normalize,
     }
 
 
@@ -748,7 +762,8 @@ def compute_validation_loss(estimator: nn.Module,
                             loader: DataLoader,
                             device: torch.device,
                             verbose: bool = False,
-                            collect: bool = False):
+                            collect: bool = False,
+                            gpu_normalize: bool = False):
     """Compute mean loss over a loader in eval mode.
 
     The estimator is set to eval mode (dropout disabled, batch-norm uses running
@@ -792,6 +807,8 @@ def compute_validation_loss(estimator: nn.Module,
                 video_batch, theta_batch = batch
                 task_batch = sim_batch = None
             video_batch = video_batch.to(device)
+            if gpu_normalize:
+                video_batch = gpu_normalize_video(video_batch)
             theta_batch = theta_batch.to(device)
             example_loss = estimator.loss(theta_batch, condition=video_batch)
             losses_per_batch.append(torch.mean(example_loss).item())
@@ -873,6 +890,7 @@ def train_loop(estimator: nn.Module,
                replay_loss: bool = False,
                heartbeat_every: Optional[int] = None,
                early_stop_patience: int = 0,
+               gpu_normalize: bool = False,
                verbose: bool = False,
                test_loss_distribution: bool = False,
                on_new_best: Optional[Callable] = None) -> tuple:
@@ -979,7 +997,7 @@ def train_loop(estimator: nn.Module,
         if has_val:
             # Sharded TEST loss across ranks (see the per-epoch block below).
             optimum_loss_test = _reduce_mean(
-                compute_validation_loss(estimator, val_loader, device, verbose=verbose))
+                compute_validation_loss(estimator, val_loader, device, verbose=verbose, gpu_normalize=gpu_normalize))
             if is_main:
                 print(f"REUSE: loaded model from {resume_from}; "
                       f"baseline test loss = {optimum_loss_test:.5f}{ft_note}")
@@ -1035,6 +1053,8 @@ def train_loop(estimator: nn.Module,
         batch_train_losses = []
         for b, (video_batch, theta_batch) in enumerate(train_loader, start=1):
             video_batch = video_batch.to(device)
+            if gpu_normalize:
+                video_batch = gpu_normalize_video(video_batch)
             theta_batch = theta_batch.to(device)
             optimizer.zero_grad()
             loss = torch.mean(model(theta_batch, condition=video_batch))
@@ -1070,18 +1090,20 @@ def train_loop(estimator: nn.Module,
                 # One pass: the same batch-mean drives epoch_test (unchanged), and
                 # the per-example shard is retained for a possible new-best commit.
                 val_mean, t_task, t_sim, t_loss, t_theta = compute_validation_loss(
-                    estimator, val_loader, device, verbose=False, collect=True)
+                    estimator, val_loader, device, verbose=False, collect=True,
+                    gpu_normalize=gpu_normalize)
                 epoch_test = _reduce_mean(val_mean)
                 tld_shard = (t_task, t_sim, t_loss, t_theta)
             else:
                 epoch_test = _reduce_mean(
-                    compute_validation_loss(estimator, val_loader, device, verbose=False))
+                    compute_validation_loss(estimator, val_loader, device, verbose=False,
+                                            gpu_normalize=gpu_normalize))
         else:
             epoch_test = float("nan")
         # Replay loss = eval-mode TRAIN loss (augmentation off), opt-in; each rank
         # measures its shard of the dedicated augmentation-off loader, then averaged
         # across ranks.
-        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, replay_loader, device, verbose=False))
+        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, replay_loader, device, verbose=False, gpu_normalize=gpu_normalize))
                         if replay_loss else float("nan"))
         losses_train[epoch] = epoch_train
         losses_test[epoch] = epoch_test
@@ -1157,7 +1179,7 @@ def train_loop(estimator: nn.Module,
             dist.barrier()
         estimator.load_state_dict(
             torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
-        final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
+        final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False, gpu_normalize=gpu_normalize))
         if is_main:
             print(f"Final: optimum test loss = {optimum_loss_test:.5f}; "
                   f"replay test loss = {final_replay:.5f}")
