@@ -325,21 +325,29 @@ class _LossModule(nn.Module):
 
 
 def init_distributed(topo) -> None:
-    """Initialize the default process group for DDP when launched distributed.
+    """Initialize the default process group for DDP (single- or multi-node).
 
-    No-op for a single worker (``world_size == 1``). ``torchrun`` provides
-    ``MASTER_ADDR``/``MASTER_PORT``/``RANK``/``WORLD_SIZE``; ``resolve_topology``
-    has already bound this process's local GPU. Uses the NCCL backend (RCCL on
-    ROCm exposes the same name).
+    No-op for a single worker. NCCL backend (RCCL on ROCm). Supports torchrun
+    launches (rendezvous env already set) and bare-srun launches, where the
+    Slurm rank variables are mirrored into RANK / WORLD_SIZE / LOCAL_RANK;
+    MASTER_ADDR / MASTER_PORT must then come from the launcher.
     """
     import torch.distributed as dist
-    if topo.is_distributed and not dist.is_initialized():
-        if "MASTER_ADDR" not in os.environ:
-            raise RuntimeError(
-                "Multi-process launch detected (world_size > 1) but no torch "
-                "rendezvous is set (MASTER_ADDR unset). Launch multi-GPU inference "
-                "via torchrun, not bare srun.")
-        dist.init_process_group(backend="nccl")
+    if not (topo.is_distributed and not dist.is_initialized()):
+        return
+    # Bridge Slurm -> torch rendezvous env for the bare-srun path (torchrun already
+    # sets RANK, so this is skipped under torchrun and its behavior is unchanged).
+    if "RANK" not in os.environ and os.environ.get("SLURM_PROCID") is not None:
+        os.environ["RANK"] = os.environ["SLURM_PROCID"]
+        os.environ["WORLD_SIZE"] = os.environ.get("SLURM_NTASKS", str(topo.world_size))
+        os.environ["LOCAL_RANK"] = os.environ.get("SLURM_LOCALID", str(topo.local_rank))
+    if "MASTER_ADDR" not in os.environ:
+        raise RuntimeError(
+            "Multi-process launch detected (world_size > 1) but no torch rendezvous "
+            "is set (MASTER_ADDR unset). Launch multi-GPU inference via torchrun, or "
+            "under a bare srun export MASTER_ADDR / MASTER_PORT (the HPC launcher does "
+            "this for the multi-node path).")
+    dist.init_process_group(backend="nccl")
 
 
 def cleanup_distributed() -> None:
