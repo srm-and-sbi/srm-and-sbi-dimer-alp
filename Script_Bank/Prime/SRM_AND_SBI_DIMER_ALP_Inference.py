@@ -79,6 +79,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default):
+    """Resolve a float from an environment variable (unset/invalid -> default)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def main(args: argparse.Namespace) -> None:
     """Run the full inference training pipeline per the CLI args."""
     timing = RunTiming(
@@ -118,6 +129,38 @@ def main(args: argparse.Namespace) -> None:
     # Early-stop threshold: --no-early-stop forces 0, else --early-stop-patience.
     early_stop_patience = 0 if args.no_early_stop else max(0, args.early_stop_patience)
 
+    # Output paths (computed before the banner that reports them).
+    timing_label = timing.label
+    checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
+    posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
+
+    # Reuse-model resolution. Precedence: --fresh (from scratch) > --resume-from
+    # (specific checkpoint) > --resurrect (require canonical) > default (reuse
+    # canonical checkpoint if present, else fresh).
+    force_fresh = args.fresh or _env_bool("SRM_AND_SBI_FRESH", False)
+    resume_from_arg = args.resume_from or os.environ.get("SRM_AND_SBI_RESUME_FROM")
+    if force_fresh:
+        resume_from, resume_reason = None, "--fresh (train from scratch)"
+    elif resume_from_arg:
+        resume_from, resume_reason = Path(resume_from_arg), f"--resume-from {resume_from_arg}"
+    elif args.resurrect:
+        resume_from, resume_reason = checkpoint_path, "--resurrect (canonical checkpoint)"
+    elif checkpoint_path.exists():
+        resume_from, resume_reason = checkpoint_path, "default reuse (existing checkpoint found)"
+    else:
+        resume_from, resume_reason = None, "from scratch (no existing checkpoint)"
+    # Fail loud if a resume source was explicitly requested but is missing (a
+    # default reuse only resolves to an existing file, so it never trips this).
+    if resume_from is not None and not resume_from.exists():
+        raise FileNotFoundError(
+            f"Requested to resume from {resume_from} but the file does not exist. "
+            "Pass --fresh to train from scratch, or point --resume-from at a valid checkpoint.")
+    # Warm-start LR (only meaningful when resuming): CLI, else env, else None.
+    fine_tune_lr = args.fine_tune_lr
+    if fine_tune_lr is None:
+        fine_tune_lr = _env_float("SRM_AND_SBI_FINE_TUNE_LR", None)
+
     print(div)
     print(f" {paths.project_alias} — Inference")
     print(f" Started at  : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -143,7 +186,9 @@ def main(args: argparse.Namespace) -> None:
     print(f"  --autotune           : {args.autotune}     (MIOpen/cuDNN kernel auto-tuning; numerically identical)")
     es_state = (f"{early_stop_patience} epoch(s) flat at LR floor" if early_stop_patience > 0 else "disabled")
     print(f"  --early-stop-patience: {early_stop_patience}        ({es_state}; needs a TEST set)")
-    print(f"  --resurrect          : {args.resurrect}")
+    print(f"  reuse model          : {resume_reason}")
+    if resume_from is not None and fine_tune_lr is not None:
+        print(f"  --fine-tune-lr       : {fine_tune_lr:.2e}   (warm-start initial LR)")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
     print(f"  --show               : {args.show}")
@@ -154,11 +199,6 @@ def main(args: argparse.Namespace) -> None:
     print(f"  image size           : {geom.root_size_px} × {geom.root_size_px}")
     print(f"  channels             : {network_cfg.input_channels}             "
           f"(grayscale)")
-
-    timing_label = timing.label
-    checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
-    posterior_path = paths.posterior_path(data_bank_root, timing_label)
-    tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
 
     print("\nOutput destinations:")
     print(f"  data_bank_root  : {data_bank_root}")
@@ -247,8 +287,9 @@ def main(args: argparse.Namespace) -> None:
           f"temporal_target_frames={network_cfg.temporal_target_frames}) "
           f"+ TemporalTransformer(heads={network_cfg.attention_heads})")
     print("  estimator : MAF (z_score=structured, dropout=0.1, batch_norm=True)")
-    if args.resurrect:
-        print(f"  RESURRECT : will load checkpoint from {checkpoint_path}")
+    if resume_from is not None:
+        print(f"  REUSE     : will load model from {resume_from} and continue "
+              f"({resume_reason})")
 
     if args.verbose:
         print("\nDetailed training hyperparameters:")
@@ -437,7 +478,8 @@ def main(args: argparse.Namespace) -> None:
         checkpoint_path=checkpoint_path,
         train_sampler=training_setup["train_sampler"],
         epochs=args.epochs,
-        resurrect=args.resurrect,
+        resume_from=resume_from,
+        fine_tune_lr=fine_tune_lr,
         replay_loss=args.replay_loss,
         heartbeat_every=args.heartbeat,
         early_stop_patience=early_stop_patience,
@@ -597,9 +639,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--resurrect", action="store_true",
-        help="Load the previously saved optimum-ANN checkpoint before training "
-             "and continue from those weights. Each --resurrect run improves on "
-             "the previous best.",
+        help="Require resuming from the canonical optimum-ANN checkpoint (error if "
+             "it is missing). Redundant with the default reuse behavior, kept for "
+             "backward compatibility / explicit intent.",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Train from scratch. By default a run reuses the canonical checkpoint "
+             "when present; this opts out. Also SRM_AND_SBI_FRESH=1.",
+    )
+    parser.add_argument(
+        "--resume-from", type=str, default=None, metavar="CKPT",
+        help="Fine-tune from a specific checkpoint .pth instead of the canonical "
+             "one. Also SRM_AND_SBI_RESUME_FROM.",
+    )
+    parser.add_argument(
+        "--fine-tune-lr", type=float, default=None, metavar="LR",
+        help="Warm-start initial LR when resuming (a smaller LR fine-tunes a "
+             "near-optimal model gently). Ignored from scratch. Also "
+             "SRM_AND_SBI_FINE_TUNE_LR.",
     )
     parser.add_argument(
         "--replay-loss", action="store_true",

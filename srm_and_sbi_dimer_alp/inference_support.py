@@ -727,7 +727,8 @@ def train_loop(estimator: nn.Module,
                checkpoint_path: Path,
                train_sampler=None,
                epochs: Optional[int] = None,
-               resurrect: bool = False,
+               resume_from: Optional[Path] = None,
+               fine_tune_lr: Optional[float] = None,
                replay_loss: bool = False,
                heartbeat_every: Optional[int] = None,
                early_stop_patience: int = 0,
@@ -746,13 +747,21 @@ def train_loop(estimator: nn.Module,
         scheduler: Learning-rate scheduler with `.step(metric)` (ReduceLROnPlateau).
         device: Device to move batches to.
         topo: The launch Topology (rank / world_size / is_main / is_distributed).
-        checkpoint_path: Path where the best-so-far estimator checkpoint is saved
-            (and, in resurrect mode, loaded from). Built by the entry point as
+        checkpoint_path: Path where the best-so-far estimator checkpoint is saved.
+            Built by the entry point as
             ``PARAMETERS.paths.checkpoint_path(data_bank_root, timing.label)``.
         train_sampler: The DistributedSampler when distributed (its `set_epoch` is
             called each epoch to reshuffle the shard); None on a single worker.
         epochs: Number of epochs. Defaults to `PARAMETERS.inference.training.epochs`.
-        resurrect: If True, load the checkpoint before training and continue.
+        resume_from: If set, load this checkpoint before training and continue from
+            its weights (reuse / fine-tune the model instead of training from
+            scratch). May be the canonical ``checkpoint_path`` (default reuse) or a
+            different file (fine-tune a prior model onto new data); in the latter
+            case the canonical checkpoint is seeded with the loaded weights so the
+            end-of-run best-on-TEST reload always finds a file. None -> from scratch.
+        fine_tune_lr: If set (and resuming), the initial learning rate to start the
+            schedule from -- a smaller warm-start LR to fine-tune a near-optimal
+            model gently. Ignored on a from-scratch run.
         replay_loss: If True, compute the per-epoch eval-mode TRAIN loss.
         heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
             only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
@@ -771,10 +780,10 @@ def train_loop(estimator: nn.Module,
         (losses_train, losses_test, losses_replay, optimum_loss_test) -- the three
         1D arrays of the per-epoch mean train, test, and replay loss (length =
         epochs actually run, which is < `epochs` when early stopping fires), plus
-        the best (lowest) TEST loss the saved checkpoint attained. In resurrect
-        mode it starts from the loaded checkpoint's baseline, so it reflects the
-        checkpoint on disk even when no epoch improved on it; it is ``inf`` when
-        there is no TEST set.
+        the best (lowest) TEST loss the saved checkpoint attained. When resuming
+        it starts from the loaded model's baseline, so it reflects the checkpoint
+        on disk even when no epoch improved on it; it is ``inf`` when there is no
+        TEST set.
     """
     import torch.distributed as dist
     if epochs is None:
@@ -808,23 +817,42 @@ def train_loop(estimator: nn.Module,
         return float((t / topo.world_size).item())
 
     optimum_loss_test = float("inf")
-    if resurrect:
+    if resume_from is not None:
+        # Reuse an existing model (performance switch #3: fine-tune / warm-start).
         # All ranks load the same checkpoint -- staged to CPU, then placed onto each
         # rank's own device by load_state_dict -- so the replicas stay identical and no
         # single device accumulates every rank's copy. No barrier needed here: the
-        # checkpoint is from a prior completed run, so no rank writes it before this read.
+        # source checkpoint is from a prior completed run, so no rank writes it before
+        # this read (and the canonical checkpoint, if distinct, is seeded rank-0-only below).
         estimator.load_state_dict(
-            torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
+            torch.load(str(resume_from), map_location="cpu", weights_only=True))
+        # Warm-start LR: a resumed model is already near-optimal, so starting the
+        # schedule at the full initial LR can destabilize it (an early loss spike).
+        # A smaller fine_tune_lr fine-tunes gently. ReduceLROnPlateau reads the live
+        # param-group LR, so setting it here (before the loop) becomes the new
+        # schedule start. Ignored when None (keeps the setup_training LR).
+        if fine_tune_lr is not None:
+            for group in optimizer.param_groups:
+                group["lr"] = fine_tune_lr
+        ft_note = f"; fine-tune LR = {fine_tune_lr:.2e}" if fine_tune_lr is not None else ""
         if has_val:
             # Sharded TEST loss across ranks (see the per-epoch block below).
             optimum_loss_test = _reduce_mean(
                 compute_validation_loss(estimator, val_loader, device, verbose=verbose))
             if is_main:
-                print(f"RESURRECT: loaded checkpoint from {checkpoint_path}; "
-                      f"baseline test loss = {optimum_loss_test:.5f}")
+                print(f"REUSE: loaded model from {resume_from}; "
+                      f"baseline test loss = {optimum_loss_test:.5f}{ft_note}")
         elif is_main:
-            print(f"RESURRECT: loaded checkpoint from {checkpoint_path} "
-                  f"(no test set; last-epoch checkpointing).")
+            print(f"REUSE: loaded model from {resume_from} "
+                  f"(no test set; last-epoch checkpointing).{ft_note}")
+        # Seed the canonical checkpoint with the loaded weights when resuming from a
+        # DIFFERENT file (e.g. fine-tuning a prior model onto new data). This makes
+        # the best-so-far checkpoint exist immediately, so the end-of-run reload of
+        # the best-on-TEST model finds a file even if no epoch improves on the loaded
+        # baseline. Skipped when the source IS the canonical checkpoint (it already
+        # holds these weights -- avoids re-writing a file the other ranks are reading).
+        if is_main and Path(resume_from).resolve() != Path(checkpoint_path).resolve():
+            torch.save(estimator.state_dict(), str(checkpoint_path))
 
     n_batches = len(train_loader)
     # Within-epoch progress cadence: a line every `heartbeat` batches. Default

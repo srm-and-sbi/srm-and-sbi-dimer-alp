@@ -7,8 +7,9 @@
 # original single-GPU path. The `gpu` partition allocates a whole node (8 GPUs).
 # Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
 #   HEARTBEAT (within-epoch progress: a line every N batches; default ~4/epoch),
-#   RESURRECT (set 1 to load the existing checkpoint and continue training from it
-#     -- continue a run stopped by the wall, or add epochs; unset = fresh run),
+#   RESURRECT (set 1 to REQUIRE resuming from the canonical checkpoint),
+#   FRESH (set 1 to train from scratch; default reuses an existing checkpoint),
+#   RESUME_FROM (specific checkpoint to fine-tune), FINE_TUNE_LR (warm-start LR),
 #   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated; set 1 to force
 #     the original single-GPU path even on a multi-GPU allocation).
 # Also honored from the environment (read directly by the Python):
@@ -85,22 +86,35 @@ EPOCHS="${EPOCHS:-50}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 BATCH="${BATCH:-}"   # empty -> script default (PARAMETERS batch_size, 32)
 HEARTBEAT="${HEARTBEAT:-}"   # empty -> ~4 within-epoch progress lines/epoch; else a line every N batches
-RESURRECT="${RESURRECT:-}"   # set 1 to load the existing checkpoint and continue; unset/0 -> fresh run
+RESURRECT="${RESURRECT:-}"   # set 1 to require resuming from the canonical checkpoint (error if missing)
+# Reuse-model / fine-tune switch (feature #3): a run REUSES the canonical checkpoint
+# by default when one is present. FRESH=1 forces from-scratch; RESUME_FROM=<path>
+# fine-tunes a specific prior model; FINE_TUNE_LR=<lr> sets the warm-start LR.
+FRESH="${FRESH:-}"           # set 1 to train from scratch, ignoring any existing checkpoint
+RESUME_FROM="${RESUME_FROM:-}"     # path to a specific checkpoint to fine-tune from
+FINE_TUNE_LR="${FINE_TUNE_LR:-}"   # warm-start initial LR when resuming (empty -> normal LR)
 
 BATCH_ARG=()
 [ -n "$BATCH" ] && BATCH_ARG=(--batch-size "$BATCH")
 HEARTBEAT_ARG=()
 [ -n "$HEARTBEAT" ] && HEARTBEAT_ARG=(--heartbeat "$HEARTBEAT")
 RESURRECT_ARG=()
-[ "$RESURRECT" = 1 ] && RESURRECT_ARG=(--resurrect)   # only the value 1 resumes; unset/0/other = fresh
+[ "$RESURRECT" = 1 ] && RESURRECT_ARG=(--resurrect)   # only the value 1 resumes; unset/0/other = default reuse
+FRESH_ARG=()
+[ "$FRESH" = 1 ] && FRESH_ARG=(--fresh)               # opt out of reuse -> train from scratch
+RESUME_FROM_ARG=()
+[ -n "$RESUME_FROM" ] && RESUME_FROM_ARG=(--resume-from "$RESUME_FROM")
+FINE_TUNE_LR_ARG=()
+[ -n "$FINE_TUNE_LR" ] && FINE_TUNE_LR_ARG=(--fine-tune-lr "$FINE_TUNE_LR")
 
 # GPU count for data-parallel training: SRM_AND_SBI_GPUS override, else allocated, else 1.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py"
 INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
-             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" )
+             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}"
+             "${RESURRECT_ARG[@]}" "${FRESH_ARG[@]}" "${RESUME_FROM_ARG[@]}" "${FINE_TUNE_LR_ARG[@]}" )
 
-echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} gpus=${GPUS} seed=None | node $(hostname) ==="
+echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} fresh=${FRESH:-0} resume_from=${RESUME_FROM:-none} gpus=${GPUS} seed=None | node $(hostname) ==="
 
 if [ "${GPUS:-1}" -gt 1 ]; then
     # Data-parallel: one worker per GPU (DistributedDataParallel via torchrun).
