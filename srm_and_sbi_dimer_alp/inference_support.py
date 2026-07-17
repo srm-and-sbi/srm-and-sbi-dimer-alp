@@ -730,6 +730,7 @@ def train_loop(estimator: nn.Module,
                resurrect: bool = False,
                replay_loss: bool = False,
                heartbeat_every: Optional[int] = None,
+               early_stop_patience: int = 0,
                verbose: bool = False,
                test_loss_distribution: bool = False,
                on_new_best: Optional[Callable] = None) -> tuple:
@@ -755,6 +756,9 @@ def train_loop(estimator: nn.Module,
         replay_loss: If True, compute the per-epoch eval-mode TRAIN loss.
         heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
             only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
+        early_stop_patience: If > 0 (and a TEST set exists), stop after this many
+            epochs without TEST-loss improvement once the LR has bottomed out at
+            learning_rate_minimum. 0 disables (default).
         verbose: If True, print per-batch progress.
 
     Distributed: TRAIN and TEST are both sharded across ranks (DistributedSampler)
@@ -765,8 +769,9 @@ def train_loop(estimator: nn.Module,
 
     Returns:
         (losses_train, losses_test, losses_replay, optimum_loss_test) -- the three
-        1D arrays of length `epochs` (per-epoch mean train, test, and replay loss),
-        plus the best (lowest) TEST loss the saved checkpoint attained. In resurrect
+        1D arrays of the per-epoch mean train, test, and replay loss (length =
+        epochs actually run, which is < `epochs` when early stopping fires), plus
+        the best (lowest) TEST loss the saved checkpoint attained. In resurrect
         mode it starts from the loaded checkpoint's baseline, so it reflects the
         checkpoint on disk even when no epoch improved on it; it is ``inf`` when
         there is no TEST set.
@@ -838,6 +843,19 @@ def train_loop(estimator: nn.Module,
             flush=True,
         )
 
+    # Early-stopping state (performance switch #2). epochs_no_improve counts
+    # consecutive epochs with no TEST-loss improvement; the stop fires only once it
+    # reaches early_stop_patience AND the LR has floored (see the check below).
+    lr_min = PARAMETERS.inference.training.learning_rate_minimum
+    epochs_no_improve = 0
+    epochs_run = epochs   # actual epochs executed (< epochs iff early-stopped); for trimming
+    if is_main and early_stop_patience > 0 and has_val:
+        print(f"  Early stopping: ENABLED (patience={early_stop_patience} epoch(s) "
+              f"flat at LR floor {lr_min:.2e})", flush=True)
+    elif is_main and early_stop_patience > 0 and not has_val:
+        print("  Early stopping: requested but INACTIVE (no TEST set; needs --test-tasks > 0)",
+              flush=True)
+
     loop_start = time.time()
     for epoch in range(epochs):
         epoch_start = time.time()
@@ -903,9 +921,13 @@ def train_loop(estimator: nn.Module,
         scheduler.step(epoch_test if has_val else epoch_train)
 
         # ---- Checkpoint (rank 0 only; the selection metric is identical on all ranks) ----
+        # epochs_no_improve is updated on EVERY rank (only the torch.save is rank-0
+        # guarded) so the early-stop condition below is identical across ranks and
+        # every rank breaks the loop on the same epoch -- no DDP desync.
         if has_val:
             if epoch_test < optimum_loss_test:
                 optimum_loss_test = epoch_test
+                epochs_no_improve = 0
                 if is_main:
                     torch.save(estimator.state_dict(), str(checkpoint_path))
                 # Commit the sibling best-artifacts (posterior + test-loss
@@ -918,6 +940,8 @@ def train_loop(estimator: nn.Module,
                     gathered = _gather_test_loss(*tld_shard, topo)
                     if is_main:
                         on_new_best(epoch + 1, epoch_test, gathered)
+            else:
+                epochs_no_improve += 1
         elif is_main:
             torch.save(estimator.state_dict(), str(checkpoint_path))
 
@@ -934,6 +958,26 @@ def train_loop(estimator: nn.Module,
                 f"ETA={time.strftime('%H:%M:%S', time.gmtime(eta))}",
                 flush=True,
             )
+
+        # Early stop, gated on the LR floor: TEST loss flat for `patience` epochs
+        # AND the scheduler bottomed out. All ranks see the same all-reduced
+        # inputs, so the break is synchronized under DDP.
+        if (has_val and early_stop_patience > 0
+                and epochs_no_improve >= early_stop_patience
+                and scheduler.get_last_lr()[0] <= lr_min * (1.0 + 1e-9)):
+            epochs_run = epoch + 1
+            if is_main:
+                print(f"Early stop at epoch {epochs_run}/{epochs}: TEST loss flat for "
+                      f"{epochs_no_improve} epoch(s) at the LR floor "
+                      f"(lr={scheduler.get_last_lr()[0]:.2e} <= {lr_min:.2e}); "
+                      f"skipping {epochs - epochs_run} remaining epoch(s).", flush=True)
+            break
+
+    # Trim per-epoch arrays to the epochs actually run (early stop leaves a NaN
+    # tail that would break downstream reads); full run -> no-op.
+    losses_train = losses_train[:epochs_run]
+    losses_test = losses_test[:epochs_run]
+    losses_replay = losses_replay[:epochs_run]
 
     # ---- Final model ------------------------------------------------------
     if has_val:

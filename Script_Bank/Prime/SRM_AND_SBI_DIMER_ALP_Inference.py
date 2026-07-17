@@ -68,6 +68,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(name: str, default: int) -> int:
+    """Integer from env var; unset/invalid -> default. See _env_bool."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def main(args: argparse.Namespace) -> None:
     """Run the full inference training pipeline per the CLI args."""
     timing = RunTiming(
@@ -104,6 +115,9 @@ def main(args: argparse.Namespace) -> None:
 
     task_range = f"0..{args.tasks - 1}" if args.tasks > 1 else "0"
 
+    # Early-stop threshold: --no-early-stop forces 0, else --early-stop-patience.
+    early_stop_patience = 0 if args.no_early_stop else max(0, args.early_stop_patience)
+
     print(div)
     print(f" {paths.project_alias} — Inference")
     print(f" Started at  : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -127,6 +141,8 @@ def main(args: argparse.Namespace) -> None:
     print(f"  --test-tasks         : {args.test_tasks}        (TEST-namespace tasks; model selection, 0 = none)")
     print(f"  --seed               : {args.seed}")
     print(f"  --autotune           : {args.autotune}     (MIOpen/cuDNN kernel auto-tuning; numerically identical)")
+    es_state = (f"{early_stop_patience} epoch(s) flat at LR floor" if early_stop_patience > 0 else "disabled")
+    print(f"  --early-stop-patience: {early_stop_patience}        ({es_state}; needs a TEST set)")
     print(f"  --resurrect          : {args.resurrect}")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
@@ -424,6 +440,7 @@ def main(args: argparse.Namespace) -> None:
         resurrect=args.resurrect,
         replay_loss=args.replay_loss,
         heartbeat_every=args.heartbeat,
+        early_stop_patience=early_stop_patience,
         verbose=args.verbose,
         test_loss_distribution=use_tld,
         on_new_best=commit_new_best,
@@ -564,6 +581,19 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=_env_bool("SRM_AND_SBI_AUTOTUNE", True),
         help="MIOpen/cuDNN conv kernel auto-tuning (cudnn.benchmark); numerically "
              "equivalent. Default on. Also SRM_AND_SBI_AUTOTUNE.",
+    )
+    parser.add_argument(
+        "--early-stop-patience", type=int,
+        default=_env_int("SRM_AND_SBI_EARLY_STOP_PATIENCE",
+                         PARAMETERS.inference.training.early_stop_patience),
+        help="Stop after N epochs without TEST-loss improvement once the LR has "
+             "bottomed out (final model unchanged). Needs a TEST set; 0 disables. "
+             "Also SRM_AND_SBI_EARLY_STOP_PATIENCE.",
+    )
+    parser.add_argument(
+        "--no-early-stop", action="store_true",
+        help="Disable early stopping (= --early-stop-patience 0); run the full "
+             "--epochs budget.",
     )
     parser.add_argument(
         "--resurrect", action="store_true",

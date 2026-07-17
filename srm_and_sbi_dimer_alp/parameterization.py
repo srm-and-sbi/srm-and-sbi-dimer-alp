@@ -593,6 +593,9 @@ class InferenceTraining:
     scheduler_patience: int = 1
     scheduler_tolerance_factor: float = 10.0       # tolerance = lr_min * factor
     augmentation: bool = True                      # rotation + horizontal/vertical flip
+    # Default patience for --early-stop-patience (epochs without TEST-loss
+    # improvement once the LR has bottomed out); 0 disables.
+    early_stop_patience: int = 4
     # Dataset-sizing defaults for the three-namespace split (TRAIN / TEST / EVAL),
     # consumed by the generation orchestrator. CORE = TRAIN + TEST.
     test_fraction: float = 0.2                     # TEST as a fraction of CORE
