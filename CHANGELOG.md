@@ -5,6 +5,79 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0 - 2026-07-17
+
+Reparameterize the brightness-flicker generator to infer only the switching rate and derive its
+locality from the brightness scale, retiring the weakly identifiable brightness-transition penalty;
+re-anchor the affected detector imaging priors; and document the EMCCD read-noise limitation. The
+shared forward model changes, so the canonical DLI stage is intentionally left non-running until its
+rework.
+
+### Changed
+
+- **Brightness-flicker generator — derived locality, inferred rate.** `compute_matrices`
+  (`simulation_dli_support.py`) builds the transition kernel as
+  `Q[i,j] = lambda_rate · exp(−kappa_penalty · |b_i − b_j| / sigma_bright)`, with a fixed
+  dimensionless locality `kappa_penalty = 1` and `sigma_bright` the photon-space standard deviation
+  of the emitter-brightness log-normal (`mu_pc · exp(sigma_pc²/2) · sqrt(exp(sigma_pc²) − 1)`). The
+  switching rate `lambda_rate` is the single inferred flicker parameter; the locality is derived, not
+  free. Rationale and citations are in `DETECTOR_WORKFLOW.md` §6.3.
+- **Detector inference target: 11 → 10 imaging parameters.** With the flicker locality derived,
+  `detector_parameterization.py` drops the separate penalty parameter from the learnable imaging
+  vector.
+- **Re-anchored detector imaging priors** (log10 ranges):
+
+  | parameter | old range | new range |
+  |---|---|---|
+  | `kappa_g` (EM gain) | (2.0, 3.0) | (1.5, 2.5) |
+  | `mu_pc` (median brightness) | (2.0, 3.0) | (1.75, 2.75) |
+  | `sigma_pc` (brightness shape) | (−1.0, 0.0) | (−1.0, 0.25) |
+  | `lambda_rate` (switching rate) | (−1.0, 1.5) | (−1.25, 0.25) |
+
+  The `kappa_g`, `mu_pc`, and `sigma_pc` ranges are anchored to the real-data maximum-a-posteriori
+  estimates (`DETECTOR_WORKFLOW.md` §6.2); `lambda_rate` is anchored to the real-data flicker dwell
+  (§6.3). Other imaging ranges are unchanged.
+- **Documentation — representative prior centers.** `DETECTOR_WORKFLOW.md` §6.2 reports each prior's
+  geometric center (a representative value) rather than a fixed constant, and §6.3 is rewritten
+  around the derived-locality generator. `CLAUDE.md` scope, `PROJECT_CONTEXT.md`, and `VALIDATION.md`
+  are updated accordingly.
+- **`--seed None` accepted explicitly.** Every entry-point stage parses `--seed None` (in addition to
+  an integer, or omission) to the seedless default, so commands and documentation can state
+  seedlessness explicitly rather than leave it implicit.
+- **Run documentation harmonized.** `VALIDATION.md` section 2 now covers the smoke test for both
+  workflows with a single authoritative Detector recipe (section 2.5), an HPC multi-node and
+  multi-GPU section (section 2.6), and a production-run section (section 2.7); every smoke is seedless
+  and every smoke or production run requires explicit approval before submission. Script headers, the
+  HPC runbook, and the benchmarks now cross-reference section 2.5 instead of restating counts, and the
+  stale seeded, bounded-pool, and parameter-count examples are corrected.
+
+### Added
+
+- **`VIDEO_DTYPE_BITS` knob** in `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Simulation.sh`, forwarded to the
+  DLI stage's `--video-dtype-bits` (default 8), so the synthetic-video bit depth is explicit and
+  controllable on HPC.
+- **Detector calibration smoke test** — the authoritative seedless five-stage recipe in
+  `VALIDATION.md` section 2.5, with the HPC (section 2.6) and production (section 2.7) run sections.
+
+### Removed
+
+- **`gamma_penalty` as a free parameter.** The brightness-transition penalty (previously a learnable
+  detector parameter and a fixed canonical constant) is removed from the flicker kernel; its role is
+  filled by the derived `sigma_bright` locality. The canonical parameterization still carries the
+  constant pending its rework (below).
+
+### Notes
+
+- **The canonical DLI stage does not run under this release, by design.** `simulate_dli` still passes
+  the retired `gamma_penalty` to the shared `compute_matrices`, which no longer accepts it — a
+  deliberate tripwire. The canonical workflow is repaired, with the value-based parameter roles and
+  the derived-locality generator, only after the Detector workflow is validated (`_bet`; see
+  `DETECTOR_WORKFLOW.md` §9.1 and `CLAUDE.md` scope).
+- **EMCCD read-noise limitation documented.** The `add_noise` readout term is added as a gain-scaled
+  variance before the gain rather than a gain-independent standard deviation after the register; a
+  candidate correction is not yet settled and is deferred to `_bet` (see the read-noise note in
+  `PROJECT_CONTEXT.md`).
+
 ## 0.2.29 - 2026-07-16
 
 Rename the posterior-predictive "real" side to "experimental", make the notebook player render

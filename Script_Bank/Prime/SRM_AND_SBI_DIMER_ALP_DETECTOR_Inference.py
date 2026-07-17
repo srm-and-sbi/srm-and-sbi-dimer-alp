@@ -11,7 +11,7 @@ Detector-specific differences below:
   1. It reads the ``_DETECTOR``-namespaced ``(video, imaging-theta)`` pairs written
      by the Detector DLI stage, by passing ``paths = detector_paths(...)`` to
      ``build_datasets`` and ``setup_training``. The estimator's parameter dimension
-     is therefore the 11 learnable imaging parameters (``theta_dim = 11``), not the
+     is therefore the 10 learnable imaging parameters (``theta_dim = 10``), not the
      canonical RDS set, and the prior, bounds, and per-parameter metadata are
      sourced from ``detector_parameterization`` — whose value-based role scheme
      distinguishes the learnable imaging parameters from the marginalized RDS
@@ -36,10 +36,13 @@ duration + fps):
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py \\
-        --total-time-seconds 5.0 --epochs 5 --tasks 16 --test-tasks 4 --batch-size 8
+        --total-time-seconds 2.0 --epochs 5 --tasks 16 --test-tasks 4 --batch-size 8 --seed None
 
     # Resume training from the previously saved checkpoint:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py --resurrect
+
+    For the full detector smoke test see section 2.5 (Detector calibration smoke
+    test) in VALIDATION.md.
 """
 
 import argparse
@@ -150,7 +153,7 @@ def main(args: argparse.Namespace) -> None:
     tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
     estimator_path = _estimator_path(paths, data_bank_root, timing_label)   # version-portable estimator artifact (Detector)
     imaging_keys = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
-    theta_dim = len(imaging_keys)                               # 11 learnable imaging params
+    theta_dim = len(imaging_keys)                               # 10 learnable imaging params
     video_shape = (timing.frame_count, geom.root_size_px, geom.root_size_px)
 
     print("\nOutput destinations:")
@@ -603,7 +606,9 @@ def parse_args(argv=None) -> argparse.Namespace:
              "checkpoint (validate separately on the EVAL namespace).",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed",
+        type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v),
+        default=None,
         help="Master RNG seed (PyTorch + numpy + Python random). Default None "
              "-> non-deterministic (consistent with generation); pass an int for a "
              "reproducible run.",

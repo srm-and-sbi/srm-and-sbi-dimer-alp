@@ -39,13 +39,15 @@ Outputs (_DETECTOR-namespaced, under
 Usage:
     # single GPU (writes report directly):
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment.py \\
-        --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode bounded
+        --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode unrestricted --seed None
     # multi-GPU (shard across N workers, then merge):
     torchrun --standalone --nproc_per_node=N SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment.py \\
-        --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode bounded
+        --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode unrestricted --seed None
     python SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment.py \\
-        --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode bounded --merge
+        --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode unrestricted --seed None --merge
     (add --dry-run to resolve config + planned I/O without loading data or compute)
+    For the full detector smoke test see section 2.5 (Detector calibration smoke
+    test) in VALIDATION.md.
 """
 
 import argparse
@@ -647,7 +649,9 @@ def parse_args(argv=None) -> argparse.Namespace:
              "Default: pooled. The .npz keeps raw per-(cell,chunk) data either way.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed",
+        type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v),
+        default=None,
         help="Master RNG seed (PyTorch + numpy + Python random). Default None "
              "-> non-deterministic (consistent with generation); pass an int for a "
              "reproducible run.",

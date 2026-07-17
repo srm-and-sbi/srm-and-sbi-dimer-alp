@@ -12,12 +12,16 @@
 #     tid = TASK_OFFSET + SLURM_ARRAY_TASK_ID * SLURM_NTASKS_PER_NODE + k
 #
 # Knobs (--export / CLI): SPLIT, TASK_SIMS, TOTAL_TIME, TASK_OFFSET, TASK_COUNT
-# (tasks this submission generates; default = --ntasks-per-node); pack size and
-# core share are set by --ntasks-per-node / --cpus-per-task. Debug knobs
+# (tasks this submission generates; default = --ntasks-per-node), VIDEO_DTYPE_BITS
+# (DLI output video dtype in bits, default 8; 8|16); pack size and core share are
+# set by --ntasks-per-node / --cpus-per-task. Debug knobs
 # (default off, production-identical when unset): PROBE=1 logs per-sim resource
 # use (threads/open-fds/RSS); VERBOSE=1 adds per-sim detail (reaction counts, shapes);
 # DEBUG_DUMP=1 writes the DiagnosticReporter console.log + arrays; SEED=<int> fixes
-# the RNG for a reproducible run.
+# the RNG for a reproducible run. SEED is for isolated reproducibility debugging
+# only; leave it unset for the smoke/check and normal campaigns because detector
+# generation is seedless by design (a fixed seed freezes per-video variability and
+# reintroduces the frozen-data regression). See VALIDATION.md section 2.5.
 #
 # ALWAYS submit with --array (one element per node, --array=0-0 for a single
 # node) so the batch-log %a is a clean node number (0,1,...); without --array,
@@ -90,6 +94,7 @@ export MACHINE_PROFILE="${MACHINE_PROFILE:?set MACHINE_PROFILE (via hpc_local.en
 SPLIT="${SPLIT:-train}"
 TASK_SIMS="${TASK_SIMS:-1000}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
+VIDEO_DTYPE_BITS="${VIDEO_DTYPE_BITS:-8}"
 TASK_OFFSET="${TASK_OFFSET:-0}"
 PER_NODE="${SLURM_NTASKS_PER_NODE:-8}"
 TASK_COUNT="${TASK_COUNT:-$PER_NODE}"
@@ -127,7 +132,8 @@ for (( tid=start; tid < start + PER_NODE && tid < end; tid++ )); do
       if [ "$rc" = 0 ] && [ "$SIM_STAGE" != rds ]; then
         python -u "$PRIME/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py" \
             --task-id "$tid" --task-simulations "$TASK_SIMS" \
-            --total-time-seconds "$TOTAL_TIME" --split "$SPLIT" $SIM_FLAGS || rc=1
+            --total-time-seconds "$TOTAL_TIME" --split "$SPLIT" \
+            --video-dtype-bits "$VIDEO_DTYPE_BITS" $SIM_FLAGS || rc=1
       fi
       exit "$rc" ) > "$out" 2>&1 &
     PIDS+=( "$!" )

@@ -29,8 +29,8 @@
 # Example:
 #   cd /path/to/srm-and-sbi-dimer-alp
 #   sbatch --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Inference --export=ALL,REPO=$PWD,TRAIN_TASKS=8,TEST_TASKS=2,EPOCHS=50 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Inference.sh
-# Quick smoke on a shorter-lived test GPU partition (set <gpu-partition> to your cluster's):
-#   sbatch --partition=<gpu-partition> --gres=gpu:1 --time=01:00:00 --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Inference --export=ALL,REPO=$PWD,TRAIN_TASKS=8,TEST_TASKS=2,EPOCHS=1 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Inference.sh
+# Quick smoke on a shorter-lived test GPU partition (set <gpu-partition> to your cluster's; matches VALIDATION.md section 2.5):
+#   sbatch --partition=<gpu-partition> --gres=gpu:1 --time=01:00:00 --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Inference --export=ALL,REPO=$PWD,TRAIN_TASKS=16,TEST_TASKS=4,EPOCHS=5,BATCH=8 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Inference.sh
 # -----------------------------------------------------------------------------
 #SBATCH --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference   # fallback; per-run --job-name (with timing_label) overrides this
 #SBATCH --partition=gpu

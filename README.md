@@ -105,6 +105,8 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py --total-time-second
 
 Evaluation reports per-parameter recovery accuracy + posterior calibration; Experiment reports inferred-parameter distributions per condition (no ground truth). Both write a self-contained report (figures + tables + arrays + a live `progress.log`) under `Posit/`. Run any stage with `--help` for the full flag list (`--summary {map,posterior,both}`, `--pool-mode {bounded,unrestricted}`, `--posterior-samples`, …; Evaluation additionally takes `--bin-mode {prior,quantile}`). The Inference, Evaluation, and Experiment stages also accept `--dry-run`, which resolves the machine profile and the input paths, prints what it would read and write (flagging anything missing), and exits before any compute (no GPU, no output directories) — run it before a long job or a queue submission; the dataset-generation orchestrator (`Generate_Datasets.py`) offers the same preview.
 
+For the Detector calibration workflow, the runnable smoke test is the Detector calibration smoke test (section 2.5) in [`VALIDATION.md`](VALIDATION.md).
+
 ## Data split
 
 The pipeline keeps three physically separate, leak-proof namespaces — **TRAIN** (gradient updates), **TEST** (per-epoch model selection), **EVAL** (held-out final validation) — each an independent draw, so validation never sees data the posterior optimized against. The generation command above produces all three in the correct proportions in one pass. The split rules and sizing formula are detailed in [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md), under the leak-proof data-split section.

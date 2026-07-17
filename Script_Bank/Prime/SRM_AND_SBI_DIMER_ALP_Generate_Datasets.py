@@ -20,7 +20,7 @@ eval = seed + 2.
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py \\
-        --core-tasks 10 --task-simulations 10 --seed 42
+        --core-tasks 10 --task-simulations 10 --seed None
     # preview the plan without generating anything:
     ... --core-tasks 10 --task-simulations 10 --dry-run
 """
@@ -174,7 +174,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Simulation duration per video in seconds (required; e.g. 2.0, 5.0).",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed", type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v), default=None,
         help="Optional base seed; if set, train=seed, test=seed+1, eval=seed+2. "
              "Default None -> non-deterministic, each split a fresh draw.",
     )

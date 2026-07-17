@@ -12,8 +12,8 @@ together (the same sequence as the canonical `simulate_dli`, which is left
 untouched).
 
 Parameter sourcing:
-  - the 11 learnable imaging parameters (`kappa_c/o/g/v`, `mu_r`, `sigma_r`,
-    `mu_pc`, `sigma_pc`, `prob_photo_bleach`, `lambda_rate`, `gamma_penalty`)
+  - the 10 learnable imaging parameters (`kappa_c/o/g/v`, `mu_r`, `sigma_r`,
+    `mu_pc`, `sigma_pc`, `prob_photo_bleach`, `lambda_rate`)
     come from the sampled θ in physical space;
   - `brightness_quantile`, `numb_photo_bleach`, and `dimer_mule` (=√2) are fixed,
     read from the Detector parameter table;
@@ -37,7 +37,7 @@ from .simulation_dli_support import (  # reused unchanged (building blocks)
     sample_psf_width,
 )
 
-# The 11 learnable imaging parameters, in DETECTOR_PARAMETERIZATION order.
+# The 10 learnable imaging parameters, in DETECTOR_PARAMETERIZATION order.
 _IMAGING_KEYS = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
 
 
@@ -54,14 +54,14 @@ def render_detector_video(pro_tray_poses: np.ndarray,
     """Render one video from particle poses and a physical imaging-θ vector.
 
     Mirrors the canonical `simulate_dli` pipeline step-for-step, but sources the
-    imaging parameters from ``imaging_physical`` — the 11 learnable imaging
+    imaging parameters from ``imaging_physical`` — the 10 learnable imaging
     parameters in ``DETECTOR_PARAMETERIZATION`` order, in physical space — instead
     of the fixed parameter table. Reuses the canonical building blocks unchanged.
 
     Args:
         pro_tray_poses: particle coordinates ``(n_frames, n_emitters, 3)`` in nm
             (only x, y are used; z dropped); NaN for absent particles.
-        imaging_physical: physical values of the 11 learnable imaging parameters,
+        imaging_physical: physical values of the 10 learnable imaging parameters,
             in ``DETECTOR_PARAMETERIZATION`` order.
         dimer_mask: optional boolean mask ``(1, n_emitters, n_frames)`` flagging
             dimer-state emitters; their brightness is multiplied by ``dimer_mule``.
@@ -101,7 +101,7 @@ def render_detector_video(pro_tray_poses: np.ndarray,
     PSF = Gaussian(per_emitter_sqrt2sigma)
 
     # --- Photo-physics + CTMC/DTMC matrices --------------------------------
-    # mu_pc, sigma_pc, prob_photo_bleach, lambda_rate, gamma_penalty from θ;
+    # mu_pc, sigma_pc, prob_photo_bleach, lambda_rate from θ; gamma derived (kappa_penalty).
     # brightness_quantile + numb_photo_bleach fixed; delta_frame = fixed cadence.
     mu_pc = img["mu_pc"]
     sigma_pc = img["sigma_pc"]
@@ -114,7 +114,6 @@ def render_detector_video(pro_tray_poses: np.ndarray,
         numb_photo_bleach=_fixed("numb_photo_bleach"),
         delta_frame=delta_frame,
         lambda_rate=img["lambda_rate"],
-        gamma_penalty=img["gamma_penalty"],
         verbose=verbose,
     )
 

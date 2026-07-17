@@ -119,25 +119,24 @@ _DETECTOR_RAW_NESTED: dict[str, list[dict]] = {
     # ----- Learnable imaging parameters (calibration targets) -----
     # Ranges from the learnable-imaging-parameter section of DETECTOR_WORKFLOW.md; VALUE = 10**mid(range) (center).
     'camera': [  # EMCCD detector
-        {'KEY': 'kappa_c', 'VALUE': 10**0.5, 'PRIOR_RANGE': (0.0, 1.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\kappa_{c}$'},        # op 4.75
-        {'KEY': 'kappa_o', 'VALUE': 10**2.5, 'PRIOR_RANGE': (2.0, 3.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Photon', 'LABEL': r'$\kappa_{o}$'},     # op 250
-        {'KEY': 'kappa_g', 'VALUE': 10**2.5, 'PRIOR_RANGE': (2.0, 3.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\kappa_{g}$'},         # op 150
-        {'KEY': 'kappa_v', 'VALUE': 10**1.5, 'PRIOR_RANGE': (1.0, 2.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Photon', 'LABEL': r'$\kappa_{v}$'},     # op 50
+        {'KEY': 'kappa_c', 'VALUE': 10**0.5, 'PRIOR_RANGE': (0.0, 1.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\kappa_{c}$'},
+        {'KEY': 'kappa_o', 'VALUE': 10**2.5, 'PRIOR_RANGE': (2.0, 3.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Photon', 'LABEL': r'$\kappa_{o}$'},
+        {'KEY': 'kappa_g', 'VALUE': 10**2.0, 'PRIOR_RANGE': (1.5, 2.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\kappa_{g}$'},
+        {'KEY': 'kappa_v', 'VALUE': 10**1.5, 'PRIOR_RANGE': (1.0, 2.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Photon', 'LABEL': r'$\kappa_{v}$'},
     ],
     'psf': [  # PSF widths (mu_r, sigma_r) + emitter brightness (mu_pc, sigma_pc)
-        {'KEY': 'mu_r', 'VALUE': 10**0.25, 'PRIOR_RANGE': (0.0, 0.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\mu_{r}$'},              # op 1.5
-        {'KEY': 'sigma_r', 'VALUE': 10**(-0.5), 'PRIOR_RANGE': (-1.0, 0.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\sigma_{r}$'},     # op 0.15
-        {'KEY': 'mu_pc', 'VALUE': 10**2.5, 'PRIOR_RANGE': (2.0, 3.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\mu_{pc}$'},             # op 250
-        {'KEY': 'sigma_pc', 'VALUE': 10**(-0.5), 'PRIOR_RANGE': (-1.0, 0.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\sigma_{pc}$'},   # op 0.5
+        {'KEY': 'mu_r', 'VALUE': 10**0.25, 'PRIOR_RANGE': (0.0, 0.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\mu_{r}$'},
+        {'KEY': 'sigma_r', 'VALUE': 10**(-0.5), 'PRIOR_RANGE': (-1.0, 0.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\sigma_{r}$'},
+        {'KEY': 'mu_pc', 'VALUE': 10**2.25, 'PRIOR_RANGE': (1.75, 2.75), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\mu_{pc}$'},
+        {'KEY': 'sigma_pc', 'VALUE': 10**(-0.375), 'PRIOR_RANGE': (-1.0, 0.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\sigma_{pc}$'},
     ],
     'transitivity': [  # emitter brightness state machine (CTMC generator + DTMC)
         {'KEY': 'brightness_quantile', 'VALUE': [0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95], 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': None},
         {'KEY': 'delta_frame', 'VALUE': 0.020, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Second', 'LABEL': r'$\delta_{f}$'},
         {'KEY': 'numb_photo_bleach', 'VALUE': 100, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': r'$\psi_{pb}$'},
         {'KEY': 'dimer_mule', 'VALUE': 1.4142135623730951, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': r'$\sqrt{2}$'},  # sqrt(2); mirrors PARAMETERS.simulation.dli.dimer_mule
-        {'KEY': 'prob_photo_bleach', 'VALUE': 10**(-1.25), 'PRIOR_RANGE': (-2.0, -0.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\rho_{pb}$'},  # op 0.1
-        {'KEY': 'lambda_rate', 'VALUE': 10**0.25, 'PRIOR_RANGE': (-1.0, 1.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\lambda$'},              # op 5 (tightened, sec. 6.3)
-        {'KEY': 'gamma_penalty', 'VALUE': 10**(-1.5), 'PRIOR_RANGE': (-2.0, -1.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\gamma$'},          # op 0.025 (tightened, sec. 6.3)
+        {'KEY': 'prob_photo_bleach', 'VALUE': 10**(-1.25), 'PRIOR_RANGE': (-2.0, -0.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\rho_{pb}$'},
+        {'KEY': 'lambda_rate', 'VALUE': 10**(-0.5), 'PRIOR_RANGE': (-1.25, 0.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\lambda$'},              # see sec. 6.3
     ],
 }
 

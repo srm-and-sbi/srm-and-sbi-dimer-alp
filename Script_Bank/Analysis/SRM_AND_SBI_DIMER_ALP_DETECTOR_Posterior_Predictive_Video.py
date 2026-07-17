@@ -198,7 +198,7 @@ def _save_comparison_png(path, experimental, synth, kind, cell, sel_desc, displa
     img = np.asarray(imaging_physical, dtype=float).ravel()
     plo = np.asarray(det.theta_lower_bound(), dtype=float)
     phi = np.asarray(det.theta_upper_bound(), dtype=float)
-    _short = {"prob_photo_bleach": "p_bleach", "lambda_rate": "lambda", "gamma_penalty": "gamma"}
+    _short = {"prob_photo_bleach": "p_bleach", "lambda_rate": "lambda"}
     dli = []
     for i, k in enumerate(ikeys):
         lv = np.log10(img[i]) if img[i] > 0 else float("-inf")

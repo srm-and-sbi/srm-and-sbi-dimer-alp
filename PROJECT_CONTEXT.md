@@ -223,28 +223,34 @@ lumps together bleaching, diffusion out of the field, blinking and gaps, and
 unbinding; it describes a different process and is not substituted for
 `prob_photo_bleach`.)
 
-**Detector read-noise term (units discrepancy, documented).** The EMCCD forward
-model adds readout noise by scaling a unit normal by `variance / gain^2` before
-the gain multiplication (`add_noise`), reproducing the reference implementation
-(https://github.com/PessoaP/simulated_tracking, `detection.py`). This uses a
-variance where a standard deviation is required: the effective post-gain readout
-standard deviation is `variance / gain` (about 376 ADU at the fixed camera gain)
-rather than `sqrt(variance) = kappa_v * kappa_c` (about 238 ADU), the value the
-parameter naming implies. The physically standard EMCCD model adds readout noise
-as a gain-independent Gaussian after the multiplication register, standard
-deviation `sqrt(variance)` (Robbins & Hadwen 2003, IEEE Trans. Electron Devices
-50(5):1227–1232; Basden, Haniff & Mackay 2003, MNRAS 345(3):985–991; Hirsch et
-al. 2013, PLoS ONE 8(1):e53671). The term is retained deliberately: the imaging
-parameters are tuned so the rendered videos match the real pixel-intensity
-distribution, the negative tail is removed by the non-negative storage clip
-(`convert_video_dtype`), and — with the camera gain held fixed — the mis-scaling
-only rescales a free parameter, so it is absorbed into the fitted `variance`
-value and is not observable in the rendered output. (Parameter recovery is
-validated on the held-out synthetic EVAL namespace; real recordings have no
-ground truth.) A corrected treatment (a
-gain-independent Gaussian of standard deviation `sqrt(variance)` added after the
-gain) is deferred to a future model iteration, since it changes the forward
-model on which the current estimators are trained.
+**Detector read-noise term (documented discrepancy).** The EMCCD forward model
+adds readout noise in a single function, `add_noise`, reproducing the reference
+implementation (https://github.com/PessoaP/simulated_tracking, `detection.py`); it
+departs from the physically standard EMCCD model in two ways: (1) it scales a unit
+normal by `variance / gain^2` — a variance where a standard deviation is required
+— and (2) it adds the draw before the gain multiplication rather than after the
+multiplication register. Together these set the effective post-gain readout
+standard deviation to `variance / gain` (about 376 ADU at the fixed camera gain)
+rather than the gain-independent `sqrt(variance) = kappa_v * kappa_c` (about 238
+ADU) the parameter naming implies. The standard treatment adds readout noise as a
+gain-independent Gaussian of standard deviation `sqrt(variance)` after the register
+(Robbins & Hadwen 2003, IEEE Trans. Electron Devices 50(5):1227–1232; Basden,
+Haniff & Mackay 2003, MNRAS 345(3):985–991; Hirsch et al. 2013, PLoS ONE
+8(1):e53671).
+
+The term is retained deliberately, with a known limitation. The `variance / gain`
+form depends on the gain. Where the imaging parameters are held fixed, this only
+rescales the fitted `variance` and leaves the rendered output unchanged, so the
+rendered pixel-intensity distribution can be tuned to come close to — though not
+exactly reproduce — the real one; the negative tail is removed by the non-negative
+storage clip (`convert_video_dtype`). Where the gain is itself inferred (imaging
+calibration), the same dependence couples the read-noise parameters with the gain
+and contributes to the gain's weak identifiability. (Parameter recovery is
+validated on the held-out synthetic EVAL namespace; real recordings have no ground
+truth.) A candidate correction — a gain-independent read-noise of standard
+deviation `sqrt(variance)` added after the gain, changing both the variable and the
+operation order in `add_noise` — would remove this coupling and is left to a later
+iteration, since it changes the forward model on which the estimators are trained.
 
 **Output:** A `.zarr` video set (chunked array, efficient I/O). Shape
 `(frame_count, height, width)` — for example `(100, 256, 256)` at 2 s and 50 Hz.

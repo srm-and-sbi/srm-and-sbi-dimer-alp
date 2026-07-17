@@ -19,6 +19,12 @@ These timings characterize the single-GPU configuration with current data-I/O
 (worker-count) and compile settings; the optimization opportunities below are
 measured against them.
 
+This standard check is a canonical single-GPU timing benchmark, **not** the
+Detector calibration smoke test — the Detector smoke is seedless and uses
+`--batch-size 8` with `--epochs 5` (see `VALIDATION.md` section 2.5), so the
+task counts that happen to coincide here (16 train / 4 test / 2 eval @ 10 sims)
+are not the detector recipe.
+
 ### Machines
 | Machine | Device | Storage | Notes |
 |---|---|---|---|

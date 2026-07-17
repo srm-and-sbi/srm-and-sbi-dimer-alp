@@ -50,7 +50,7 @@
 #   bash .../Submit.sh inference TOTAL_TIME=5.0 TRAIN_TASKS=400 TEST_TASKS=100 EPOCHS=25
 #   DRYRUN=0 GPU_PART=gpu bash .../Submit.sh inference TOTAL_TIME=5.0 TRAIN_TASKS=400 TEST_TASKS=100 EPOCHS=25
 #   DRYRUN=0 GPU_PART=gpu_test bash .../Submit.sh inference TOTAL_TIME=5.0 TRAIN_TASKS=100 EPOCHS=10 RESURRECT=1  # continue a wall-stopped run
-#   PART=test bash .../Submit.sh simulation SPLIT=train TASK_COUNT=8 TASK_SIMS=1000 TOTAL_TIME=2.0
+#   PART=test bash .../Submit.sh simulation SPLIT=train TASK_COUNT=16 TASK_SIMS=10 TOTAL_TIME=2.0  # smoke on the check partition (see VALIDATION.md section 2.5)
 #   bash .../Submit.sh evaluation TOTAL_TIME=5.0 EVAL_TASKS=20 POOL_MODE=bounded
 #   bash .../Submit.sh experiment TOTAL_TIME=2.0 SUMMARY=both KINDS=ALP,BET
 # =============================================================================

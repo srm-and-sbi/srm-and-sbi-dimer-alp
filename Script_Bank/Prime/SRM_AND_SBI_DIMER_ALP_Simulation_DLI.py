@@ -14,7 +14,7 @@ Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py \\
         --total-time-seconds 2.0 --tasks 2 --task-simulations 5 \\
-        --video-dtype-bits 8 --seed 42
+        --video-dtype-bits 8 --seed None
 
 Diagnostics:
     --probe logs the process resource limits (RLIMIT_NPROC / RLIMIT_NOFILE) at
@@ -473,7 +473,7 @@ def parse_args(argv=None) -> argparse.Namespace:
              "Default 8.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed", type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v), default=None,
         help="RNG seed for PSF widths, brightness states, and noise. "
              "Default: None (non-deterministic).",
     )

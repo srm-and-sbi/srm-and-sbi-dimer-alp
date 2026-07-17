@@ -301,7 +301,7 @@ def parse_args(argv=None) -> argparse.Namespace:
              "checkpoint yields the matching backup posterior.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed", type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v), default=None,
         help="Master RNG seed (PyTorch + numpy + Python random). Default None "
              "-> non-deterministic. The construction does not train, so the seed "
              "only affects the (discarded) representative-batch draw.",

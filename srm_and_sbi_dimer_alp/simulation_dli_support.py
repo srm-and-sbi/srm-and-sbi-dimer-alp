@@ -152,17 +152,27 @@ class EMCCD(Detector):
     counts). Steps 1-4 reproduce the reference implementation
     (https://github.com/PessoaP/simulated_tracking, `detection.py`).
 
-    Units caveat (documented, deliberately unchanged): step 2 scales a unit
-    normal by `variance / gain^2` -- a variance where a standard deviation
-    belongs -- so the effective post-gain readout standard deviation is
-    `variance / gain`, not the `sqrt(variance)` the parameter name implies. In
-    the standard EMCCD model the readout noise is a gain-independent Gaussian
-    added after the register, standard deviation `sqrt(variance)`. The term is
-    kept as written because the tuned forward model reproduces the real
-    pixel-intensity distribution and, with gain fixed, the mis-scaling is
-    absorbed into the fitted `variance` value (not observable in the rendered
-    output); see the read-noise note under DLI Imaging in PROJECT_CONTEXT.md for
-    the discrepancy, citations, and rationale.
+    Read-noise caveat (documented; the term is kept as written for now). The
+    readout draw above departs from the physically standard EMCCD model in two
+    ways: it scales the unit normal by `variance / gain^2` -- a variance where a
+    standard deviation belongs -- and it is added BEFORE the gain multiplication
+    (step 2, ahead of step 3) rather than after the multiplication register.
+    Together these make the effective post-gain readout standard deviation
+    `variance / gain`, not the gain-independent `sqrt(variance) = kappa_v * kappa_c`
+    the parameter name implies; in the standard model the readout noise is a
+    gain-independent Gaussian added after the register, standard deviation
+    `sqrt(variance)` (Robbins & Hadwen 2003; Basden, Haniff & Mackay 2003; Hirsch
+    et al. 2013).
+
+    The `variance / gain` form depends on the gain: with the gain held fixed it is
+    absorbed into the fitted `variance` and leaves the rendered output unchanged,
+    but with the gain inferred it couples the read-noise and gain parameters and
+    contributes to the gain's weak identifiability. A candidate correction -- draw
+    `standard_normal * sqrt(variance)` and add it after `frames *= gain`, changing
+    both the variable and the operation order -- lives entirely in `add_noise` and
+    would remove this dependence; the precise correction is not yet settled and is
+    left to a later iteration. See the read-noise note under DLI Imaging in
+    PROJECT_CONTEXT.md.
 
     Args:
         offset: per-pixel baseline added after gain (ADU).
@@ -496,7 +506,7 @@ def compute_matrices(mu_pc: float,
                      numb_photo_bleach: int,
                      delta_frame: float,
                      lambda_rate: float,
-                     gamma_penalty: float,
+                     kappa_penalty: float = 1.0,
                      verbose: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """Build the CTMC generator `Q` and DTMC stochastic matrix `P` for the
     emitter brightness state machine.
@@ -518,9 +528,13 @@ def compute_matrices(mu_pc: float,
         - Inter-state transitions: between non-zero states `i` and `j`, the
           rate is
 
-              Q[i, j] = lambda_rate * exp(-gamma_penalty * |brightness[i] - brightness[j]|)
+              Q[i, j] = lambda_rate * exp(-kappa_penalty * |brightness[i] - brightness[j]| / sigma_bright)
 
-          i.e. fast for neighboring brightness levels, slow for far-apart ones.
+          where `sigma_bright` is the photon-space standard deviation of the
+          brightness lognormal, so the penalty acts on the brightness change in
+          units of its own spread. Fast for neighboring levels, slow for
+          far-apart ones; `kappa_penalty` (fixed 1.0) sets the locality — a
+          larger value penalizes far jumps more strongly.
         - Diagonal: `Q[i, i] = -sum_j Q[i, j]` (CTMC row-sum convention).
         - State 0 (photobleached) is absorbing: no transitions OUT of state 0.
 
@@ -540,8 +554,9 @@ def compute_matrices(mu_pc: float,
             frame count.
         delta_frame: Time between frames in seconds.
         lambda_rate: Base rate for inter-state transitions.
-        gamma_penalty: Penalty coefficient for brightness-distance in the
-            transition-rate formula.
+        kappa_penalty: Dimensionless locality of the brightness-distance penalty,
+            in units of the brightness standard deviation (fixed 1.0: the rate
+            e-folds per one `sigma_bright` of brightness change).
         verbose: If True, print the generator and stochastic matrices.
 
     Returns:
@@ -550,6 +565,9 @@ def compute_matrices(mu_pc: float,
     brightness = np.round(
         lognorm.ppf(q=brightness_quantile, s=sigma_pc, loc=0, scale=mu_pc), 0,
     )
+    # Photon-space standard deviation of the brightness lognormal; the penalty
+    # below acts on brightness change measured in units of this spread.
+    sigma_bright = lognorm.std(s=sigma_pc, loc=0, scale=mu_pc)
     numb_states = len(brightness)
     Q = np.zeros((numb_states, numb_states))
 
@@ -565,12 +583,12 @@ def compute_matrices(mu_pc: float,
 
     # Off-diagonal entries:
     #   Q[i, 0] = epsilon_rate (bleaching) for i in [1, numb_states - 1]
-    #   Q[i, j] = lambda_rate * exp(-gamma_penalty * |brightness[i] - brightness[j]|) for i, j in [1, ...], i != j
+    #   Q[i, j] = lambda_rate * exp(-kappa_penalty * |brightness[i] - brightness[j]| / sigma_bright) for i, j in [1, ...], i != j
     for i in range(1, numb_states):
         Q[i, 0] = epsilon_rate
         j_indices = range(1, numb_states)
         distances = np.abs(brightness[i] - brightness[list(j_indices)])
-        Q[i, list(j_indices)] = lambda_rate * np.exp(-gamma_penalty * distances)
+        Q[i, list(j_indices)] = lambda_rate * np.exp(-kappa_penalty * distances / sigma_bright)
     # Reset the diagonal to 0 before computing the row-sum-negation diagonal.
     np.fill_diagonal(Q, 0)
     diag_indices = np.diag_indices(numb_states)

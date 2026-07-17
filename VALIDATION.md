@@ -132,9 +132,25 @@ pointing to the misconfiguration. There is no silent fallback.
 
 These are quick checks that each entry point runs end-to-end with minimal inputs.
 The point is to surface obvious problems (missing imports, wrong shapes, path
-misconfiguration) before any longer run. They share a common pattern: pass
-`--total-time-seconds` (always required), keep the task and simulation counts
-tiny, and pass an explicit `--seed` so the run is repeatable.
+misconfiguration) before any longer run. The same structure applies to **both**
+workflows in this repository — the canonical reaction-diffusion pipeline
+(sections 2.1–2.4) and the Detector imaging-calibration pipeline (section 2.5,
+`DETECTOR_WORKFLOW.md`) — which share the stage sequence generate → infer →
+evaluate → (experiment). Every smoke passes `--total-time-seconds` (always
+required) and keeps the task and simulation counts tiny.
+
+Two rules apply to every smoke and to every production run:
+
+- **Seedless.** Pass `--seed None` explicitly on each stage. Every stage defaults
+  to `None` (non-deterministic); a fixed seed freezes per-video particle
+  placement, PSF, brightness, and detector noise across a split, collapsing the
+  per-video variability the estimator must learn. The one deliberate exception is
+  the theta-only regression test (section 3.2), which fixes `--seed` on purpose
+  to check theta reproducibility.
+- **Approval required.** No smoke or production run is launched without the
+  project owner's explicit approval. Local checks (imports, stochastic-matrix
+  diagnostics, dry-run prints) and code synchronization are fine; submitting any
+  compute job — single-GPU or HPC, smoke or production — requires sign-off first.
 
 On HPC, run smoke and check submissions on the short-lived `test` (CPU) and
 `gpu_test` (GPU) partitions, leaving the production `general1` (CPU generation)
@@ -148,7 +164,7 @@ counts, core-per-node geometry, or GPU counts; the scripts already pin them.
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py \
-    --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed 42 --verbose
+    --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed None --verbose
 ```
 
 **Expected**: one `.h5` trajectory per simulation under the RDS trajectory
@@ -162,7 +178,7 @@ verbose output showing the sampled diffusion and reaction rates.
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py \
-    --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed 42 --verbose
+    --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed None --verbose
 ```
 
 **Expected**: one `.zarr` video set at
@@ -179,7 +195,7 @@ and `--task-simulations`.
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-    --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed 0 --verbose
+    --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed None --verbose
 ```
 
 **Expected**: a network checkpoint at
@@ -206,7 +222,7 @@ will raise `CUDA out of memory` partway into the first epoch. Two options:
 
   ```bash
   python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-      --total-time-seconds 2.0 --tasks 1 --epochs 1 --batch-size 1 --seed 0 --verbose
+      --total-time-seconds 2.0 --tasks 1 --epochs 1 --batch-size 1 --seed None --verbose
   ```
 
 - **Train on a larger GPU**, or on CPU when no adequate GPU is available
@@ -217,7 +233,7 @@ will raise `CUDA out of memory` partway into the first epoch. Two options:
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-    --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed 1 --resurrect --verbose
+    --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed None --resurrect --verbose
 ```
 
 **Expected**: the run loads the checkpoint saved by the inference smoke test,
@@ -225,6 +241,111 @@ prints a line reporting the loaded checkpoint and its baseline loss, then runs
 one more epoch starting from those weights. The checkpoint is overwritten only
 if the continued run improves on the baseline. This mode is useful for
 incremental training across separate invocations.
+
+### 2.5 Detector calibration smoke test
+
+The Detector calibration workflow (imaging-parameter inference with the
+reaction-diffusion physics frozen to pure diffusion; see `DETECTOR_WORKFLOW.md`)
+has its own five-stage smoke, run in order on a single GPU with plain `python`.
+It is seedless and requires approval (both rules above). Use one duration for all
+five stages — 2.0 s here; the pipeline is duration-general, but the DLI stage
+checks its frame count against the RDS trajectories, so a single run must share
+one duration. The learnable imaging vector is 10-dimensional.
+
+```bash
+# 1. Diffusion-only trajectories + imaging theta, per split (seedless)
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split test  --tasks 4  --task-simulations 10 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split eval  --tasks 2  --task-simulations 10 --seed None
+# 2. Render videos, per split (seedless; 8-bit, matching what the estimator trains on)
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 --video-dtype-bits 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split test  --tasks 4  --task-simulations 10 --video-dtype-bits 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split eval  --tasks 2  --task-simulations 10 --video-dtype-bits 8 --seed None
+# 3. Train the imaging posterior (single GPU)
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py --total-time-seconds 2.0 --epochs 5 --tasks 16 --test-tasks 4 --batch-size 8 --seed None
+# 4. MAP recovery on the held-out EVAL set
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Evaluation.py --total-time-seconds 2.0 --eval-tasks 2 --pool-mode unrestricted --seed None
+# 5. Real-data application
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment.py --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode unrestricted --seed None
+```
+
+This generates 160 / 40 / 20 (train / test / eval) videos. `--pool-mode
+unrestricted` is mandatory on Evaluation and Experiment: the smoke posterior is
+undertrained, so its mass falls outside the prior box and the default `bounded`
+rejection pool stalls; `bounded` is for a well-trained (production) posterior.
+`--video-dtype-bits 8` matches the synthetic-video bit depth the estimator trains
+on (raw experimental frames are 16-bit, converted to 8-bit for inference) and is
+also the DLI default.
+
+**Acceptance**: all five stages exit zero; the Inference test loss descends across
+the five epochs on fresh per-video data (a flat curve signals a frozen-seed
+regression); Evaluation reports MAP recovery on the 20 EVAL videos; Experiment
+writes a per-condition report for the ALP and BET cells.
+
+### 2.6 Running smokes on HPC
+
+The same smoke runs on a cluster through the committed wrappers — the canonical
+`SRM_AND_SBI_DIMER_ALP_HPC_*` set and the Detector `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*`
+set — which exercise the paths a single workstation cannot: **multi-CPU
+generation** (many tasks packed per node, fanned out with a Slurm `--array`) and
+**multi-GPU training and evaluation** (data-parallel training; sharded evaluation
+with a separate `--merge` step). Running the smoke on HPC therefore validates the
+multi-node and multi-GPU machinery, not only the stage logic.
+
+Submit on the short-lived check partitions (`test` for CPU generation, `gpu_test`
+for GPU stages), leaving the production partitions for full runs. Take the
+partition, node geometry, and GPU counts from each wrapper's `#SBATCH` block and
+header, and replicate them — changing only the duration and the small smoke
+counts (section 2.5). The wrappers default to dry-run; preview the resolved
+`sbatch` line before submitting. The end-to-end dependency-chained sequence is in
+the HPC runbook (`Script_Bank/HPC/README.md`).
+
+### 2.7 Production runs
+
+Production runs share the same stages, the seedless rule, and the approval
+requirement, but are sized to the scientific goal and the machine; many
+configurations are valid, and every value below is a recommended reference point,
+not a mandate. As a reproducible reference, a production campaign holds the dataset
+size fixed — 200K TRAIN / 50K TEST / 25K EVAL videos — for every recording
+duration. What changes with duration is how those videos are packed into
+generation tasks, and how large the training batch can be: longer videos are
+larger, so the simulations per task fall (and the task count rises to hold the
+video totals constant), and the recommended training batch size falls to fit GPU
+memory.
+
+| duration | sims/task | CORE (TRAIN+TEST) | TRAIN | TEST | EVAL | batch | videos (TRAIN/TEST/EVAL) |
+|---|---|---|---|---|---|---|---|
+| 1 s  | 1000 |  250 |  200 |  50 |  25 | 64 | 200K / 50K / 25K |
+| 2 s  | 1000 |  250 |  200 |  50 |  25 | 32 | 200K / 50K / 25K |
+| 5 s  |  500 |  500 |  400 | 100 |  50 | 16 | 200K / 50K / 25K |
+| 10 s |  250 | 1000 |  800 | 200 | 100 |  8 | 200K / 50K / 25K |
+| 20 s |  125 | 2000 | 1600 | 400 | 200 |  4 | 200K / 50K / 25K |
+
+The split follows the dataset-sizing rule in `Generate_Datasets.py`: TRAIN, TEST,
+and EVAL are 0.8, 0.2, and 0.1 of CORE (CORE = TRAIN + TEST), with EVAL floored at
+a minimum recovery count.
+
+The epoch budget and the batch size are both flexible; the batch column is a
+recommendation that scales down with duration to fit GPU memory — adjust it to the
+available hardware. Two epoch budgets are recommended and reach a comparable
+trained state: **50 epochs in a single run** (a fresh run, without `--resurrect`),
+or **25 epochs run twice** — a first fresh round, then a second round with
+`--resurrect` continuing from the saved checkpoint (a crash-safe split for
+wall-time-limited queues, since each `--resurrect` round improves on the previous
+best).
+
+Evaluation and Experiment use `--pool-mode bounded` — the well-trained-posterior
+default, in contrast to the smoke's `unrestricted`. Generation is seedless.
+
+Submit on HPC: generation on the CPU partition (tasks packed per node, fanned out
+with `--array` per split), training and evaluation on the GPU partition
+(multi-GPU). Partitions and node geometry are per-machine, supplied by each
+cluster's `hpc_local.env`; the submission pattern and commands are in the HPC
+runbook (`Script_Bank/HPC/README.md`). The canonical production path additionally
+awaits the canonical rework (its DLI stage is the intentionally non-running one,
+section 3.1); the detector production re-run is a separate, approval-gated step. As
+with smokes, no production run is submitted without the project owner's explicit
+approval.
 
 ---
 
@@ -278,7 +399,15 @@ against any particular reference run. Equivalence rests on three pillars:
    banner (`--verbose`) prints the detector parameters, and a rendered video
    (via `--show`) shows sparse fluorescent spots on a near-zero background with
    plausible pixel-value ranges. The pipeline produces videos of the correct
-   shape, dtype, and value distribution.
+   shape, dtype, and value distribution. The **canonical** DLI stage does not
+   currently run: the shared generator takes its brightness-flicker locality as
+   derived from the brightness scale (§6.3 of `DETECTOR_WORKFLOW.md`), while the
+   canonical parameter table supplies an explicit transition penalty the
+   generator does not accept — a mismatch resolved by the canonical rework
+   (`DETECTOR_WORKFLOW.md` §9.1); the detector DLI stage runs unaffected. The
+canonical DLI smoke (section 2.2) and the long-duration DLI leg (section 3.3)
+exercise this same path, so they do not run under the current code; use the
+detector DLI stage (section 2.5) to exercise imaging generation meanwhile.
 
 **Acceptance**: pillars (1)–(3) hold — theta is bit-reproducible at a fixed
 seed, the constructed reaction-diffusion system matches the declared model, and
@@ -290,7 +419,9 @@ The `--seed` flag defaults to `None`, which means **non-deterministic by
 design**: each run draws fresh entropy for prior sampling, particle placement,
 imaging noise, and network initialization. This matches the inherent
 stochasticity of experimental fluorescence data and is the intended production
-behavior. To exercise the reproducibility guarantee, pass `--seed` explicitly.
+behavior. To exercise the reproducibility guarantee, pass `--seed` explicitly. This is the
+one deliberately seeded check; every smoke in section 2 is run seedless
+(`--seed None`).
 
 The acceptance bar is **theta-only** reproducibility — the prior-sampling stage
 is fully seeded, the downstream stages are not. Run the pipeline three times at
@@ -369,15 +500,18 @@ with the frame time fixed at 0.020 s (50 frames per second). So:
   by their timing label (`10S_50FPS`) so they never collide with the 2 s
   outputs.
 
-Repeat the smoke tests with the long duration:
+Repeat the smoke tests with the long duration (seedless). The DLI and Inference
+legs share the canonical DLI path that does not currently run (section 3.1);
+until the canonical rework lands, the duration arithmetic is confirmed through the
+RDS leg and the derived-frame-count check below:
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py \
-    --total-time-seconds 10.0 --tasks 1 --task-simulations 5 --seed 42 --verbose
+    --total-time-seconds 10.0 --tasks 1 --task-simulations 5 --seed None --verbose
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py \
-    --total-time-seconds 10.0 --tasks 1 --task-simulations 5 --seed 42 --verbose
+    --total-time-seconds 10.0 --tasks 1 --task-simulations 5 --seed None --verbose
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-    --total-time-seconds 10.0 --tasks 1 --epochs 1 --seed 0 --verbose
+    --total-time-seconds 10.0 --tasks 1 --epochs 1 --seed None --verbose
 ```
 
 The inference network's temporal depth is derived from the duration: the video
@@ -432,7 +566,7 @@ never seen, using the two MAP-recovery stages.
 
   ```bash
   python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py \
-      --total-time-seconds 2.0 --summary both
+      --total-time-seconds 2.0 --summary both --pool-mode unrestricted
   ```
 
 Both stages report two complementary views side by side, because they answer
@@ -523,8 +657,13 @@ A correctly set up and validated installation has:
 - A working `SRM_AND_SBI_ENVY_V0` environment (or a reused compatible one) with
   the package installed editable, and a `machine_profiles.toml` configured for
   the machine.
-- All four smoke-test invocations (RDS, DLI, Inference, and Inference `--resurrect`)
-  running end-to-end on minimal inputs.
+- All four canonical smoke-test invocations (RDS, DLI, Inference, and Inference
+  `--resurrect`) running end-to-end on minimal inputs. (The canonical DLI stage is
+  intentionally non-running pending its rework — see the imaging-pipeline pillar in
+  section 3.1 — so its smoke and the stages that read its output are exercised only
+  once that rework lands.)
+- The Detector calibration five-stage smoke test (section 2.5) running end-to-end,
+  seedless, with its small overrides.
 - The three-pillar semantic-equivalence checks holding: theta bit-reproducible
   at a fixed seed, the constructed reaction-diffusion system matching the
   declared model, and imaging output correctly shaped and physically plausible.

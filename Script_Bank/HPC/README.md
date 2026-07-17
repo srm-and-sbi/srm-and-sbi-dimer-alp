@@ -539,13 +539,14 @@ or the four canonical stage wrappers**, and they are never wired into it.
 
 | Detector script | Role | Compute |
 |---|---|---|
-| `..._DETECTOR_HPC_Simulation.sh` | generation: diffusion-only RDS (B1) → imaging-from-theta DLI (B2), packed per node, `--array` fan-out, per-split `SEED` | CPU |
+| `..._DETECTOR_HPC_Simulation.sh` | generation: diffusion-only RDS (B1) → imaging-from-theta DLI (B2), packed per node, `--array` fan-out, seedless | CPU |
 | `..._DETECTOR_HPC_Inference.sh` | train the imaging posterior (B3); >1 GPU → DDP via `torchrun`; saves the version-portable A5 estimator | GPU |
 | `..._DETECTOR_HPC_Evaluation.sh` | imaging MAP recovery on the held-out EVAL set (B5); >1 GPU → shard + a separate `--merge` step | GPU |
+| `..._DETECTOR_HPC_Experiment.sh` | imaging MAP estimation on real microscopy videos (B4); >1 GPU → shard + a separate `--merge` step | GPU |
 | `..._DETECTOR_HPC_Submit.sh` | the Detector dispatcher — dry-run-first single-job submit builder | — |
 
-(The Experiment, gap-simulation, and coverage wrappers join this set as those
-stages are built.)
+(The gap-simulation and coverage wrappers join this set as those stages are
+built.)
 
 **Dispatcher.** `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Submit.sh` mirrors the
 canonical `Submit.sh` — dry-run first (`DRYRUN=1` prints the exact `sbatch` line;
@@ -557,23 +558,34 @@ allocation never launches more workers than intended: `GPU_PART=gpu_test` → 4 
 (checks; `gpu:4`, `SRM_AND_SBI_GPUS=4`); `GPU_PART=gpu` → 8 GPUs (production;
 `gpu:8`, `SRM_AND_SBI_GPUS=8`).
 
-**Per-split seeds.** Generation takes a `SEED` per split; use distinct seeds so
-the TRAIN/TEST/EVAL imaging theta are independent (the Detector draws its RDS
-nuisance and imaging theta from `SeedSequence(SEED).spawn(2)`).
+**Seedless generation.** Detector generation passes no seed by design: each task
+draws fresh entropy, and provenance is carried by the global task index in the
+file names. `SEED` is an off-by-default reproducibility-debug knob only, and it
+must be left unset for the smoke and for normal campaigns.
+
+**8-bit video.** The DLI step of the generation stage renders 8-bit video via
+the `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Simulation.sh` `VIDEO_DTYPE_BITS` knob
+(default 8), matching `VALIDATION.md` section 2.5.
 
 **Chaining** (with `DEP=afterok:<jobid>[:...]`) — the check-run sequence
-(2 s, 16/4/2 tasks × 10 sims, 5 epochs, per-split seeds 42/43/44), all DRY-RUN by
-default; capture each printed job id and feed it to the next `DEP`:
+(2 s, 16/4/2 tasks × 10 sims, 5 epochs), run seedless, all DRY-RUN by default;
+capture each printed job id and feed it to the next `DEP`. The authoritative
+recipe is `VALIDATION.md` section 2.5 ("Detector calibration smoke test"):
 
     cd /path/to/srm-and-sbi-dimer-alp
     S=Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Submit.sh
     # generation (CPU test partition), one job per split:
-    PART=test NTPN=16 bash $S simulation SPLIT=train SEED=42 TASK_COUNT=16 TASK_SIMS=10 TOTAL_TIME=2.0
-    PART=test NTPN=4  bash $S simulation SPLIT=test  SEED=43 TASK_COUNT=4  TASK_SIMS=10 TOTAL_TIME=2.0
-    PART=test NTPN=2  bash $S simulation SPLIT=eval  SEED=44 TASK_COUNT=2  TASK_SIMS=10 TOTAL_TIME=2.0
+    PART=test NTPN=16 bash $S simulation SPLIT=train TASK_COUNT=16 TASK_SIMS=10 TOTAL_TIME=2.0
+    PART=test NTPN=4  bash $S simulation SPLIT=test  TASK_COUNT=4  TASK_SIMS=10 TOTAL_TIME=2.0
+    PART=test NTPN=2  bash $S simulation SPLIT=eval  TASK_COUNT=2  TASK_SIMS=10 TOTAL_TIME=2.0
     # train (afterok gen train+test), then evaluate (afterok train + gen eval):
     GPU_PART=gpu_test DEP=afterok:<gen-train>:<gen-test> bash $S inference  TRAIN_TASKS=16 TEST_TASKS=4 EPOCHS=5 BATCH=8 TOTAL_TIME=2.0
     GPU_PART=gpu_test DEP=afterok:<inference>:<gen-eval> bash $S evaluation EVAL_TASKS=2 POOL_MODE=unrestricted TOTAL_TIME=2.0
+    # experiment (afterok inference): apply the undertrained posterior to real videos.
+    # KINDS defaults to ALP,BET; because Slurm --export splits on commas, leave KINDS
+    # at its default or pre-export it. POOL_MODE=unrestricted is required for the
+    # undertrained smoke posterior.
+    GPU_PART=gpu_test DEP=afterok:<inference> bash $S experiment MAX_CELLS=2 POOL_MODE=unrestricted TOTAL_TIME=2.0
 
 Respect the check-partition QOS (e.g. Goethe `test`: at most 3 submitted / 2
 running / 2 nodes per user) — consolidate generation accordingly.

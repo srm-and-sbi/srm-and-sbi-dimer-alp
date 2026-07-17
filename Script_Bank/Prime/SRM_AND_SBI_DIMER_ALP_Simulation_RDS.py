@@ -15,7 +15,7 @@ Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py \\
-        --total-time-seconds 2.0 --tasks 2 --task-simulations 5 --seed 42
+        --total-time-seconds 2.0 --tasks 2 --task-simulations 5 --seed None
 
 Diagnostics:
     --probe logs the process resource limits (RLIMIT_NPROC / RLIMIT_NOFILE) at
@@ -446,7 +446,7 @@ def parse_args(argv=None) -> argparse.Namespace:
              "(filename suffix _TRAIN / _TEST / _EVAL). Default: train.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed", type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v), default=None,
         help="RNG seed for theta sampling and initial particle placement. "
              "Default: None (non-deterministic).",
     )

@@ -6,7 +6,7 @@ committed submission machinery.
 
 Mirrors the canonical ``SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py``, with one
 governing difference: the imaging parameters are the Detector's inference target,
-so this stage draws them per simulation from the Detector imaging prior (the 11
+so this stage draws them per simulation from the Detector imaging prior (the 10
 learnable imaging parameters) rather than reading them from the fixed table, and
 renders each video with ``render_detector_video`` (``detector_simulation_dli_support``) — which reuses the canonical DLI building blocks but sources the imaging
 parameters from theta. The canonical ``simulate_dli`` orchestrator is not called
@@ -28,9 +28,12 @@ Outputs (the ``{timing_label}`` token, e.g. ``5S_50FPS``, is rendered from
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py \\
-        --total-time-seconds 5.0 --tasks 2 --task-simulations 5 \\
-        --video-dtype-bits 8 --seed 42
+        --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 \\
+        --video-dtype-bits 8 --seed None
+    (repeat with --split test --tasks 4, and --split eval --tasks 2)
     (add --dry-run to resolve config + inputs and print planned I/O without rendering)
+    For the full detector smoke test see section 2.5 (Detector calibration smoke
+    test) in VALIDATION.md.
 
 Diagnostics:
     --probe logs the process resource limits (RLIMIT_NPROC / RLIMIT_NOFILE) at
@@ -94,7 +97,7 @@ def main(args: argparse.Namespace) -> None:
     paths = det.detector_paths(PARAMETERS.paths)   # Detector-qualified prefix
     div = "=" * 72
 
-    # Learnable imaging prior (the inference target / training label): 11 params,
+    # Learnable imaging prior (the inference target / training label): 10 params,
     # in DETECTOR_PARAMETERIZATION order, sampled in log10 space.
     imaging_keys = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
     ilow = np.array(det.theta_lower_bound())
@@ -506,7 +509,9 @@ def parse_args(argv=None) -> argparse.Namespace:
              "Default 8.",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed",
+        type=lambda v: None if str(v).strip().lower() in ("none", "") else int(v),
+        default=None,
         help="RNG seed for PSF widths, brightness states, and noise. "
              "Default: None (non-deterministic).",
     )
