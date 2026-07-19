@@ -74,13 +74,13 @@ STATE="$HOME/detector_gen_controller_state.txt"
 # label|array_max|time|split|task_count|task_sims|total_time
 STAGE_A=(
   "5s-train|39|24:00:00|train|400|500|5.0"
-  "2s-train|19|18:00:00|train|200|1000|2.0"
+  "2s-train|19|24:00:00|train|200|1000|2.0"
   "5s-test|9|24:00:00|test|100|500|5.0"
-  "2s-test|4|18:00:00|test|50|1000|2.0"
+  "2s-test|4|24:00:00|test|50|1000|2.0"
 )
 STAGE_B=(
   "5s-eval|4|24:00:00|eval|50|500|5.0"
-  "2s-eval|2|18:00:00|eval|25|1000|2.0"
+  "2s-eval|2|24:00:00|eval|25|1000|2.0"
 )
 
 # CASES selects which dataset(s) to run: 5s | 2s | both (default). Lets the same

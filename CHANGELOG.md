@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 - 2026-07-19
+
+Add the reference specification for the corrected EMCCD detector noise model, reconcile the
+detector-workflow calibration text with it, and widen the detector 2 s generation wall. All
+documentation plus one HPC-controller config value; no package runtime code changes.
+
+### Added
+
+- **`REFERENCE_EMCCD_NOISE_MODEL.md`** — a self-contained specification of the physically grounded
+  EMCCD forward model (Poisson photoelectrons → stochastic Gamma electron-multiplication register with
+  excess-noise factor `F² = 2` → conversion → gain-independent read noise → bias), the separable
+  optical-background model, the four camera parameters (`kappa_g`, `kappa_c`, `kappa_s`, `kappa_b`;
+  `kappa_q`/QE fixed) under spec-informed priors, the identifiable ratio `γ = g/C` (ADU per
+  photoelectron) as a reported diagnostic, and the validation protocol. This is design documentation
+  for a later iteration; the current forward model is unchanged.
+
+### Changed
+
+- **`DETECTOR_WORKFLOW.md`** — §9.1 cites the new specification as the corrected model its deferred
+  items point toward; §3 reconciles the photon-transfer calibration (a single photon-transfer curve
+  yields the overall system gain `γ = g/C`; the EM gain and conversion are anchored to the camera
+  spec, not decomposed from the videos).
+- **Detector 2 s generation wall 18 h → 24 h.** The `Generate_Controller` `tlim` for the 2 s
+  train/test/eval generation plan is raised to match the 5 s lines, for scheduling headroom.
+
 ## 0.3.0 - 2026-07-17
 
 Reparameterize the brightness-flicker generator to infer only the switching rate and derive its
