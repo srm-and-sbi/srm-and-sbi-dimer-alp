@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.2 - 2026-07-19
+
+Align the `Complex3DCNN` constructor defaults with the production network configuration and correct a
+worked-example docstring. Behavior-preserving — the production inference path always passes the
+network configuration explicitly, so no run is affected; this only changes a bare `Complex3DCNN(...)`
+build (tests or ad-hoc use).
+
+### Changed
+
+- **`Complex3DCNN` constructor defaults now match the production config** (`inference_network.py`):
+  `n_conv_layers` 4 → 5, `n_attn_layers` 1 → 2, `attention_heads` 2 → 4, so a bare constructor yields
+  the 128-dimensional embedding (`start_channels · 2^(n_conv_layers − 1) = 8 · 2⁴`) instead of the
+  64-dimensional one. `temporal_target_frames` is left at the documented `None` (no-reduction) default.
+  The docstring's worked example is corrected (`n_conv_layers=5` gives 128).
+
 ## 0.3.1 - 2026-07-19
 
 Add the reference specification for the corrected EMCCD detector noise model, reconcile the

@@ -279,7 +279,7 @@ class Complex3DCNN(nn.Module):
         n_attn_layers: Number of AttentionBlocks in the TemporalTransformer
             (only used if `use_temporal_attention=True`).
         start_channels: Output channels of the first conv block; doubles each
-            block. With `start_channels=8` and `n_conv_layers=4`, the final
+            block. With `start_channels=8` and `n_conv_layers=5`, the final
             channel count is 128.
         use_temporal_attention: If True, summarize the temporal sequence via
             TemporalTransformer (CLS token output). If False, average over T.
@@ -303,11 +303,11 @@ class Complex3DCNN(nn.Module):
     def __init__(self,
                  n_frames: int,
                  input_channels: int = 1,
-                 n_conv_layers: int = 4,
-                 n_attn_layers: int = 1,
+                 n_conv_layers: int = 5,
+                 n_attn_layers: int = 2,
                  start_channels: int = 8,
                  use_temporal_attention: bool = True,
-                 attention_heads: int = 2,
+                 attention_heads: int = 4,
                  temporal_target_frames: int = None,
                  verbose: bool = False):
         super().__init__()
