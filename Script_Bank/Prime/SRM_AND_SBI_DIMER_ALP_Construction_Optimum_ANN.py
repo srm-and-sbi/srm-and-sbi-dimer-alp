@@ -57,6 +57,7 @@ Usage:
 """
 
 import argparse
+import os
 import random
 import sys
 import time
@@ -212,6 +213,12 @@ def main(args: argparse.Namespace) -> None:
     video_dummy, theta_dummy = next(iter(dummy_loader))
 
     # ---- Embedding network (built + compiled exactly as Inference) ------
+    # conv_downsample must match the mode the checkpoint was trained with
+    # (CLI, else the same env var Inference reads, else the original "pool").
+    conv_downsample = (args.conv_downsample
+                       or os.environ.get("SRM_AND_SBI_CONV_DOWNSAMPLE") or "").strip().lower()
+    if conv_downsample not in ("pool", "pool-first", "stride"):
+        conv_downsample = "pool"
     embedding_net = Complex3DCNN(
         n_frames=timing.frame_count,
         input_channels=network_cfg.input_channels,
@@ -221,6 +228,7 @@ def main(args: argparse.Namespace) -> None:
         use_temporal_attention=network_cfg.use_temporal_attention,
         attention_heads=network_cfg.attention_heads,
         temporal_target_frames=network_cfg.temporal_target_frames,
+        conv_downsample=conv_downsample,
         verbose=args.verbose,
     )
     embedding_net = torch.compile(embedding_net).to(device)
@@ -305,6 +313,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Master RNG seed (PyTorch + numpy + Python random). Default None "
              "-> non-deterministic. The construction does not train, so the seed "
              "only affects the (discarded) representative-batch draw.",
+    )
+    parser.add_argument(
+        "--conv-downsample", type=str, default=None,
+        choices=["pool", "pool-first", "stride"],
+        help="Conv-block downsampling mode of the checkpoint being loaded (must match "
+             "the mode Inference trained with -- the module layout differs, so a "
+             "mismatch fails the state_dict load). Default: SRM_AND_SBI_CONV_DOWNSAMPLE "
+             "env, else 'pool'.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",

@@ -78,6 +78,19 @@ def normalize_video(video_raw: np.ndarray) -> np.ndarray:
     return video / max_value if max_value > 0 else video
 
 
+def gpu_normalize_video(video_batch: torch.Tensor) -> torch.Tensor:
+    """GPU-side equivalent of :func:`normalize_video` for an on-device batch.
+
+    Integer batches (the uint8 production case): cast to float32, divide by the
+    dtype max -- bit-identical to the CPU path. Float batches: divide per sample
+    by its own max (no-op when <= 0), matching normalize_video's float branch."""
+    if not torch.is_floating_point(video_batch):
+        return video_batch.to(torch.float32).div_(float(torch.iinfo(video_batch.dtype).max))
+    v = video_batch.to(torch.float32)
+    mx = v.amax(dim=tuple(range(1, v.ndim)), keepdim=True)   # per-sample max over non-batch dims
+    return torch.where(mx > 0, v / mx, v)
+
+
 class VideoDataset(Dataset):
     """PyTorch Dataset over (video, theta) pairs stored across `tasks` files.
 
@@ -116,6 +129,7 @@ class VideoDataset(Dataset):
                  augment: bool = True,
                  split: str = "TRAIN",
                  return_index: bool = False,
+                 gpu_normalize: bool = False,
                  paths=None):
         # `paths` selects the filename namespace. Default is the canonical
         # PARAMETERS.paths (byte-identical to previous behavior); the Detector
@@ -151,6 +165,9 @@ class VideoDataset(Dataset):
         # identifier of each example (used only by the test-loss-distribution
         # loader); the default preserves the (video, theta) contract.
         self.return_index = return_index
+        # gpu_normalize: ship the raw uint8 video and let the training loop
+        # cast+normalize on the GPU (4x smaller H2D; result bit-identical).
+        self.gpu_normalize = gpu_normalize
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -163,12 +180,17 @@ class VideoDataset(Dataset):
         video_array = load_data(self.video_paths[task_index])
         theta_array = load_data(self.theta_paths[task_index])
 
-        # Normalize video to [0, 1] float32; log10-transform theta to match the prior's log-space.
-        video_normalized = normalize_video(video_array[data_index])
         theta_log10 = np.log10(theta_array[data_index])
-
-        video = torch.tensor(video_normalized, dtype=torch.float32)
         theta = torch.tensor(theta_log10, dtype=torch.float32)
+
+        if self.gpu_normalize:
+            # Return the raw integer video; the loop casts to float32 + normalizes on GPU.
+            # Augmentation (rot90 / flips) is a pixel permutation -> order-independent of the
+            # normalize, so it is applied here on the integer tensor unchanged.
+            video = torch.from_numpy(np.ascontiguousarray(video_array[data_index]))
+        else:
+            # Normalize video to [0, 1] float32 on the CPU (default path).
+            video = torch.tensor(normalize_video(video_array[data_index]), dtype=torch.float32)
 
         if self.augment:
             video = self._spatial_augment(video)
@@ -325,21 +347,29 @@ class _LossModule(nn.Module):
 
 
 def init_distributed(topo) -> None:
-    """Initialize the default process group for DDP when launched distributed.
+    """Initialize the default process group for DDP (single- or multi-node).
 
-    No-op for a single worker (``world_size == 1``). ``torchrun`` provides
-    ``MASTER_ADDR``/``MASTER_PORT``/``RANK``/``WORLD_SIZE``; ``resolve_topology``
-    has already bound this process's local GPU. Uses the NCCL backend (RCCL on
-    ROCm exposes the same name).
+    No-op for a single worker. NCCL backend (RCCL on ROCm). Supports torchrun
+    launches (rendezvous env already set) and bare-srun launches, where the
+    Slurm rank variables are mirrored into RANK / WORLD_SIZE / LOCAL_RANK;
+    MASTER_ADDR / MASTER_PORT must then come from the launcher.
     """
     import torch.distributed as dist
-    if topo.is_distributed and not dist.is_initialized():
-        if "MASTER_ADDR" not in os.environ:
-            raise RuntimeError(
-                "Multi-process launch detected (world_size > 1) but no torch "
-                "rendezvous is set (MASTER_ADDR unset). Launch multi-GPU inference "
-                "via torchrun, not bare srun.")
-        dist.init_process_group(backend="nccl")
+    if not (topo.is_distributed and not dist.is_initialized()):
+        return
+    # Bridge Slurm -> torch rendezvous env for the bare-srun path (torchrun already
+    # sets RANK, so this is skipped under torchrun and its behavior is unchanged).
+    if "RANK" not in os.environ and os.environ.get("SLURM_PROCID") is not None:
+        os.environ["RANK"] = os.environ["SLURM_PROCID"]
+        os.environ["WORLD_SIZE"] = os.environ.get("SLURM_NTASKS", str(topo.world_size))
+        os.environ["LOCAL_RANK"] = os.environ.get("SLURM_LOCALID", str(topo.local_rank))
+    if "MASTER_ADDR" not in os.environ:
+        raise RuntimeError(
+            "Multi-process launch detected (world_size > 1) but no torch rendezvous "
+            "is set (MASTER_ADDR unset). Launch multi-GPU inference via torchrun, or "
+            "under a bare srun export MASTER_ADDR / MASTER_PORT (the HPC launcher does "
+            "this for the multi-node path).")
+    dist.init_process_group(backend="nccl")
 
 
 def cleanup_distributed() -> None:
@@ -355,6 +385,7 @@ def build_datasets(train_tasks: int,
                    compress: bool = True,
                    test_tasks: int = 0,
                    test_return_index: bool = False,
+                   gpu_normalize: bool = False,
                    paths=None,
                    ) -> tuple:
     """Load the TRAIN and TEST namespaces as separate datasets.
@@ -381,6 +412,7 @@ def build_datasets(train_tasks: int,
         tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress,
         augment=PARAMETERS.inference.training.augmentation, split="TRAIN",
+        gpu_normalize=gpu_normalize,
         paths=paths,
     )
     test_dataset = None
@@ -389,9 +421,126 @@ def build_datasets(train_tasks: int,
             tasks=test_tasks, data_bank_root=data_bank_root,
             timing_label=timing_label, compress=compress,
             augment=False, split="TEST", return_index=test_return_index,
+            gpu_normalize=gpu_normalize,
             paths=paths,
         )
     return train_dataset, test_dataset
+
+
+class BatchRenorm(nn.Module):
+    """Batch Renormalization (Ioffe 2017, arXiv:1702.03275): comms-free BatchNorm
+    drop-in, robust to small per-rank batches.
+
+    x_hat = (x - mu_B)/sigma_B * r + d with r, d clamped corrections toward the
+    running stats, treated as constants (stop-gradient). r_max/d_max ramp from
+    pure BatchNorm over warmup+ramp steps. Eval path identical to BatchNorm.
+    Dimension-agnostic (channel = dim 1)."""
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1,
+                 r_max=3.0, d_max=5.0, warmup_steps=100, ramp_steps=1000):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum if momentum is not None else 0.1
+        self.r_max_final = r_max
+        self.d_max_final = d_max
+        self.warmup_steps = warmup_steps
+        self.ramp_steps = max(1, ramp_steps)
+        self.weight = nn.Parameter(torch.ones(num_features))
+        self.bias = nn.Parameter(torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+    def _rd_max(self):
+        step = int(self.num_batches_tracked.item())
+        if step <= self.warmup_steps:
+            return 1.0, 0.0   # pure BatchNorm while the running stats settle
+        t = min(1.0, (step - self.warmup_steps) / self.ramp_steps)
+        return 1.0 + t * (self.r_max_final - 1.0), t * self.d_max_final
+
+    def forward(self, x):
+        shape = [1, self.num_features] + [1] * (x.ndim - 2)   # broadcast over channel dim 1
+        if self.training:
+            dims = [0] + list(range(2, x.ndim))
+            mean = x.mean(dim=dims)
+            var = x.var(dim=dims, unbiased=False)
+            std = (var + self.eps).sqrt()
+            r_max, d_max = self._rd_max()
+            run_std = (self.running_var + self.eps).sqrt()
+            r = (std.detach() / run_std).clamp(1.0 / r_max, r_max)
+            d = ((mean.detach() - self.running_mean) / run_std).clamp(-d_max, d_max)
+            x_hat = (x - mean.view(shape)) / std.view(shape) * r.view(shape) + d.view(shape)
+            with torch.no_grad():   # update running stats from this rank's local batch
+                self.running_mean += self.momentum * (mean - self.running_mean)
+                self.running_var += self.momentum * (var - self.running_var)
+                self.num_batches_tracked += 1
+        else:
+            run_std = (self.running_var + self.eps).sqrt()
+            x_hat = (x - self.running_mean.view(shape)) / run_std.view(shape)
+        return x_hat * self.weight.view(shape) + self.bias.view(shape)
+
+
+def convert_to_batch_renorm(module: nn.Module) -> nn.Module:
+    """Recursively replace every ``nn.*BatchNorm*`` with a :class:`BatchRenorm`, copying the
+    affine params + running stats. Mirrors ``convert_sync_batchnorm``'s walk, so it reaches
+    the ``BatchNorm3d`` inside the (compiled) Complex3DCNN. The MAF flow's own (nflows)
+    BatchNorm is not an ``nn._BatchNorm`` and is left untouched -- consistent with SyncBN,
+    which also only converts ``nn`` BatchNorm."""
+    out = module
+    if isinstance(module, nn.modules.batchnorm._BatchNorm):
+        out = BatchRenorm(module.num_features, eps=module.eps, momentum=module.momentum)
+        if module.affine:
+            with torch.no_grad():
+                out.weight.copy_(module.weight)
+                out.bias.copy_(module.bias)
+        with torch.no_grad():
+            out.running_mean.copy_(module.running_mean)
+            out.running_var.copy_(module.running_var)
+            if module.num_batches_tracked is not None:
+                out.num_batches_tracked.copy_(module.num_batches_tracked)
+        # The new module's params/buffers were created on CPU; match the original's device
+        # (estimator is already .to(device) when this runs) so DDP sees a single device.
+        out = out.to(module.running_mean.device)
+    for name, child in module.named_children():
+        out.add_module(name, convert_to_batch_renorm(child))
+    del module
+    return out
+
+
+def _build_node_local_group(topo):
+    """Build the per-NODE process subgroup for node-local SyncBatchNorm.
+
+    BatchNorm stats are synchronized only within a node (fast intra-node xGMI/NVLink), never
+    across nodes, so the per-step BN all-reduce cost is independent of node count -- the model
+    scales to more nodes while keeping node-batch statistics (GPUs/node x batch), which are far
+    closer to the global batch than per-rank's local batch. Returns (group, n_nodes, gpus_per_node).
+    On a single node the group is the whole world (identical to global SyncBatchNorm)."""
+    import torch.distributed as dist
+    world = topo.world_size
+    gpus_per_node = _env_int("LOCAL_WORLD_SIZE", "SLURM_NTASKS_PER_NODE", default=world) or world
+    gpus_per_node = max(1, min(gpus_per_node, world))
+    n_nodes = max(1, world // gpus_per_node)
+    my_node = topo.rank // gpus_per_node
+    my_group = None
+    # new_group is collective: EVERY rank must create EVERY subgroup, in the same order.
+    for n in range(n_nodes):
+        ranks = list(range(n * gpus_per_node, min((n + 1) * gpus_per_node, world)))
+        g = dist.new_group(ranks=ranks)
+        if n == my_node:
+            my_group = g
+    return my_group, n_nodes, gpus_per_node
+
+
+def strip_syncbn_process_groups(module: nn.Module) -> None:
+    """Set ``process_group = None`` on every SyncBatchNorm so the trained estimator can be
+    pickled (posterior save). Node-local SyncBatchNorm holds an explicit ProcessGroup, which
+    is unpicklable; the group is only needed for the per-step sync during TRAINING -- at
+    inference SyncBatchNorm normalizes with the running stats regardless. No-op for global
+    SyncBatchNorm (already None) and for BatchNorm/BatchRenorm."""
+    for m in module.modules():
+        if isinstance(m, nn.SyncBatchNorm):
+            m.process_group = None
 
 
 def setup_training(estimator: nn.Module,
@@ -403,6 +552,9 @@ def setup_training(estimator: nn.Module,
                    learning_rate: Optional[float] = None,
                    test_tasks: int = 0,
                    test_loss_distribution: bool = False,
+                   bn_mode: str = "sync",
+                   num_workers_override: Optional[int] = None,
+                   gpu_normalize: bool = False,
                    paths=None) -> dict:
     """Bundle DataLoaders + optimizer + scheduler + device into a dict for `train_loop`.
 
@@ -450,55 +602,64 @@ def setup_training(estimator: nn.Module,
     # forward returns None). Distributed -> SyncBatchNorm + DDP so gradients
     # all-reduce; single worker -> the bare module (forward == estimator.loss).
     model: nn.Module = _LossModule(estimator)
-    if topo.is_distributed:
-        # SyncBatchNorm shares the BatchNorm statistics across ranks so every
-        # replica normalizes against the full effective batch (matching the
-        # single-GPU large-batch behavior). It is ON BY DEFAULT and is the
-        # correct, validated choice. It adds a per-step collective measured at
-        # ~12-16% of a 4-GPU/5s epoch -- a minor cost, not the dominant one.
-        # Opt out with SRM_AND_SBI_NO_SYNC_BN=1: each rank then keeps its OWN
-        # local batch statistics, which is faster but changes the statistics, so
-        # re-validate posterior recovery before relying on it.
-        use_sync_bn = os.environ.get("SRM_AND_SBI_NO_SYNC_BN") != "1"
-        if use_sync_bn:
-            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    # BatchNorm mode. CONSTRAINT: the CNN's BatchNorm carries the cross-sample
+    # signal D_A recovery depends on, so every mode keeps batch statistics
+    # (per-sample norms like GroupNorm collapse D_A). Modes only change how the
+    # stats are shared across ranks: sync (global), node-local (per node),
+    # per-rank (no sync), renorm (comms-free BatchRenorm).
+    if bn_mode == "renorm":
+        model = convert_to_batch_renorm(model)
         if topo.is_main:
-            state = "ENABLED (default)" if use_sync_bn else "DISABLED (SRM_AND_SBI_NO_SYNC_BN=1)"
-            print(f"  SyncBatchNorm: {state}", flush=True)
+            print("  Normalization: BatchRenorm (comms-free, running-stat corrected)", flush=True)
+    elif topo.is_distributed and bn_mode == "node-local":
+        pg, n_nodes, gpn = _build_node_local_group(topo)
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model, process_group=pg)
+        if topo.is_main:
+            print(f"  Normalization: node-local SyncBatchNorm ({n_nodes} node(s) x {gpn} GPU; "
+                  f"sync within node only)", flush=True)
+    elif topo.is_distributed and bn_mode == "sync":
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        if topo.is_main:
+            print("  Normalization: global SyncBatchNorm (default)", flush=True)
+    elif topo.is_main:
+        where = "per-rank BatchNorm (no sync)" if topo.is_distributed else f"BatchNorm ({bn_mode}; single worker)"
+        print(f"  Normalization: {where}", flush=True)
+    if topo.is_distributed:
         model = DistributedDataParallel(model, device_ids=[topo.local_rank],
                                         output_device=topo.local_rank)
 
     train_dataset, test_dataset = build_datasets(
         train_tasks=train_tasks, data_bank_root=data_bank_root,
         timing_label=timing_label, compress=compress, test_tasks=test_tasks,
-        test_return_index=test_loss_distribution, paths=paths,
+        test_return_index=test_loss_distribution, gpu_normalize=gpu_normalize,
+        paths=paths,
     )
-    # ---- DataLoader worker budget (rank- and loader-aware) -------------------
-    # Each DDP rank builds its OWN loaders, and persistent_workers keeps the train +
-    # validation loaders' workers alive at the same time, so the LIVE worker-process
-    # count is num_workers x world_size x n_live_loaders. Treat the configured value
-    # (or the CPU core count, when <= 0) as the node-wide TOTAL worker budget and
-    # divide it across ranks and concurrently-persistent loaders, so the product stays
-    # ~1 worker per core regardless of how many GPUs are allocated. This GENERALIZES
-    # the old single-GPU `cores // 2` default, which silently multiplied to
-    # world_size x n_live_loaders x that under DDP and exhausted host RAM at production
-    # scale (4 ranks x 16 x 2 = 128 loader processes > 480 GB). At world_size == 1 with
-    # a train+val pair it still resolves to cores // 2 per loader (single-GPU unchanged).
-    # This is the data-loading worker budget only; the GPU/shard-worker count
-    # (world_size) is bounded separately (SRM_AND_SBI_GPUS; eval/experiment cap it at
-    # the task/cell count). Eval/experiment build no num_workers loaders, so this
-    # budget is inference-only.
-    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-    worker_budget = PARAMETERS.machine.num_workers if PARAMETERS.machine.num_workers > 0 else cores
+    # DataLoader worker budget: each rank builds its own persistent train(+val)
+    # loaders, so live workers = num_workers x world_size x n_live_loaders. The
+    # profile value (or core count when <= 0) is the NODE-WIDE budget, divided
+    # across ranks and loaders; single-GPU resolves to the original cores // 2.
     n_live_loaders = 1 + (1 if test_dataset is not None else 0)   # train (+ persistent val)
-    num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
+    if num_workers_override is not None:
+        # Explicit PER-LOADER-PER-RANK count (--num-workers / SRM_AND_SBI_NUM_WORKERS),
+        # bypassing the auto default. 0 = synchronous loading (no workers). The caller owns
+        # the OOM math: live workers = N x world_size x n_live_loaders.
+        num_workers = max(0, num_workers_override)
+        budget_note = f"override --num-workers={num_workers}/loader/rank"
+    elif PARAMETERS.machine.num_workers > 0:
+        # A profile that sets an explicit node-wide budget keeps the divide-across-ranks behavior.
+        num_workers = max(1, PARAMETERS.machine.num_workers // (topo.world_size * n_live_loaders))
+        budget_note = f"profile budget={PARAMETERS.machine.num_workers} / {topo.world_size} rank(s) / {n_live_loaders} loader(s)"
+    else:
+        # Measured optima: 1 worker/rank suffices with gpu_normalize (decode-only
+        # workers), 2/rank without (CPU normalize). See PR for the sweeps.
+        num_workers = 1 if gpu_normalize else 2
+        budget_note = f"auto ({'gpu-normalize on' if gpu_normalize else 'off'} -> {num_workers}/rank optimum)"
     # persistent_workers keeps the worker pool alive across epochs (avoids the
     # per-epoch re-spawn + stack re-import that otherwise dominates each epoch).
     persistent = num_workers > 0
     if topo.is_main:
         print(f"  DataLoader: num_workers={num_workers}/loader/rank "
-              f"(budget={worker_budget} / {topo.world_size} rank(s) / {n_live_loaders} live loader(s) "
-              f"-> {num_workers * topo.world_size * n_live_loaders} live workers; "
+              f"({budget_note} -> {num_workers * topo.world_size * n_live_loaders} live workers; "
               f"persistent_workers={persistent})", flush=True)
 
     # Distributed -> shard TRAIN across ranks with a DistributedSampler (it owns
@@ -558,6 +719,7 @@ def setup_training(estimator: nn.Module,
         "scheduler": scheduler,
         "device": device,
         "topo": topo,
+        "gpu_normalize": gpu_normalize,
     }
 
 
@@ -607,7 +769,8 @@ def compute_validation_loss(estimator: nn.Module,
                             loader: DataLoader,
                             device: torch.device,
                             verbose: bool = False,
-                            collect: bool = False):
+                            collect: bool = False,
+                            gpu_normalize: bool = False):
     """Compute mean loss over a loader in eval mode.
 
     The estimator is set to eval mode (dropout disabled, batch-norm uses running
@@ -651,6 +814,8 @@ def compute_validation_loss(estimator: nn.Module,
                 video_batch, theta_batch = batch
                 task_batch = sim_batch = None
             video_batch = video_batch.to(device)
+            if gpu_normalize:
+                video_batch = gpu_normalize_video(video_batch)
             theta_batch = theta_batch.to(device)
             example_loss = estimator.loss(theta_batch, condition=video_batch)
             losses_per_batch.append(torch.mean(example_loss).item())
@@ -727,9 +892,12 @@ def train_loop(estimator: nn.Module,
                checkpoint_path: Path,
                train_sampler=None,
                epochs: Optional[int] = None,
-               resurrect: bool = False,
+               resume_from: Optional[Path] = None,
+               fine_tune_lr: Optional[float] = None,
                replay_loss: bool = False,
                heartbeat_every: Optional[int] = None,
+               early_stop_patience: int = 0,
+               gpu_normalize: bool = False,
                verbose: bool = False,
                test_loss_distribution: bool = False,
                on_new_best: Optional[Callable] = None) -> tuple:
@@ -745,16 +913,27 @@ def train_loop(estimator: nn.Module,
         scheduler: Learning-rate scheduler with `.step(metric)` (ReduceLROnPlateau).
         device: Device to move batches to.
         topo: The launch Topology (rank / world_size / is_main / is_distributed).
-        checkpoint_path: Path where the best-so-far estimator checkpoint is saved
-            (and, in resurrect mode, loaded from). Built by the entry point as
+        checkpoint_path: Path where the best-so-far estimator checkpoint is saved.
+            Built by the entry point as
             ``PARAMETERS.paths.checkpoint_path(data_bank_root, timing.label)``.
         train_sampler: The DistributedSampler when distributed (its `set_epoch` is
             called each epoch to reshuffle the shard); None on a single worker.
         epochs: Number of epochs. Defaults to `PARAMETERS.inference.training.epochs`.
-        resurrect: If True, load the checkpoint before training and continue.
+        resume_from: If set, load this checkpoint before training and continue from
+            its weights (reuse / fine-tune the model instead of training from
+            scratch). May be the canonical ``checkpoint_path`` (default reuse) or a
+            different file (fine-tune a prior model onto new data); in the latter
+            case the canonical checkpoint is seeded with the loaded weights so the
+            end-of-run best-on-TEST reload always finds a file. None -> from scratch.
+        fine_tune_lr: If set (and resuming), the initial learning rate to start the
+            schedule from -- a smaller warm-start LR to fine-tune a near-optimal
+            model gently. Ignored on a from-scratch run.
         replay_loss: If True, compute the per-epoch eval-mode TRAIN loss.
         heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
             only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
+        early_stop_patience: If > 0 (and a TEST set exists), stop after this many
+            epochs without TEST-loss improvement once the LR has bottomed out at
+            learning_rate_minimum. 0 disables (default).
         verbose: If True, print per-batch progress.
 
     Distributed: TRAIN and TEST are both sharded across ranks (DistributedSampler)
@@ -765,11 +944,12 @@ def train_loop(estimator: nn.Module,
 
     Returns:
         (losses_train, losses_test, losses_replay, optimum_loss_test) -- the three
-        1D arrays of length `epochs` (per-epoch mean train, test, and replay loss),
-        plus the best (lowest) TEST loss the saved checkpoint attained. In resurrect
-        mode it starts from the loaded checkpoint's baseline, so it reflects the
-        checkpoint on disk even when no epoch improved on it; it is ``inf`` when
-        there is no TEST set.
+        1D arrays of the per-epoch mean train, test, and replay loss (length =
+        epochs actually run, which is < `epochs` when early stopping fires), plus
+        the best (lowest) TEST loss the saved checkpoint attained. When resuming
+        it starts from the loaded model's baseline, so it reflects the checkpoint
+        on disk even when no epoch improved on it; it is ``inf`` when there is no
+        TEST set.
     """
     import torch.distributed as dist
     if epochs is None:
@@ -803,23 +983,42 @@ def train_loop(estimator: nn.Module,
         return float((t / topo.world_size).item())
 
     optimum_loss_test = float("inf")
-    if resurrect:
+    if resume_from is not None:
+        # Reuse an existing model (performance switch #3: fine-tune / warm-start).
         # All ranks load the same checkpoint -- staged to CPU, then placed onto each
         # rank's own device by load_state_dict -- so the replicas stay identical and no
         # single device accumulates every rank's copy. No barrier needed here: the
-        # checkpoint is from a prior completed run, so no rank writes it before this read.
+        # source checkpoint is from a prior completed run, so no rank writes it before
+        # this read (and the canonical checkpoint, if distinct, is seeded rank-0-only below).
         estimator.load_state_dict(
-            torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
+            torch.load(str(resume_from), map_location="cpu", weights_only=True))
+        # Warm-start LR: a resumed model is already near-optimal, so starting the
+        # schedule at the full initial LR can destabilize it (an early loss spike).
+        # A smaller fine_tune_lr fine-tunes gently. ReduceLROnPlateau reads the live
+        # param-group LR, so setting it here (before the loop) becomes the new
+        # schedule start. Ignored when None (keeps the setup_training LR).
+        if fine_tune_lr is not None:
+            for group in optimizer.param_groups:
+                group["lr"] = fine_tune_lr
+        ft_note = f"; fine-tune LR = {fine_tune_lr:.2e}" if fine_tune_lr is not None else ""
         if has_val:
             # Sharded TEST loss across ranks (see the per-epoch block below).
             optimum_loss_test = _reduce_mean(
-                compute_validation_loss(estimator, val_loader, device, verbose=verbose))
+                compute_validation_loss(estimator, val_loader, device, verbose=verbose, gpu_normalize=gpu_normalize))
             if is_main:
-                print(f"RESURRECT: loaded checkpoint from {checkpoint_path}; "
-                      f"baseline test loss = {optimum_loss_test:.5f}")
+                print(f"REUSE: loaded model from {resume_from}; "
+                      f"baseline test loss = {optimum_loss_test:.5f}{ft_note}")
         elif is_main:
-            print(f"RESURRECT: loaded checkpoint from {checkpoint_path} "
-                  f"(no test set; last-epoch checkpointing).")
+            print(f"REUSE: loaded model from {resume_from} "
+                  f"(no test set; last-epoch checkpointing).{ft_note}")
+        # Seed the canonical checkpoint with the loaded weights when resuming from a
+        # DIFFERENT file (e.g. fine-tuning a prior model onto new data). This makes
+        # the best-so-far checkpoint exist immediately, so the end-of-run reload of
+        # the best-on-TEST model finds a file even if no epoch improves on the loaded
+        # baseline. Skipped when the source IS the canonical checkpoint (it already
+        # holds these weights -- avoids re-writing a file the other ranks are reading).
+        if is_main and Path(resume_from).resolve() != Path(checkpoint_path).resolve():
+            torch.save(estimator.state_dict(), str(checkpoint_path))
 
     n_batches = len(train_loader)
     # Within-epoch progress cadence: a line every `heartbeat` batches. Default
@@ -838,6 +1037,19 @@ def train_loop(estimator: nn.Module,
             flush=True,
         )
 
+    # Early-stopping state (performance switch #2). epochs_no_improve counts
+    # consecutive epochs with no TEST-loss improvement; the stop fires only once it
+    # reaches early_stop_patience AND the LR has floored (see the check below).
+    lr_min = PARAMETERS.inference.training.learning_rate_minimum
+    epochs_no_improve = 0
+    epochs_run = epochs   # actual epochs executed (< epochs iff early-stopped); for trimming
+    if is_main and early_stop_patience > 0 and has_val:
+        print(f"  Early stopping: ENABLED (patience={early_stop_patience} epoch(s) "
+              f"flat at LR floor {lr_min:.2e})", flush=True)
+    elif is_main and early_stop_patience > 0 and not has_val:
+        print("  Early stopping: requested but INACTIVE (no TEST set; needs --test-tasks > 0)",
+              flush=True)
+
     loop_start = time.time()
     for epoch in range(epochs):
         epoch_start = time.time()
@@ -848,6 +1060,8 @@ def train_loop(estimator: nn.Module,
         batch_train_losses = []
         for b, (video_batch, theta_batch) in enumerate(train_loader, start=1):
             video_batch = video_batch.to(device)
+            if gpu_normalize:
+                video_batch = gpu_normalize_video(video_batch)
             theta_batch = theta_batch.to(device)
             optimizer.zero_grad()
             loss = torch.mean(model(theta_batch, condition=video_batch))
@@ -883,18 +1097,20 @@ def train_loop(estimator: nn.Module,
                 # One pass: the same batch-mean drives epoch_test (unchanged), and
                 # the per-example shard is retained for a possible new-best commit.
                 val_mean, t_task, t_sim, t_loss, t_theta = compute_validation_loss(
-                    estimator, val_loader, device, verbose=False, collect=True)
+                    estimator, val_loader, device, verbose=False, collect=True,
+                    gpu_normalize=gpu_normalize)
                 epoch_test = _reduce_mean(val_mean)
                 tld_shard = (t_task, t_sim, t_loss, t_theta)
             else:
                 epoch_test = _reduce_mean(
-                    compute_validation_loss(estimator, val_loader, device, verbose=False))
+                    compute_validation_loss(estimator, val_loader, device, verbose=False,
+                                            gpu_normalize=gpu_normalize))
         else:
             epoch_test = float("nan")
         # Replay loss = eval-mode TRAIN loss (augmentation off), opt-in; each rank
         # measures its shard of the dedicated augmentation-off loader, then averaged
         # across ranks.
-        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, replay_loader, device, verbose=False))
+        epoch_replay = (_reduce_mean(compute_validation_loss(estimator, replay_loader, device, verbose=False, gpu_normalize=gpu_normalize))
                         if replay_loss else float("nan"))
         losses_train[epoch] = epoch_train
         losses_test[epoch] = epoch_test
@@ -903,9 +1119,13 @@ def train_loop(estimator: nn.Module,
         scheduler.step(epoch_test if has_val else epoch_train)
 
         # ---- Checkpoint (rank 0 only; the selection metric is identical on all ranks) ----
+        # epochs_no_improve is updated on EVERY rank (only the torch.save is rank-0
+        # guarded) so the early-stop condition below is identical across ranks and
+        # every rank breaks the loop on the same epoch -- no DDP desync.
         if has_val:
             if epoch_test < optimum_loss_test:
                 optimum_loss_test = epoch_test
+                epochs_no_improve = 0
                 if is_main:
                     torch.save(estimator.state_dict(), str(checkpoint_path))
                 # Commit the sibling best-artifacts (posterior + test-loss
@@ -918,6 +1138,8 @@ def train_loop(estimator: nn.Module,
                     gathered = _gather_test_loss(*tld_shard, topo)
                     if is_main:
                         on_new_best(epoch + 1, epoch_test, gathered)
+            else:
+                epochs_no_improve += 1
         elif is_main:
             torch.save(estimator.state_dict(), str(checkpoint_path))
 
@@ -935,6 +1157,26 @@ def train_loop(estimator: nn.Module,
                 flush=True,
             )
 
+        # Early stop, gated on the LR floor: TEST loss flat for `patience` epochs
+        # AND the scheduler bottomed out. All ranks see the same all-reduced
+        # inputs, so the break is synchronized under DDP.
+        if (has_val and early_stop_patience > 0
+                and epochs_no_improve >= early_stop_patience
+                and scheduler.get_last_lr()[0] <= lr_min * (1.0 + 1e-9)):
+            epochs_run = epoch + 1
+            if is_main:
+                print(f"Early stop at epoch {epochs_run}/{epochs}: TEST loss flat for "
+                      f"{epochs_no_improve} epoch(s) at the LR floor "
+                      f"(lr={scheduler.get_last_lr()[0]:.2e} <= {lr_min:.2e}); "
+                      f"skipping {epochs - epochs_run} remaining epoch(s).", flush=True)
+            break
+
+    # Trim per-epoch arrays to the epochs actually run (early stop leaves a NaN
+    # tail that would break downstream reads); full run -> no-op.
+    losses_train = losses_train[:epochs_run]
+    losses_test = losses_test[:epochs_run]
+    losses_replay = losses_replay[:epochs_run]
+
     # ---- Final model ------------------------------------------------------
     if has_val:
         # All ranks reload the best-on-TEST checkpoint (rank 0 wrote it; a barrier
@@ -944,7 +1186,7 @@ def train_loop(estimator: nn.Module,
             dist.barrier()
         estimator.load_state_dict(
             torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
-        final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False))
+        final_replay = _reduce_mean(compute_validation_loss(estimator, val_loader, device, verbose=False, gpu_normalize=gpu_normalize))
         if is_main:
             print(f"Final: optimum test loss = {optimum_loss_test:.5f}; "
                   f"replay test loss = {final_replay:.5f}")

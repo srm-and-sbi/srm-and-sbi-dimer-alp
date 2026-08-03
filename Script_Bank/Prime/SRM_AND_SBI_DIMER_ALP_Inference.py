@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import math
+import os
 import random
 import shutil
 import sys
@@ -47,12 +48,47 @@ from srm_and_sbi_dimer_alp.inference_support import (
     resolve_topology,
     save_posterior,
     setup_training,
+    strip_syncbn_process_groups,
     train_loop,
 )
 from srm_and_sbi_dimer_alp.parameterization import (
     PARAMETERS, PARAMETERIZATION, PARAMETERIZATION_RAW, RunTiming, build_prior)
 from srm_and_sbi_dimer_alp.test_loss_distribution import TestLossDistribution
 from srm_and_sbi_dimer_alp.utils import console_log_context, log_memory_state
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Boolean from env var (1/true/yes/on, case-insensitive); unset -> default.
+
+    Seeds argparse defaults so each switch also works via env var; an explicit
+    CLI flag still wins.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    """Integer from env var; unset/invalid -> default. See _env_bool."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default):
+    """Resolve a float from an environment variable (unset/invalid -> default)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def main(args: argparse.Namespace) -> None:
@@ -72,6 +108,11 @@ def main(args: argparse.Namespace) -> None:
     torch.set_float32_matmul_precision("high")
     torch._dynamo.config.suppress_errors = True
 
+    # Kernel auto-tune: MIOpen/cuDNN picks the fastest conv kernels for the
+    # fixed input shapes (numerically equivalent; mainly helps cold kernel caches).
+    if args.autotune:
+        torch.backends.cudnn.benchmark = True
+
     # ---- Pre-run banner -------------------------------------------------
     machine = PARAMETERS.machine
     geom = PARAMETERS.simulation.stem
@@ -85,6 +126,68 @@ def main(args: argparse.Namespace) -> None:
     effective_lr = args.learning_rate if args.learning_rate is not None else default_lr
 
     task_range = f"0..{args.tasks - 1}" if args.tasks > 1 else "0"
+
+    # Early-stop threshold: --no-early-stop forces 0, else --early-stop-patience.
+    early_stop_patience = 0 if args.no_early_stop else max(0, args.early_stop_patience)
+
+    # BatchNorm mode: CLI --bn-mode, else SRM_AND_SBI_BN_MODE, else the legacy
+    # SRM_AND_SBI_NO_SYNC_BN=1 (-> per-rank), else global SyncBatchNorm.
+    bn_mode = (args.bn_mode or os.environ.get("SRM_AND_SBI_BN_MODE") or "").strip().lower()
+    bn_mode = {"local": "node-local", "node_local": "node-local", "per_rank": "per-rank"}.get(bn_mode, bn_mode)
+    if bn_mode not in ("sync", "node-local", "per-rank", "renorm"):
+        bn_mode = "per-rank" if os.environ.get("SRM_AND_SBI_NO_SYNC_BN") == "1" else "sync"
+
+    # Conv downsample mode: CLI --conv-downsample, else SRM_AND_SBI_CONV_DOWNSAMPLE,
+    # else "pool" (the original architecture). A checkpoint only loads into the
+    # mode that produced it, so Construction must use the same value.
+    conv_downsample = (args.conv_downsample
+                       or os.environ.get("SRM_AND_SBI_CONV_DOWNSAMPLE") or "").strip().lower()
+    conv_downsample = {"poolfirst": "pool-first", "pool_first": "pool-first",
+                       "strided": "stride"}.get(conv_downsample, conv_downsample)
+    if conv_downsample not in ("pool", "pool-first", "stride"):
+        conv_downsample = "pool"
+
+    # DataLoader workers per loader per rank: --num-workers, else
+    # SRM_AND_SBI_NUM_WORKERS, else None (profile budget, auto-divided).
+    num_workers_override = args.num_workers
+    if num_workers_override is None:
+        num_workers_override = _env_int("SRM_AND_SBI_NUM_WORKERS", None)
+
+    # GPU-side normalize (default ON): ship raw uint8 videos, cast+normalize on
+    # the GPU (bit-identical result). The argparse default is env-seeded.
+    gpu_normalize = args.gpu_normalize
+
+    # Output paths (computed before the banner that reports them).
+    timing_label = timing.label
+    checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
+    posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
+
+    # Reuse-model resolution. Precedence: --fresh (from scratch) > --resume-from
+    # (specific checkpoint) > --resurrect (require canonical) > default (reuse
+    # canonical checkpoint if present, else fresh).
+    force_fresh = args.fresh or _env_bool("SRM_AND_SBI_FRESH", False)
+    resume_from_arg = args.resume_from or os.environ.get("SRM_AND_SBI_RESUME_FROM")
+    if force_fresh:
+        resume_from, resume_reason = None, "--fresh (train from scratch)"
+    elif resume_from_arg:
+        resume_from, resume_reason = Path(resume_from_arg), f"--resume-from {resume_from_arg}"
+    elif args.resurrect:
+        resume_from, resume_reason = checkpoint_path, "--resurrect (canonical checkpoint)"
+    elif checkpoint_path.exists():
+        resume_from, resume_reason = checkpoint_path, "default reuse (existing checkpoint found)"
+    else:
+        resume_from, resume_reason = None, "from scratch (no existing checkpoint)"
+    # Fail loud if a resume source was explicitly requested but is missing (a
+    # default reuse only resolves to an existing file, so it never trips this).
+    if resume_from is not None and not resume_from.exists():
+        raise FileNotFoundError(
+            f"Requested to resume from {resume_from} but the file does not exist. "
+            "Pass --fresh to train from scratch, or point --resume-from at a valid checkpoint.")
+    # Warm-start LR (only meaningful when resuming): CLI, else env, else None.
+    fine_tune_lr = args.fine_tune_lr
+    if fine_tune_lr is None:
+        fine_tune_lr = _env_float("SRM_AND_SBI_FINE_TUNE_LR", None)
 
     print(div)
     print(f" {paths.project_alias} — Inference")
@@ -108,7 +211,18 @@ def main(args: argparse.Namespace) -> None:
     print(f"  --tasks              : {args.tasks}        (TRAIN-namespace tasks; gradient data)")
     print(f"  --test-tasks         : {args.test_tasks}        (TEST-namespace tasks; model selection, 0 = none)")
     print(f"  --seed               : {args.seed}")
-    print(f"  --resurrect          : {args.resurrect}")
+    print(f"  --autotune           : {args.autotune}     (MIOpen/cuDNN kernel auto-tuning; numerically identical)")
+    es_state = (f"{early_stop_patience} epoch(s) flat at LR floor" if early_stop_patience > 0 else "disabled")
+    print(f"  --early-stop-patience: {early_stop_patience}        ({es_state}; needs a TEST set)")
+    print(f"  reuse model          : {resume_reason}")
+    if resume_from is not None and fine_tune_lr is not None:
+        print(f"  --fine-tune-lr       : {fine_tune_lr:.2e}   (warm-start initial LR)")
+    print(f"  --bn-mode            : {bn_mode}     (BatchNorm sync strategy under DDP)")
+    print(f"  --conv-downsample    : {conv_downsample}     (block downsampling: pool | pool-first | stride)")
+    nw_state = (f"{num_workers_override}/loader/rank (override)" if num_workers_override is not None
+               else "profile budget (auto-divided)")
+    print(f"  --num-workers        : {nw_state}")
+    print(f"  --gpu-normalize      : {gpu_normalize}     (ship uint8; cast+normalize on GPU)")
     print(f"  --replay-loss        : {args.replay_loss}        (per-epoch TRAIN loss in eval mode, comparable to TEST; off = cheaper)")
     print(f"  --verbose            : {args.verbose}")
     print(f"  --show               : {args.show}")
@@ -119,11 +233,6 @@ def main(args: argparse.Namespace) -> None:
     print(f"  image size           : {geom.root_size_px} × {geom.root_size_px}")
     print(f"  channels             : {network_cfg.input_channels}             "
           f"(grayscale)")
-
-    timing_label = timing.label
-    checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
-    posterior_path = paths.posterior_path(data_bank_root, timing_label)
-    tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
 
     print("\nOutput destinations:")
     print(f"  data_bank_root  : {data_bank_root}")
@@ -212,8 +321,9 @@ def main(args: argparse.Namespace) -> None:
           f"temporal_target_frames={network_cfg.temporal_target_frames}) "
           f"+ TemporalTransformer(heads={network_cfg.attention_heads})")
     print("  estimator : MAF (z_score=structured, dropout=0.1, batch_norm=True)")
-    if args.resurrect:
-        print(f"  RESURRECT : will load checkpoint from {checkpoint_path}")
+    if resume_from is not None:
+        print(f"  REUSE     : will load model from {resume_from} and continue "
+              f"({resume_reason})")
 
     if args.verbose:
         print("\nDetailed training hyperparameters:")
@@ -278,6 +388,7 @@ def main(args: argparse.Namespace) -> None:
         use_temporal_attention=network_cfg.use_temporal_attention,
         attention_heads=network_cfg.attention_heads,
         temporal_target_frames=network_cfg.temporal_target_frames,
+        conv_downsample=conv_downsample,
         verbose=args.verbose,
     )
     embedding_net = torch.compile(embedding_net).to(device)
@@ -308,6 +419,9 @@ def main(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         test_tasks=args.test_tasks,
         test_loss_distribution=use_tld,
+        bn_mode=bn_mode,
+        num_workers_override=num_workers_override,
+        gpu_normalize=gpu_normalize,
     )
 
     if reporter.enabled:
@@ -402,9 +516,12 @@ def main(args: argparse.Namespace) -> None:
         checkpoint_path=checkpoint_path,
         train_sampler=training_setup["train_sampler"],
         epochs=args.epochs,
-        resurrect=args.resurrect,
+        resume_from=resume_from,
+        fine_tune_lr=fine_tune_lr,
         replay_loss=args.replay_loss,
         heartbeat_every=args.heartbeat,
+        early_stop_patience=early_stop_patience,
+        gpu_normalize=gpu_normalize,
         verbose=args.verbose,
         test_loss_distribution=use_tld,
         on_new_best=commit_new_best,
@@ -428,6 +545,8 @@ def main(args: argparse.Namespace) -> None:
     # Every rank reloaded the best-on-TEST estimator in train_loop, so rank 0's
     # copy is the selected model; only it writes the shared posterior file.
     if topo.is_main:
+        # Drop any (node-local) SyncBatchNorm process-group refs so the estimator pickles.
+        strip_syncbn_process_groups(training_setup["estimator"])
         prior_cpu = build_prior(device="cpu")
         prior_cpu, _, _ = process_prior(prior_cpu)
         posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
@@ -541,10 +660,72 @@ def parse_args(argv=None) -> argparse.Namespace:
              "reproducible run.",
     )
     parser.add_argument(
+        "--autotune", action=argparse.BooleanOptionalAction,
+        default=_env_bool("SRM_AND_SBI_AUTOTUNE", True),
+        help="MIOpen/cuDNN conv kernel auto-tuning (cudnn.benchmark); numerically "
+             "equivalent. Default on. Also SRM_AND_SBI_AUTOTUNE.",
+    )
+    parser.add_argument(
+        "--early-stop-patience", type=int,
+        default=_env_int("SRM_AND_SBI_EARLY_STOP_PATIENCE",
+                         PARAMETERS.inference.training.early_stop_patience),
+        help="Stop after N epochs without TEST-loss improvement once the LR has "
+             "bottomed out (final model unchanged). Needs a TEST set; 0 disables. "
+             "Also SRM_AND_SBI_EARLY_STOP_PATIENCE.",
+    )
+    parser.add_argument(
+        "--no-early-stop", action="store_true",
+        help="Disable early stopping (= --early-stop-patience 0); run the full "
+             "--epochs budget.",
+    )
+    parser.add_argument(
         "--resurrect", action="store_true",
-        help="Load the previously saved optimum-ANN checkpoint before training "
-             "and continue from those weights. Each --resurrect run improves on "
-             "the previous best.",
+        help="Require resuming from the canonical optimum-ANN checkpoint (error if "
+             "it is missing). Redundant with the default reuse behavior, kept for "
+             "backward compatibility / explicit intent.",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Train from scratch. By default a run reuses the canonical checkpoint "
+             "when present; this opts out. Also SRM_AND_SBI_FRESH=1.",
+    )
+    parser.add_argument(
+        "--resume-from", type=str, default=None, metavar="CKPT",
+        help="Fine-tune from a specific checkpoint .pth instead of the canonical "
+             "one. Also SRM_AND_SBI_RESUME_FROM.",
+    )
+    parser.add_argument(
+        "--fine-tune-lr", type=float, default=None, metavar="LR",
+        help="Warm-start initial LR when resuming (a smaller LR fine-tunes a "
+             "near-optimal model gently). Ignored from scratch. Also "
+             "SRM_AND_SBI_FINE_TUNE_LR.",
+    )
+    parser.add_argument(
+        "--gpu-normalize", action=argparse.BooleanOptionalAction,
+        default=_env_bool("SRM_AND_SBI_GPU_NORMALIZE", True),
+        help="Ship raw uint8 videos and cast+normalize on the GPU instead of the CPU "
+             "worker (bit-identical result). Default on; --no-gpu-normalize reverts "
+             "to CPU normalize. Also SRM_AND_SBI_GPU_NORMALIZE.",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=None, metavar="N",
+        help="DataLoader workers per loader per rank (0 = synchronous). Default: the "
+             "machine profile's budget, auto-divided across ranks and loaders. Also "
+             "SRM_AND_SBI_NUM_WORKERS.",
+    )
+    parser.add_argument(
+        "--bn-mode", type=str, default=None,
+        choices=["sync", "node-local", "per-rank", "renorm"],
+        help="BatchNorm sync strategy under DDP: sync (default, accuracy reference), "
+             "node-local, per-rank (fastest), renorm (comms-free BatchRenorm). All "
+             "keep batch statistics. Also SRM_AND_SBI_BN_MODE.",
+    )
+    parser.add_argument(
+        "--conv-downsample", type=str, default=None,
+        choices=["pool", "pool-first", "stride"],
+        help="How each conv block halves H and W: pool (default, the original), "
+             "pool-first (pool before BN/Mish), stride (strided conv, no MaxPool). "
+             "Checkpoints only load into the same mode. Also SRM_AND_SBI_CONV_DOWNSAMPLE.",
     )
     parser.add_argument(
         "--replay-loss", action="store_true",
