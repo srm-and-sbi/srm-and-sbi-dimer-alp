@@ -47,11 +47,13 @@ Arguments:
   `--chunk` is then ignored).
 - `--experiment-span-seconds` — recording length used only to locate the `.tif` (default
   `20`); the render length is read from the `.tif`'s own frame count.
-- `--display-norm` — color scaling for the comparison figure's frame panels: `autoscale`
-  (default; each displayed frame stretched to its own min/max, per-frame) or `percentile`
-  (a fixed whole-clip `[p0.5, p99.5]` window). The notebook uses the identical convention, so a
-  given frame renders the same in the static figure and the notebook. It does not change the
-  stored pixels.
+- `--display-norm` — color scaling for the comparison figure's frame panels: `full`
+  (default; a shared full-range `[min, max]` window over both the experimental and synthetic
+  pixels, so identical intensities map to identical colors and nothing is clipped), `autoscale`
+  (each displayed frame stretched to its own min/max, per-frame), or `percentile` (a fixed
+  whole-clip `[min, p99.99]` window). The notebook uses the identical convention, so a given
+  frame renders the same in the static figure and the notebook. It does not change the stored
+  pixels.
 - `--seed` — RNG seed for the simulation and render; each run otherwise draws a fresh motion
   realization (the check reads imaging appearance, not the specific track).
 
@@ -72,19 +74,23 @@ is not the same as one from a 10 s window, so both appear in the name.
 
 ## How to read the comparison figure
 
-Two columns, one per condition — **EXPERIMENTAL** (left) and **SYNTH** (right) — each showing a
-mid frame over its max projection, so a frame and its projection sit in the same column. The
-third column holds a shared **pixel-intensity histogram** (top) and a **provenance text box**
-(bottom) that lists the inferred imaging MAP theta (out-of-prior parameters flagged) and the
-nuisance RDS draw, both in absolute units.
+A 2×4 grid. Column 0 is **EXPERIMENTAL** and column 1 is **SYNTH**, each showing a mid frame
+over its max projection, so a frame and its projection sit in the same column. Column 2 holds
+the shared **pixel-intensity histograms** — log-y over the full range (top) and linear-y
+through ~p99.99 (bottom, essentially the whole range bar the top-0.01% hot-pixel sliver). Column 3 holds the syn/exp **ratio-per-quantile match plot**
+(top) over a **quantile table and provenance text box** (bottom); the provenance lists the
+inferred imaging MAP theta (out-of-prior parameters flagged) and the nuisance RDS draw, both in
+absolute units.
 
 - The **frame panels** show single-frame appearance — point-spread size, brightness, and
   per-frame noise. Read them for whether a synthetic frame looks like an experimental one.
 - The **max projections** summarize the whole clip; they differ by design, because the
   synthetic motion is a fresh draw, not the experimental track.
-- The **histogram** (log density, in ADU) is the quantitative comparison: a close overlap of
-  the experimental and synthetic pixel-intensity distributions is the main evidence that the imaging
-  model matches. Both series are the stored, non-negative frames.
+- The **histograms** (ADU) show the pixel-intensity distributions; a close overlap is the
+  evidence the imaging model matches. Both series are the stored, non-negative frames.
+- The **ratio-per-quantile plot** is the direct "do they match?" read — the synthetic/experimental
+  ratio across quantiles (min, p0.01, median, p90, p99, p99.9, p99.99, max), a flat line on 1.0
+  being a perfect match. It exposes tail mismatches the log histogram can hide.
 
 ## Viewing interactively — the notebook
 
@@ -95,15 +101,15 @@ machine, not just the one that rendered the clip. Step by step:
 1. **Get a clip.** Render one with the script above on the data machine, then copy its
    `*_Synthetic_Video.npz` to the machine where you will view it. The `.npz` is
    self-contained (experimental + synthetic + provenance), so any location works.
-2. **Launch Jupyter** in an environment that has `jupyter` and `ipywidgets` (a viewing
-   environment, not the render environment; for example, on the PC the `READY_MARS`
-   environment provides both). Run `jupyter lab` and open
+2. **Launch Jupyter** in any environment that has `jupyter` and `ipywidgets` (a viewing
+   environment, not the render environment). Run `jupyter lab` and open
    `notebooks/SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.ipynb`.
 3. **Run the cells top to bottom.** The first code cell imports the viewer; the second is
    the only one you normally edit.
 4. **Point it at your clip.** In the second code cell, set `CLIP_PATH` to the absolute path
-   of your `.npz`, and (optionally) set `NORM_MODE` to `autoscale` (each displayed frame to its
-   own min/max, per-frame) or `percentile` (a fixed whole-clip `[p0.5, p99.5]` window). Run the cell; it
+   of your `.npz`. `NORM_MODE` there defaults to `full` (a shared full-range `[min, max]` window
+   over both panels); optionally set it to `autoscale` (each displayed frame to its own min/max,
+   per-frame) or `percentile` (a fixed whole-clip `[min, p99.99]` window). Run the cell; it
    prints the frame count, frame rate, selection, and the display window.
 5. **Scrub and zoom.** Run the scrubber cell. Drag `frame` to step through the recording;
    use `center x`, `center y`, and `zoom` to zoom the same region-of-interest into both the
@@ -122,8 +128,7 @@ different clip, change `CLIP_PATH` and re-run.
   reaction-diffusion draw, so the max projections and any track-level feature will differ.
 - The stored synthetic is clipped to the non-negative range (a physical camera cannot record
   negative counts); the clip's negative-excursion count (`n_under`) is printed on every run.
-  See the read-noise note under DLI Imaging in `PROJECT_CONTEXT.md` for why the noise term is
-  kept as-is and what the clip removes.
+  See `REFERENCE_EMCCD_NOISE_MODEL.md` for the corrected noise model and what the clip removes.
 - If the MAP for a parameter lies outside the training prior, the run warns that it
   **extrapolates** there, so a poor match may reflect an out-of-prior estimate rather than
   the calibration itself.

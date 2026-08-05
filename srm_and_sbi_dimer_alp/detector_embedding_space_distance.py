@@ -1,15 +1,15 @@
-"""Real-versus-synthetic domain distance in the learned embedding space.
+"""Experimental-versus-synthetic domain distance in the learned embedding space.
 
-Part of the Detector calibration workflow (see the quantitative real-versus-synthetic
-distance in DETECTOR_WORKFLOW.md). Quantifies how far real microscopy recordings sit
-from imaging-parameter-matched synthetic videos, measured in the trained
+Part of the Detector calibration workflow (see the quantitative experimental-versus-synthetic
+distance in DETECTOR_WORKFLOW.md). Quantifies how far experimental recordings sit
+from synthetic videos (the held-out EVAL set), measured in the trained
 ``Complex3DCNN`` embedding space, via two complementary two-sample statistics:
 
   - Maximum Mean Discrepancy (MMD; Gretton et al. 2012) -- a kernel two-sample
     distance with an RBF kernel (median-heuristic bandwidth) and a permutation
     p-value. Larger means a bigger gap.
   - Classifier Two-Sample Test (C2ST; Lopez-Paz & Oquab 2017) -- the accuracy of a
-    classifier trained to tell real from synthetic. ~0.5 means indistinguishable (a
+    classifier trained to tell experimental from synthetic. ~0.5 means indistinguishable (a
     small gap); ->1.0 means easily separable (a large gap).
 
 Both resample at the CELL level: video chunks within one recording are correlated,
@@ -64,7 +64,7 @@ def embed_videos(posterior, videos, device=None, *, batch_size=16,
         if expected_frames is not None and arr.shape[1] != expected_frames:
             raise ValueError(
                 f"video frame axis {arr.shape[1]} != expected_frames {expected_frames}; "
-                f"real and synthetic videos must be diced to the estimator's window.")
+                f"experimental and synthetic videos must be diced to the estimator's window.")
         x = torch.as_tensor(arr, dtype=torch.float32, device=dev)
         with torch.no_grad():
             emb = flow.embedding_net(x)                                   # [b, D] CLS embedding
@@ -81,9 +81,9 @@ def _blocks(n_x, n_y, cells_x, cells_y):
     """Return a per-sample integer block id for the pooled [X; Y] stack.
 
     A sample with a cell label shares a block with the other samples of that cell
-    (real chunks within a recording); a sample with no label becomes its own block
-    (independent -- the correct treatment for synthetic videos). Real and synthetic
-    cell-id namespaces are kept disjoint so a real cell never merges with a synthetic
+    (experimental chunks within a recording); a sample with no label becomes its own block
+    (independent -- the correct treatment for synthetic videos). Experimental and synthetic
+    cell-id namespaces are kept disjoint so an experimental cell never merges with a synthetic
     one.
     """
     blocks = np.empty(n_x + n_y, dtype=object)
@@ -221,6 +221,7 @@ def c2st(X, Y, *, classifier="mlp", n_folds=5, standardize=True, seed=None,
                                    random_state=seed).split(Z, y)
 
     accs = []
+    oof = np.full(len(y), np.nan)   # out-of-fold P(class 1 = Y) per sample, for the score figure
     for tr, te in splitter:
         Ztr, Zte = Z[tr], Z[te]
         if standardize:
@@ -228,6 +229,10 @@ def c2st(X, Y, *, classifier="mlp", n_folds=5, standardize=True, seed=None,
             Ztr, Zte = sc.transform(Ztr), sc.transform(Zte)
         clf = _make().fit(Ztr, y[tr])
         accs.append(float(np.mean(clf.predict(Zte) == y[te])))
+        # Same classifier as the accuracy, so the score histogram matches the statistic. Each sample
+        # sits in exactly one test fold, so oof is filled once per sample.
+        oof[te] = (clf.predict_proba(Zte)[:, 1] if hasattr(clf, "predict_proba")
+                   else clf.predict(Zte).astype(float))
     accs = np.array(accs)
     acc = float(accs.mean())
     sd = float(accs.std(ddof=1)) if len(accs) > 1 else 0.0
@@ -239,40 +244,41 @@ def c2st(X, Y, *, classifier="mlp", n_folds=5, standardize=True, seed=None,
          if len(accs) >= 2 else float("nan"))
     return {"accuracy": acc, "accuracy_std": sd, "per_fold": accs.tolist(),
             "ci95": (acc - half, acc + half), "null": 0.5, "p_value": p,
-            "classifier": classifier, "n_folds": int(n_splits), "n": n, "m": m}
+            "oof_score": oof.tolist(), "classifier": classifier, "n_folds": int(n_splits),
+            "n": n, "m": m}
 
 
 # =============================================================================
 # Orchestrator + report table
 # =============================================================================
 
-def compute_distance(posterior, real_videos, synth_videos, *, device=None,
-                     batch_size=16, expected_frames=None, real_cells=None,
+def compute_distance(posterior, experimental_videos, synth_videos, *, device=None,
+                     batch_size=16, expected_frames=None, experimental_cells=None,
                      synth_cells=None, mmd_kwargs=None, c2st_kwargs=None, seed=None):
     """Embed both sets and run MMD + C2ST; returns a combined dict incl. the embeddings.
 
-    ``real_cells`` is REQUIRED: the real recordings are cell-correlated (chunks within a
+    ``experimental_cells`` is REQUIRED: the experimental recordings are cell-correlated (chunks within a
     recording are not independent), so the cell-level resampling needs per-video cell
     labels; omitting them would silently degrade to an iid (anti-conservative) test.
     ``synth_cells`` may be None — synthetic videos are independent draws (each its own
     block).
     """
-    if real_cells is None:
+    if experimental_cells is None:
         raise ValueError(
-            "compute_distance requires real_cells (one cell/recording label per real video): "
-            "real chunks within a recording are correlated, so the cell-level resampling that "
+            "compute_distance requires experimental_cells (one cell/recording label per experimental video): "
+            "experimental chunks within a recording are correlated, so the cell-level resampling that "
             "§8 specifies needs them; omitting them would silently treat correlated chunks as "
-            "independent. Pass real_cells=<per-video cell id>. (synth_cells may be None.)")
-    er = embed_videos(posterior, real_videos, device=device, batch_size=batch_size,
+            "independent. Pass experimental_cells=<per-video cell id>. (synth_cells may be None.)")
+    er = embed_videos(posterior, experimental_videos, device=device, batch_size=batch_size,
                       expected_frames=expected_frames)
     es = embed_videos(posterior, synth_videos, device=device, batch_size=batch_size,
                       expected_frames=expected_frames)
-    mmd = mmd_rbf(er, es, cells_x=real_cells, cells_y=synth_cells, seed=seed,
+    mmd = mmd_rbf(er, es, cells_x=experimental_cells, cells_y=synth_cells, seed=seed,
                   **(mmd_kwargs or {}))
-    c = c2st(er, es, cells_x=real_cells, cells_y=synth_cells, seed=seed,
+    c = c2st(er, es, cells_x=experimental_cells, cells_y=synth_cells, seed=seed,
              **(c2st_kwargs or {}))
-    return {"mmd": mmd, "c2st": c, "n_real": len(er), "n_synth": len(es),
-            "embed_dim": int(er.shape[1]), "emb_real": er, "emb_synth": es}
+    return {"mmd": mmd, "c2st": c, "n_experimental": len(er), "n_synth": len(es),
+            "embed_dim": int(er.shape[1]), "emb_experimental": er, "emb_synth": es}
 
 
 def distance_table(result):

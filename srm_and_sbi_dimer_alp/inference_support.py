@@ -54,6 +54,14 @@ from .io import load_data
 from .parameterization import PARAMETERS
 
 
+# Cap on DataLoader workers PER GPU when the budget is auto-derived (machine.num_workers <= 0,
+# i.e. "use all cores"). Each DDP rank owns one GPU and keeps its loaders' workers alive
+# (persistent_workers), so per-GPU workers = num_workers * n_live_loaders. Without this bound a
+# very wide node (e.g. a 288-core GH200) auto-spawns ~cores/num_gpus workers per GPU and exhausts
+# GPU memory. An explicit machine.num_workers > 0 is honored verbatim (NOT capped).
+MAX_WORKERS_PER_GPU = 8
+
+
 # =============================================================================
 # Dataset
 # =============================================================================
@@ -394,6 +402,34 @@ def build_datasets(train_tasks: int,
     return train_dataset, test_dataset
 
 
+def build_optimizer_scheduler(estimator: nn.Module, learning_rate: float):
+    """Build the AdamW optimizer + ReduceLROnPlateau scheduler for training.
+
+    Single source of truth for the optimizer/scheduler pair, shared by
+    `setup_training` (initial build) and `train_loop`'s warm restart (which rebuilds
+    a fresh pair at the decayed peak LR), so the two paths cannot drift apart.
+
+    Args:
+        estimator: The underlying estimator whose parameters are optimized.
+        learning_rate: The initial (peak) learning rate.
+
+    Returns:
+        (optimizer, scheduler).
+    """
+    training_cfg = PARAMETERS.inference.training
+    optimizer = optim.AdamW(list(estimator.parameters()), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer=optimizer,
+        mode="min",
+        factor=training_cfg.scheduler_factor,
+        patience=training_cfg.scheduler_patience,
+        threshold=training_cfg.learning_rate_minimum * training_cfg.scheduler_tolerance_factor,
+        threshold_mode="abs",
+        min_lr=training_cfg.learning_rate_minimum,
+    )
+    return optimizer, scheduler
+
+
 def setup_training(estimator: nn.Module,
                    train_tasks: int,
                    data_bank_root: Path,
@@ -401,6 +437,7 @@ def setup_training(estimator: nn.Module,
                    compress: bool = True,
                    batch_size: Optional[int] = None,
                    learning_rate: Optional[float] = None,
+                   num_workers_override: Optional[int] = None,
                    test_tasks: int = 0,
                    test_loss_distribution: bool = False,
                    paths=None) -> dict:
@@ -418,6 +455,9 @@ def setup_training(estimator: nn.Module,
             Defaults to `PARAMETERS.inference.training.batch_size` (32).
         learning_rate: Optional override for the AdamW learning rate.
             Defaults to `lr_min * lr_max_factor` from `PARAMETERS.inference.training`.
+        num_workers_override: Optional per-run override for the DataLoader worker
+            TOTAL budget (beats the machine profile's num_workers; None -> the profile
+            value, or auto = all cores capped at MAX_WORKERS_PER_GPU/GPU when that is <= 0).
         test_tasks: Number of TEST-namespace task files for model selection.
             0 → no selection set; `val_loader` is None and the train loop
             keeps the last-epoch checkpoint.
@@ -479,7 +519,8 @@ def setup_training(estimator: nn.Module,
     # count is num_workers x world_size x n_live_loaders. Treat the configured value
     # (or the CPU core count, when <= 0) as the node-wide TOTAL worker budget and
     # divide it across ranks and concurrently-persistent loaders, so the product stays
-    # ~1 worker per core regardless of how many GPUs are allocated. This GENERALIZES
+    # ~1 worker per core regardless of how many GPUs are allocated (the auto/cores path is
+    # additionally capped at MAX_WORKERS_PER_GPU per GPU -- see the branch below). This GENERALIZES
     # the old single-GPU `cores // 2` default, which silently multiplied to
     # world_size x n_live_loaders x that under DDP and exhausted host RAM at production
     # scale (4 ranks x 16 x 2 = 128 loader processes > 480 GB). At world_size == 1 with
@@ -489,9 +530,26 @@ def setup_training(estimator: nn.Module,
     # the task/cell count). Eval/experiment build no num_workers loaders, so this
     # budget is inference-only.
     cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-    worker_budget = PARAMETERS.machine.num_workers if PARAMETERS.machine.num_workers > 0 else cores
     n_live_loaders = 1 + (1 if test_dataset is not None else 0)   # train (+ persistent val)
-    num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
+    cap_note = ""
+    # Per-run override (num_workers_override, e.g. --num-workers) beats the profile; both are an
+    # explicit node-wide TOTAL budget honored verbatim (uncapped). Else fall back to auto (below).
+    explicit_budget = (num_workers_override if (num_workers_override and num_workers_override > 0)
+                       else PARAMETERS.machine.num_workers)
+    if explicit_budget > 0:
+        worker_budget = explicit_budget
+        num_workers = max(1, worker_budget // (topo.world_size * n_live_loaders))
+        if num_workers_override and num_workers_override > 0:
+            cap_note = " [per-run override]"
+    else:
+        # Auto (<= 0): ~1 worker/core, but capped at MAX_WORKERS_PER_GPU per GPU so a very wide node
+        # (e.g. a 288-core GH200 -> 4 GPUs x 72) can't over-spawn and exhaust GPU memory. Per-GPU
+        # workers = num_workers x n_live_loaders (each rank owns one GPU).
+        worker_budget = cores
+        auto_nw = max(1, worker_budget // (topo.world_size * n_live_loaders))
+        num_workers = min(auto_nw, max(1, MAX_WORKERS_PER_GPU // n_live_loaders))
+        if num_workers < auto_nw:
+            cap_note = f" [auto-capped to <={MAX_WORKERS_PER_GPU}/GPU]"
     # persistent_workers keeps the worker pool alive across epochs (avoids the
     # per-epoch re-spawn + stack re-import that otherwise dominates each epoch).
     persistent = num_workers > 0
@@ -499,7 +557,7 @@ def setup_training(estimator: nn.Module,
         print(f"  DataLoader: num_workers={num_workers}/loader/rank "
               f"(budget={worker_budget} / {topo.world_size} rank(s) / {n_live_loaders} live loader(s) "
               f"-> {num_workers * topo.world_size * n_live_loaders} live workers; "
-              f"persistent_workers={persistent})", flush=True)
+              f"persistent_workers={persistent}){cap_note}", flush=True)
 
     # Distributed -> shard TRAIN across ranks with a DistributedSampler (it owns
     # the shuffle, so `shuffle` is not passed); single worker -> shuffle directly.
@@ -534,19 +592,10 @@ def setup_training(estimator: nn.Module,
                                 sampler=val_sampler, num_workers=num_workers,
                                 pin_memory=True, persistent_workers=persistent)
 
-    # Optimizer on the underlying estimator's parameters (DDP wraps the same
-    # tensors and all-reduces their gradients in backward); created after the
-    # SyncBatchNorm conversion so it sees the converted parameters.
-    optimizer = optim.AdamW(list(estimator.parameters()), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer=optimizer,
-        mode="min",
-        factor=training_cfg.scheduler_factor,
-        patience=training_cfg.scheduler_patience,
-        threshold=training_cfg.learning_rate_minimum * training_cfg.scheduler_tolerance_factor,
-        threshold_mode="abs",
-        min_lr=training_cfg.learning_rate_minimum,
-    )
+    # Optimizer + scheduler on the underlying estimator's parameters (DDP wraps the
+    # same tensors and all-reduces their gradients in backward); built here, after the
+    # SyncBatchNorm conversion, so they see the converted parameters.
+    optimizer, scheduler = build_optimizer_scheduler(estimator, learning_rate)
 
     return {
         "estimator": estimator,
@@ -733,7 +782,7 @@ def train_loop(estimator: nn.Module,
                verbose: bool = False,
                test_loss_distribution: bool = False,
                on_new_best: Optional[Callable] = None) -> tuple:
-    """Run the training loop with optimum-checkpoint tracking and optional RESURRECT.
+    """Run the training loop with optimum-checkpoint tracking, optional RESURRECT, and in-run warm restarts.
 
     Args:
         estimator: The underlying posterior estimator -- used for checkpointing,
@@ -756,6 +805,14 @@ def train_loop(estimator: nn.Module,
         heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
             only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
         verbose: If True, print per-batch progress.
+
+    Warm restart (config `warm_restart_dwell`): once the LR has decayed to the
+    scheduler floor and held there `warm_restart_dwell` epochs without a new best,
+    reload the best checkpoint, rebuild a fresh optimizer + scheduler at the previous
+    peak times `scheduler_factor` (a decaying sawtooth), and continue -- an in-run
+    equivalent of a `--resurrect` cycle, without requeuing. The peak decays each
+    restart and self-terminates once it would reach the floor. `warm_restart_dwell ==
+    0` disables it; `--resurrect` is unaffected (a resurrected run restarts fresh).
 
     Distributed: TRAIN and TEST are both sharded across ranks (DistributedSampler)
     and their per-rank mean losses are all-reduced, so every rank's scheduler +
@@ -838,6 +895,15 @@ def train_loop(estimator: nn.Module,
             flush=True,
         )
 
+    # ---- Warm-restart state (in-run resurrect when the LR bottoms out) -------
+    # Once the LR decays to the floor and dwells there `warm_restart_dwell` epochs
+    # without a new best, reload the best checkpoint and restart the LR at the previous
+    # peak * the plateau factor (a decaying sawtooth) -- an in-run --resurrect cycle
+    # without requeuing. Disabled when warm_restart_dwell == 0.
+    warm_restart_dwell = PARAMETERS.inference.training.warm_restart_dwell
+    warm_restart_peak = optimizer.param_groups[0]["lr"]  # current restart peak; starts at the initial LR
+    epochs_at_min_lr = 0                                  # consecutive floor epochs without a new best
+
     loop_start = time.time()
     for epoch in range(epochs):
         epoch_start = time.time()
@@ -903,8 +969,10 @@ def train_loop(estimator: nn.Module,
         scheduler.step(epoch_test if has_val else epoch_train)
 
         # ---- Checkpoint (rank 0 only; the selection metric is identical on all ranks) ----
+        new_best_this_epoch = False
         if has_val:
             if epoch_test < optimum_loss_test:
+                new_best_this_epoch = True
                 optimum_loss_test = epoch_test
                 if is_main:
                     torch.save(estimator.state_dict(), str(checkpoint_path))
@@ -934,6 +1002,37 @@ def train_loop(estimator: nn.Module,
                 f"ETA={time.strftime('%H:%M:%S', time.gmtime(eta))}",
                 flush=True,
             )
+
+        # ---- Warm restart trigger (in-run resurrect at the LR floor) --------
+        if warm_restart_dwell > 0:
+            # Count epochs sitting at the floor WITHOUT a new best; a new best (or an
+            # LR still above the floor) resets the tally, so we only restart once the
+            # floor has genuinely stalled.
+            at_floor = optimizer.param_groups[0]["lr"] <= scheduler.min_lrs[0]
+            epochs_at_min_lr = (epochs_at_min_lr + 1
+                                if (at_floor and not new_best_this_epoch) else 0)
+            next_peak = warm_restart_peak * scheduler.factor
+            # Fire once the floor has stalled long enough, and only while the decayed
+            # peak stays above the floor (else the restart is a no-op -- the sawtooth
+            # has annealed to nothing and we just ride the floor to the end).
+            if epochs_at_min_lr >= warm_restart_dwell and next_peak > scheduler.min_lrs[0]:
+                warm_restart_peak = next_peak
+                # Reload best-so-far weights (rank 0 wrote them on the last improvement;
+                # a barrier guards the multi-rank read), then rebuild a fresh optimizer +
+                # scheduler at the decayed peak via the shared builder -- identical to a
+                # --resurrect cycle (fresh AdamW + ReduceLROnPlateau), without requeuing.
+                if has_val:
+                    if distributed:
+                        dist.barrier()
+                    estimator.load_state_dict(
+                        torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
+                optimizer, scheduler = build_optimizer_scheduler(estimator, warm_restart_peak)
+                epochs_at_min_lr = 0
+                if is_main:
+                    print(f"WARM RESTART: LR held at the floor for {warm_restart_dwell} "
+                          f"epoch(s) without improving; reloaded best (test loss "
+                          f"{optimum_loss_test:.5f}) and restarted LR at {warm_restart_peak:.2e}.",
+                          flush=True)
 
     # ---- Final model ------------------------------------------------------
     if has_val:

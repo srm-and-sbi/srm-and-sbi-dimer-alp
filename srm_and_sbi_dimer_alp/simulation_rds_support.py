@@ -41,8 +41,6 @@ import readdy
 
 from .parameterization import (
     PARAMETERS,
-    PARAMETERIZATION_RAW,
-    PARAMETER_RAW_FIND,
     parameter_find,
 )
 
@@ -126,7 +124,11 @@ def build_system(theta: np.ndarray,
     diffusion_rates[1] = theta_diffusion[1] * theta_diffusion[0]  # D_B = R_B * D_A
     diffusion_rates[2] = theta_diffusion[2] * theta_diffusion[0]  # D_C = R_C * D_A
 
-    capture_radius = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["capture_radius"]]["VALUE"]  # nm
+    # Smoluchowski reaction radius = the center-to-center contact distance of two
+    # monomers (2 * monomer_radius = 1 * diameter), derived from the physical
+    # particle diameter so it tracks the per-dataset geometry. particle_diameter_nm
+    # is the single physical input; the table's capture_radius entry is display-only.
+    capture_radius = PARAMETERS.simulation.stem.particle_diameter_nm  # nm
 
     reaction_keys = ("relative_rate_dimerization", "rate_dissociation",
                      "rate_immobility", "rate_mobility")

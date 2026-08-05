@@ -28,6 +28,10 @@ from .simulation_rds_support import build_simulation, build_system  # reused unc
 def draw_nuisance_physical(n=None, device: str = "cpu") -> np.ndarray:
     """Draw RDS-nuisance sample(s) from the Detector nuisance prior, in physical space.
 
+    The RDS nuisance is a transient generation-time ``BoxUniform`` (``build_nuisance_prior``)
+    drawn afresh here per call -- not a persisted object, and distinct from the imaging-only
+    ``NuisanceDLI`` artifact; only the drawn values persist, as the ``Nuisance_RDS_Theta_Set``.
+
     Returns shape ``(6,)`` for ``n=None`` or ``(n, 6)`` for a batch, ordered as
     ``detector_parameterization.DETECTOR_NUISANCE`` (three counts + three
     diffusion coefficients). Every nuisance row is log10 (``detector_parameterization`` enforces this at

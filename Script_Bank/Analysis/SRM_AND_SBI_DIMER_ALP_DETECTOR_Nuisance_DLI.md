@@ -1,183 +1,197 @@
 # Nuisance_DLI construction — usage and interpretation
 
-Companion to `SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py`. The script turns the
-Detector's calibrated imaging posterior into the pooled `Nuisance_DLI` artifact through a
-person-in-the-loop, two-mode workflow: it first shows the calibrated imaging posterior and
-emits a value-based specification pre-filled with suggestions, then — after the person edits
-that specification — validates it and builds the samplable artifact. This note explains how
-to run each mode and how to read its outputs, so the construction can be used and understood
-without reverse-engineering the code.
+Companion to `SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py`. The Detector calibrates the imaging
+model on real recordings; this analysis turns that calibration into the `Nuisance_DLI` — the
+samplable imaging distribution the production run draws from when it marginalizes the imaging block.
+This note explains what the step builds, how to run it, and how to choose among its options, so the
+construction can be used and understood without reading the code.
 
-This is a post-hoc, user-driven analysis step, not one of the canonical pipeline stages. It
-lives in `Script_Bank/Analysis`, is never wired into the stage dispatcher, and is purely
-additive: it imports the core modules (`detector_nuisance_dli`, `detector_parameterization`)
-and reads the completed Detector Experiment outputs, modifying nothing. It is the required
-first step before any `Nuisance_DLI` is used downstream — see "Constructing the `Nuisance_DLI`
-(the analysis step)" in `DETECTOR_WORKFLOW.md` (§7). Downstream consumers reach the artifact
-only through the module's validating gate (`require_nuisance_dli`), which fails loudly and
-points back to this analysis when the finalized specification is absent, malformed, or carries
-a value outside the imaging prior box.
+This is a post-hoc, user-driven analysis step, not one of the canonical pipeline stages. It lives in
+`Script_Bank/Analysis`, is never wired into the stage dispatcher, and is **self-contained**: it loads
+the trained detector estimator, reads the real recordings, and runs the estimator itself. It does not
+depend on the Detector Experiment stage's output — running the estimator here lets the step own the
+chunk windowing. Because it runs the estimator, both of its modes are a GPU step.
 
-## What it does
+## What it builds
 
-The Detector Experiment stage estimates the imaging parameters (camera, point-spread,
-brightness, flicker) of each real recording by maximum a posteriori (MAP), producing one MAP
-vector per analysis window. This script consumes that pooled set of per-window MAP estimates
-and helps a person decide how the calibration should feed production, expressed in the
-value-based vocabulary shared with the Detector parameter table (`DETECTOR_WORKFLOW.md` §5):
-each imaging parameter is assigned a role — **fixed**, **uniform**, **posterior**, or
-**samples** — and the assembled block is built into a single pooled `Nuisance` object over the
-imaging domain. The `Nuisance_DLI` cannot be declared a priori because its content *is* the
-calibration result; the analysis therefore suggests numbers, and the person decides the
-ultimate values.
+The trained detector estimator is a **required** prerequisite: there is no way to declare a
+`Nuisance_DLI` a priori, because its content *is* the calibration result. The step reads every
+experimental recording, cuts each into model-length windows, draws the posterior conditioned on each
+window, and pools those draws across every window of every recording into the **posterior sample
+pool**.
 
-The script runs in one of two modes.
+The pool is a *mixture*, and that is the key modeling point. The real recordings genuinely differ in
+their imaging conditions, so the quantity we want is the *distribution of imaging parameters across
+the recordings* — not a single posterior conditioned on all of them at once. Conditioning on multiple
+observations jointly (an amortized posterior's iid mode) would assume they share one parameter vector,
+which would collapse the across-recording spread that is precisely the nuisance we are after. Pooling
+the per-window posteriors is therefore not a workaround; it is the correct representation. Being a
+mixture, the pool is *empirical* — a cloud of sample vectors, not a closed-form density.
 
-**Emit-template mode (`--emit-template`, the default).** It reads the completed Detector
-Experiment MAP output, summarizes the pooled per-window MAP estimates per parameter, prints
-that summary against the imaging prior box, and emits a value-based specification template
-(`.toml`) pre-filled with those numbers as suggestions. It also writes the pooled per-window
-MAP vector to a separate `.npz` as a candidate source for the `samples` form. The person then
-edits the template — setting each parameter's role and its final values.
+One user choice, `posterior_sample_pool_choice`, decides how that pool becomes the samplable artifact:
 
-**Build mode (`--build`).** It reads the person-edited specification, fully validates it (both
-structure and the prior-box constraint, via `detector_nuisance_dli.load_spec`), builds the
-pooled `Nuisance_DLI`, and persists the samplable artifact. The **posterior** form is not
-buildable in this step: materializing it requires a trained Detector imaging estimator
-conditioned on the real recordings, so a specification with `form = "posterior"` is accepted
-as valid but raises a clear `NotImplementedError` at build, directing the person to the
-`samples`, `fixed`, or `uniform` forms meanwhile.
+| choice | what it is | cross-parameter correlations |
+|---|---|---|
+| **`raw`** (default) | resample the pool per whole vector | **preserved exactly** |
+| **`map_estimate_pool`** | resample the pooled per-window MAP (best-fit) estimates per whole vector | preserved (point estimates only) |
+| **`gaussian`** | a full-covariance multivariate Gaussian fit to the pool | linear only (via the covariance) |
+| **`box`** | a per-parameter uniform over quantiles of the pool | none (independent per dimension) |
+| **`box_user`** | a per-parameter uniform over user-set ranges | none |
+
+**Why `raw` is the faithful default.** Each entry in the pool is a complete parameter vector whose
+components were drawn jointly, so resampling *whole vectors* preserves the joint structure exactly —
+including the degeneracies the calibration constrains. The dominant one in this model is concrete: the
+videos identify essentially only the ratio `γ = g/C` of the EM gain `g` (`kappa_g`) to the
+electrons-per-ADU conversion `C` (`kappa_c`), so `g` and `C` ride a tight ridge in the posterior.
+Because θ is in log₁₀, that ridge is a straight line (`log g − log C ≈ const`). Sampling the two
+parameters independently — as any per-dimension representation does — would pair a gain from one draw
+with a conversion from another and break the very `γ` the data pins down, injecting physically
+impossible detectors into the training set. `raw` never does this; it only ever emits vectors that
+actually occurred.
+
+**Why the other forms are lossy, in order.** `gaussian` fits a single tilted ellipsoid to the pool: it
+keeps the *linear* correlations (the `g/C` ridge survives in the covariance's off-diagonal) but cannot
+represent multimodality or a curved ridge, and it smooths the cloud into one unimodal blob. `box` and
+`box_user` are per-parameter uniforms, so they discard all correlation — they sample box corners the
+joint posterior never visits. The fidelity order is thus `raw` (exact) → `gaussian` (linear only) →
+`box`/`box_user` (none). The compensating benefits are compactness (a Gaussian is `mean` + covariance;
+a box is `[low, high]`), smoothness (a genuine continuous density rather than a resampled cloud), and,
+for the boxes, hard bounds.
+
+**`pool_mode`** (`bounded` by default, or `unrestricted`) is identical to the convention used by the
+Detector Evaluation and Experiment stages: `bounded` rejection-samples the pool within the imaging
+prior box; `unrestricted` takes the raw normalizing-flow draws, whose mass may lie outside it. It
+governs how the pool is drawn, so it shapes `raw`, `gaussian`, and `box` (and the MAP pool). The
+calibration-faithful forms (`raw`, `map_estimate_pool`, `gaussian`) are then **not clipped** — under
+`unrestricted` they can legitimately place mass outside the prior box, matching Evaluation and
+Experiment. Only `box`/`box_user` are constrained to the prior box, clamped at build.
+
+**The range rule.** A user supplies per-parameter ranges only for `box_user`. `box` derives its ranges
+from pool quantiles (the 5th/95th percentiles by default) clamped to the prior box, and
+`raw`/`map_estimate_pool`/`gaussian` take no range at all. So the spec asks for per-parameter ranges if
+and only if the choice is `box_user`.
 
 ## How to run it
 
-Run on a machine that holds the Detector Experiment MAP database, with the project package
-installed and `MACHINE_PROFILE` set so the machine profile resolves the data-bank paths.
-Preview either mode first with `--dry-run`, which resolves the input and output paths and
-reports what would be read or written without computing:
+Preview either mode first with `--dry-run`, which resolves the input and output paths and reports what
+would be read or written without loading the estimator or computing.
 
     MACHINE_PROFILE=<profile> python \
       Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py \
-      --total-time-seconds 2.0 --emit-template [--dry-run]
+      --total-time-seconds 2.0 --experiment-span-seconds 20 --emit-template [--pool-mode unrestricted] [--dry-run]
 
-    (edit the emitted *_Nuisance_DLI_Spec.toml: set each parameter's role and final values)
+    (edit the emitted *_Nuisance_DLI_Spec.toml: set posterior_sample_pool_choice (and pool_mode,
+     pre-filled from --pool-mode); for box_user, also set the [imaging.<KEY>] ranges)
 
     MACHINE_PROFILE=<profile> python \
       Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py \
-      --total-time-seconds 2.0 --build [--dry-run]
+      --total-time-seconds 2.0 --experiment-span-seconds 20 --build [--dry-run]
 
 Arguments:
 
-- `--total-time-seconds` (required) — the recording duration that sets the `timing_label` (for
-  example `2.0` → `2S_50FPS`). It locates the Detector-namespaced Experiment output and names
-  all specification and artifact files; it does not itself trigger any simulation.
-- `--emit-template` / `--build` — mutually exclusive mode selectors; `--emit-template` is the
-  default when neither is given.
-- `--pool-mode` — `bounded` (default) or `unrestricted`. It governs only the `posterior`
-  draw form and mirrors the pooling knob used by the Detector Experiment and Evaluation
-  stages (`bounded` = rejection sampling within the prior box; `unrestricted` = raw-flow draws
-  that may fall outside the box and are then clipped). It has no effect on the `fixed`,
-  `uniform`, or `samples` forms.
-- `--dry-run` — resolve the paths and report what would be read and written; write nothing and
-  compute nothing.
+- `--total-time-seconds` (required) — the model window / recording duration that sets the `timing_label`
+  (for example `2.0` → `2S_50FPS`), used to locate the estimator and name the outputs. It is the same
+  timing knob every pipeline stage takes; the label is always derived from it, never set by hand.
+- `--experiment-span-seconds` — the duration of the real recordings to read (the files are named
+  `Experiment_<KIND>_Cell_<n>_<span>S_RAW.tif`); default `20`.
+- `--kinds` — comma-separated recording kinds to pool (default `ALP,BET`). The construction always pools
+  across kinds; a by-kind split is only ever a diagnostic, never the constructed artifact, because the
+  imaging is a property of the microscope, not the biological condition.
+- `--chunk-step-seconds` — the sliding-window step; default is the model window (non-overlapping
+  chunks). A smaller step yields more, overlapping chunks per recording.
+- `--pool-mode` (`bounded` default, or `unrestricted`) — an emit-only knob: the mode the posterior pool
+  is drawn under, written into the emitted spec as its `pool_mode` default so the finalized spec records
+  how emit sampled. `--build` reads `pool_mode` from the spec, not this flag. It matches the `pool_mode`
+  vocabulary of the Evaluation and Experiment stages. Use `unrestricted` when the posterior sits largely
+  outside the prior box, where bounded rejection barely accepts.
+- `--n-per-chunk` — posterior draws per chunk, both modes (default: the evaluation config's
+  `posterior_samples`).
+- `--repool` — force recomputing the pool on the GPU even when a fresh cache exists (see Caching).
+- `--max-cells` — cap the cells per kind (0 = all).
+- `--dry-run` — resolve the paths and report what would be read and written; load nothing, compute
+  nothing.
 
-Input (both modes read from the completed Detector Experiment stage; here and in Outputs,
-`<alias>` is the Detector-namespaced project alias `SRM_AND_SBI_DIMER_ALP_DETECTOR`):
+## Caching
 
-- `<data_bank>/<posit>/<alias>_<timing_label>_MAP_Experiment/<same-name>.npz`,
-  from which the `inferred_log10` array (the pooled per-window MAP estimates, in log10) is
-  read. If this output is absent, empty, or carries a different number of imaging columns than
-  the Detector parameterization declares, the script raises a precise error directing the
-  person to run (or re-run) the Detector Experiment stage first.
+The pool — the posterior draws over every chunk — is the GPU cost, and it is cached so exploring
+choices is cheap. `--emit-template` computes the pool once and caches it as
+`<alias>_<timing_label>_Nuisance_DLI_<Kind>Pool.npz`; `--build` then reuses that cache (no GPU) to apply
+the chosen representation. The cache is keyed on the build inputs (kinds, span, step, draws per chunk,
+`pool_mode`, cell cap) and the estimator's weight checksum, so it is reused only when those are unchanged
+and recomputed automatically when a different estimator is swapped in.
+
+`raw`, `gaussian`, and `box` all draw from the one posterior-sample pool, so switching among them costs
+nothing beyond re-applying the representation; `map_estimate_pool` uses a separate MAP pool (its own GPU
+pass); `box_user` needs no pool at all. Pass `--repool` to force a recompute even when a fresh cache
+exists.
 
 ## Outputs
 
-All files are written to the Detector-namespaced Posit subdirectory under the data bank.
+Written to the Detector-namespaced `Posit/` subdirectory under the data bank (here `<alias>` is the
+Detector-namespaced project alias `SRM_AND_SBI_DIMER_ALP_DETECTOR`):
 
-Emit-template mode writes:
+- **Emit-template** writes `<alias>_<timing_label>_Nuisance_DLI_Spec.toml` — the value-based
+  specification (all values in log₁₀). Its `[block]` sets `posterior_sample_pool_choice`, `pool_mode`,
+  and `box_quantiles`; its `[imaging.<KEY>]` ranges are pre-filled with the pool's 5th/95th percentiles
+  as suggestions and are read only by `box_user`. A provenance comment records the estimator, the pool
+  source, the chunk count, and the draws per chunk. The file is authoritative only once the user saves
+  their edits.
+- **Build** writes `<alias>_<timing_label>_Nuisance_DLI.npz` — the built, self-contained artifact,
+  carrying its `parameter_keys` manifest, the chosen representation's numeric parameters (a box's
+  `[low, high]`, a resampled sample matrix, or a Gaussian's `mean`/`covariance`), the prior box, and the
+  `posterior_sample_pool_choice` and `pool_mode` it was built with. Being self-contained, it is sampled
+  at generation with neither the estimator nor the recordings.
+- **Build** also writes a `<alias>_<timing_label>_Nuisance_DLI_Analysis/` directory beside the artifact:
+  a `report.md` (provenance and a per-parameter marginal summary — median, 5th/95th percentiles, prior
+  box, and the fraction of each parameter's mass outside the prior box) and
+  `figures/nuisance_marginals.png` (the 1-D marginal of each imaging parameter, with the prior bounds
+  marked). This is the record a person reads to judge, and choose between, nuisance constructions.
 
-- `<alias>_<timing_label>_Nuisance_DLI_Spec.toml` — the value-based specification template.
-  It carries one `[imaging.<KEY>]` table per imaging parameter and a `[block]` table with the
-  block `form`. Every value is in log10 (the sampling space), and every number is a
-  suggestion; the file records its own provenance (the source Experiment `.npz`, the number of
-  pooled windows, and the pooled-MAP samples path). It is authoritative only once the person
-  saves their edits.
-- `<alias>_<timing_label>_Nuisance_DLI_PosteriorSamples.npz` — the pooled per-window MAP
-  vector (`samples` array), offered as a ready candidate for the `samples` form.
+Any downstream stage obtains the `Nuisance_DLI` through the module's gate (`require_nuisance_dli`),
+which **loads** the built artifact and fails loud — naming this analysis — if it is absent. The gate
+does not rebuild: the build is this step's job.
 
-Build mode writes:
+## Choosing a representation
 
-- `<alias>_<timing_label>_Nuisance_DLI.npz` — the built, samplable `Nuisance` artifact
-  (`domain = "DLI"`), carrying its own `parameter_keys` manifest so each draw is
-  self-labeling. Its underlying `kind` is `box` for the per-parameter form (a `BoxUniform`,
-  with a `fixed` parameter contributing a degenerate single-point bin) or `samples` for the
-  drawn forms (clipped to the imaging prior box with never-silent logging).
-
-## How to read the emitted summary and choose a specification
-
-Before writing the template, emit-template mode prints the calibrated imaging posterior — the
-"see it" step — as one row per imaging parameter, all in log10:
-
-- **MAP** — the median of the pooled per-window MAP estimates;
-- **CI5** / **CI95** — the 5th and 95th percentiles of that same pooled set, i.e. the spread
-  of the per-window point estimates across the real recordings;
-- **prior box** — the Detector imaging prior interval `[lower, upper]` for that parameter, so
-  the summary can be read against the range within which the calibration operates.
-
-These numbers are decision support, not a finding. They summarize where the calibrated imaging
-posterior places each parameter across the real recordings; they are seeds for a human choice,
-copied into the template as the suggested `value` (from the MAP) and `[low, high]` (from the
-5th/95th percentiles).
-
-Choosing a role per parameter (`DETECTOR_WORKFLOW.md` §7):
-
-- **fixed** (`role = "fixed"`, under block `form = "perparam"`) — hold the parameter at a
-  chosen log10 `value`, which must lie inside the imaging prior box.
-- **uniform** (`role = "uniform"`, under block `form = "perparam"`) — a `BoxUniform` over a
-  chosen log10 `[low, high]`, which must lie within the prior box; this is the direct analogue
-  of how the RDS nuisance is declared.
-- **samples** (block `form = "samples"`) — draw the whole imaging block jointly from a stored
-  sample vector at `[block].samples_path`; pointing it at the emitted
-  `*_Nuisance_DLI_PosteriorSamples.npz` reuses the pooled per-window MAP vector as the sample
-  source. Draws are clipped to the prior box.
-- **posterior** (block `form = "posterior"`) — draw the block jointly from the trained imaging
-  estimator conditioned on the real recordings. This form validates but is not built in this
-  step (see the caveat below).
-
-The `fixed` and `uniform` roles are set per parameter; the `samples` and `posterior` forms are
-whole-block, because a joint sample vector (or a conditioned posterior) cannot be split
-parameter-by-parameter. Build-mode validation rejects any `fixed` value outside the prior box
-and any `uniform` interval that leaves it, with a message naming the offending parameter — the
-calibration operates inside that box, so a `Nuisance_DLI` cannot assert imaging outside it.
+- **`raw`** — the recommended default. Use it unless you have a specific reason not to: it is the only
+  form that reproduces the calibrated imaging distribution faithfully, correlations and all.
+- **`gaussian`** — when a compact, smooth, continuous density is wanted and the pool is plausibly
+  unimodal. It preserves the linear correlations but averages away any second mode.
+- **`box`** — when a bounded, correlation-free uniform is wanted, sized automatically from the pool's
+  central mass (the quantiles). Conservative and simple.
+- **`box_user`** — the manual escape hatch: a uniform over ranges you set (for example, to reproduce a
+  fixed-imaging production by setting each range to a single value). Clamped to the prior box.
+- **`map_estimate_pool`** — the point-estimate sibling of `raw`: it pools the per-window MAP (best-fit)
+  vectors instead of full posterior draws, so it captures the across-recording spread of the point
+  estimates but discards the within-window posterior width.
 
 ## Caveats
 
-- **The suggestions are calibrated estimates on real data, not ground-truth recovery.** The
-  printed MAP and percentile spread come from applying the Detector's imaging estimator to real
-  microscopy recordings, which have no ground truth. They describe the calibrated posterior's
-  placement, not a demonstrated recovery of the true imaging parameters. Recovery of the
-  imaging parameters is quantified only on held-out synthetic EVAL data with known values, in
-  the Detector Evaluation stage — not by this analysis and not on the real recordings.
-- **The percentile band is an inter-window spread, not a posterior credible interval.** CI5 and
-  CI95 summarize how the per-window point estimates vary across the pooled real windows; they
-  are not the width of any single posterior. Read them as the empirical dispersion of the
-  calibration across recordings.
-- **The posterior form is deferred.** Building `form = "posterior"` needs a trained Detector
-  imaging estimator conditioned on the real recordings; until that exists the build stops with
-  a clear message. Use the `samples` form (pointed at the emitted pooled-MAP vector) or the
-  `fixed` / `uniform` forms in the interim. The `--pool-mode` argument therefore has no effect
-  on a currently buildable specification.
-- **The person decides; the analysis only suggests.** Nothing the template contains is
-  authoritative until the person edits and saves it. The pre-filled numbers are a starting
-  point, and the ultimate role and values are a human judgment recorded in the specification's
-  provenance.
-- **Prior-box clipping is silent-safe, not silent.** The drawn forms (`samples`, and later
-  `posterior`) are clipped to the imaging prior box at build; the clip is logged rather than
-  hidden, so any draw that would leave the box is reported.
+- **Only `raw` preserves the joint distribution.** Every other choice trades correlation fidelity for
+  compactness, smoothness, or bounds; the report and this note make that trade explicit so it is a
+  deliberate choice, not an accident. The `g/C` degeneracy above is the concrete stake.
+- **The pool is a mixture, and may be multimodal.** It is pooled across recordings with different
+  imaging, so a single Gaussian (`gaussian`) can misrepresent it by placing mass between modes. Prefer
+  `raw` when in doubt.
+- **`unrestricted` can produce out-of-prior draws.** This is intentional and matches the Evaluation and
+  Experiment stages; it is not clipped. Use `bounded` (the default) to keep the pool within the prior
+  box by rejection.
+- **These are calibrated estimates on real data, not ground-truth recovery.** The recordings have no
+  ground truth; the pool describes where the calibrated imaging posterior places its mass, not a
+  demonstrated recovery of true imaging parameters. Recovery is quantified only on held-out synthetic
+  data with known values, in the Detector Evaluation stage.
+- **Prior-box clamping is logged, not silent.** For `box`/`box_user`, any parameter range the prior-box
+  clamp reduces is reported and counted at build.
 
 ## Reference
 
-Real recordings: MET single-particle-tracking data, BioImage Archive accession S-BSST712. The
-Detector calibration workflow, the value-based role scheme, the imaging prior ranges, and the
-`Nuisance_DLI` construction step (§7, "Constructing the `Nuisance_DLI` (the analysis step)")
-are documented in `DETECTOR_WORKFLOW.md`; the shared imaging model and its parameters are
-described under DLI Imaging in `PROJECT_CONTEXT.md`.
+The negative log-likelihood the pool is drawn under is the logarithmic score, a strictly proper scoring
+rule (Gneiting and Raftery, "Strictly Proper Scoring Rules, Prediction, and Estimation," *Journal of
+the American Statistical Association*, 2007). The multivariate-Gaussian fit stores the sample mean and
+covariance; the boxes are `BoxUniform` distributions over log₁₀ ranges.
+
+Real recordings: MET single-particle-tracking data, BioImage Archive accession S-BSST712. The imaging
+model and the `g/C` (`kappa_g`/`kappa_c`) degeneracy are described under the EMCCD noise model in
+`REFERENCE_EMCCD_NOISE_MODEL.md`; the nuisance and artifact design, the value-based parameter table, and
+the imaging prior box are in `DETECTOR_WORKFLOW.md` (section "Nuisance and artifact design"); the
+recovery quantification this construction defers to is the Detector Evaluation stage.

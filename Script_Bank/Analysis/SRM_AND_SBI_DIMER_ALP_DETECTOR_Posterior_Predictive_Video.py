@@ -24,6 +24,19 @@ flicker), i.e. whether the calibrated imaging makes a synthetic recording look l
 one. A single deliberate run draws one trajectory; the notebook only views the persisted
 clip, so scrubbing/zooming never regenerates it, and ``--seed`` makes a run reproducible.
 
+Fixed-imaging-parameters mode (``--fixed-imaging-parameters``). A validation-gate variant that
+does NOT read the trained MAP database. Instead the imaging theta is FIXED to correct-source
+values: the camera parameters (``gamma = g/C``, ``kappa_o``, ``kappa_b``, ``kappa_s``, ``kappa_q``) are set to
+the MET acquisition/config values (``MET_CAMERA_PHYSICAL``; see ``REFERENCE_EMCCD_NOISE_MODEL.md``
+Sec. 6 and the MET provenance in ``DETECTOR_WORKFLOW.md`` §6.5), and
+the remaining, non-camera parameters (PSF ``mu_r``/``sigma_r``, brightness ``mu_pc``/``sigma_pc``,
+``lambda_rate``, ``prob_photo_bleach``) are held at their prior-center nominals. The intention: test
+whether the CORRECTED forward model, driven by the correct camera physics rather than an inferred
+posterior, recapitulates the experimental pixel-intensity histogram -- a training-free check that
+the synthetic manifold now matches the real MET floor and signal, before any expensive
+generate/train/eval/infer cycle. In this mode ``--chunk``/``--map-source`` are ignored and no MAP
+database is required.
+
 Notes. Two durations meet in the name. The ``{model_window}`` label (from
 ``--total-time-seconds``, e.g. ``2S_50FPS``) identifies the trained estimator -- the window its
 MAP imaging estimate was inferred over -- and holds the canonical ``{alias}_{model_window}``
@@ -31,9 +44,9 @@ position. The ``{clip_span}`` token (e.g. ``20S``) is the rendered clip's own le
 the experimental recording; a 20 s clip rendered from a 2 s-window MAP is not the same as one from a
 10 s window, so the span is carried in the descriptor. The estimator was calibrated on the fixed
 8-bit rescale of the recordings (a global linear ``(0, 65535) -> (0, 255)``, not per-video); the
-clip is persisted and displayed at full 16-bit, and the viewer/figure autoscale the colormap to
-each image's own intensity range for visibility (the raw-ADU brightness comparison is the
-``Comparison.png`` histogram).
+clip is persisted and displayed at full 16-bit, and the viewer/figure scale the colormap over the
+full intensity range for visibility (configurable -- see ``--display-norm``; the raw-ADU
+brightness comparison is the ``Comparison.png`` histogram).
 
 Reads  <data_bank>/<posit>/<alias>_{model_window}_MAP_Experiment/<...>.npz  (MAP database)
        <data_bank>/<experiment_subdir>/Experiment_{KIND}_Cell_{cell}_{span}S_RAW.tif  (experimental)
@@ -42,6 +55,7 @@ Writes <data_bank>/<posit>/<alias>_{model_window}_Posterior_Predictive_Video/
          <stem>_Comparison.png        (static side-by-side)
          <stem>_Trajectory.h5         (the drawn trajectory; provenance)
        where <stem> = <alias>_{model_window}_MAP_Estimate[_Median]_{KIND}_Cell_{cell}[_Chunk_{chunk}]_{clip_span}
+       (or <alias>_{model_window}_Fixed_Imaging_{KIND}_Cell_{cell}_{clip_span} under --fixed-imaging-parameters)
 
 Usage:
     MACHINE_PROFILE=<p> python .../SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.py \\
@@ -86,15 +100,28 @@ def _clip_span_token(n_frames, frame_time):
                      frames=PARAMETERS.simulation.timing).label.split("_")[0]
 
 
-def _build_stem(project_alias, map_label, kind, cell, chunk, map_source, clip_token):
-    """Output basename: canonical ``{alias}_{model_window}`` + MAP-estimate descriptor + clip
-    span. ``map_label`` (e.g. ``2S_50FPS``) is the estimator's model window; ``clip_token``
-    (e.g. ``20S``) is the rendered length. Chunk source names the concrete entry
-    (``..._Cell_{cell}_Chunk_{chunk}_...``); cell-median drops the chunk and marks ``Median``."""
+def _build_stem(project_alias, map_label, kind, cell, chunk, map_source, clip_token,
+                fixed_imaging=False, fixed_nuisance=False, run_label=None):
+    """Output basename: canonical ``{alias}_{model_window}`` + imaging descriptor + clip span.
+    ``map_label`` (e.g. ``2S_50FPS``) is the estimator's model window; ``clip_token`` (e.g.
+    ``20S``) is the rendered length. Chunk source names the concrete entry
+    (``..._Cell_{cell}_Chunk_{chunk}_...``); cell-median drops the chunk and marks ``Median``;
+    ``fixed_imaging`` marks a correct-source fixed-parameter render (no MAP database);
+    ``fixed_nuisance`` marks a pinned RDS nuisance (counts/diffusivities held, not drawn); and
+    ``run_label`` appends an optional caller tag at the END of the name so renders that share a
+    selection (same cell, both fixed-imaging + fixed-nuisance) stay distinct instead of
+    overwriting each other."""
+    nuis_tok = "_Fixed_Nuisance" if fixed_nuisance else ""
+    label_tok = ""
+    if run_label:
+        safe = "".join(c if c.isalnum() else "_" for c in str(run_label)).strip("_")
+        label_tok = f"_{safe}" if safe else ""
+    if fixed_imaging:
+        return f"{project_alias}_{map_label}_Fixed_Imaging{nuis_tok}_{kind}_Cell_{cell}_{clip_token}{label_tok}"
     descriptor = "MAP_Estimate_Median" if map_source == "cell-median" else "MAP_Estimate"
     chunk_part = "" if map_source == "cell-median" else f"_Chunk_{chunk}"
-    return (f"{project_alias}_{map_label}_{descriptor}_{kind}_Cell_{cell}"
-            f"{chunk_part}_{clip_token}")
+    return (f"{project_alias}_{map_label}_{descriptor}{nuis_tok}_{kind}_Cell_{cell}"
+            f"{chunk_part}_{clip_token}{label_tok}")
 
 
 def _load_map_theta(map_npz, imaging_keys, kind, cell, chunk, source):
@@ -140,60 +167,198 @@ def _load_map_theta(map_npz, imaging_keys, kind, cell, chunk, source):
     return np.power(10.0, theta_log10)
 
 
+# Correct-source MET camera parameters (physical units) for --fixed-imaging-parameters.
+# gamma = g/C from the MET EM gain and photons2ADU conversion; kappa_o the fitted optical
+# background offset; kappa_b the configured baseline; kappa_s the datasheet read noise;
+# kappa_q the configured quantum efficiency (marginalized as the SCOPE camera nuisance). See
+# REFERENCE_EMCCD_NOISE_MODEL.md Sec. 6 and the MET provenance in DETECTOR_WORKFLOW.md Sec. 6.5.
+MET_CAMERA_PHYSICAL = {
+    "gamma":   200.0 / 4.78,   # EM gain / conversion (ADU per photoelectron) ~= 41.84
+    "kappa_o": 28.7,           # optical background offset (incident photons); ThunderSTORM offset[photon] median, pooled Fab 28.9 / InlB 28.6 (REFERENCE_EMCCD_NOISE_MODEL.md sec. 6, DETECTOR_WORKFLOW.md sec. 6.2)
+    "kappa_b": 175.0,          # camera baseline (ADU)
+    "kappa_s": 10.5,           # read noise (ADU) at C ~= 4.78
+    "kappa_q": 0.9,            # quantum efficiency (config; marginalized as SCOPE camera nuisance)
+}
+
+
+def _fixed_imaging_theta(overrides=None):
+    """Physical imaging theta for --fixed-imaging-parameters: the 5 SCOPE camera parameters set
+    to their correct-source MET values (``MET_CAMERA_PHYSICAL``), the 6 learnable emitter
+    parameters held at their prior-center nominals (the table ``VALUE``), and finally any
+    ``overrides`` (``{key: physical_value}``, from ``--set-imaging``) applied last -- e.g.
+    emitter brightness/PSF calculated from the MET ThunderSTORM localizations, or a camera
+    parameter swept for a sensitivity check. Returns the full 11-key ``DETECTOR_IMAGING`` render
+    vector; overrides may target any of the 11 imaging parameters (learnable or SCOPE camera).
+    No trained posterior is used -- this drives the corrected forward model directly to test
+    whether it recapitulates the experimental pixel-intensity histogram."""
+    unknown = [k for k in MET_CAMERA_PHYSICAL if k not in det.DETECTOR_SCOPE_KEYS]
+    if unknown:
+        raise ValueError(f"MET_CAMERA_PHYSICAL keys not in the SCOPE camera set: {unknown}")
+    find = {k: i for i, k in enumerate(det.DETECTOR_IMAGING_KEYS)}   # 11-key render contract (6 learnable + 5 SCOPE)
+    theta = np.empty(len(det.DETECTOR_IMAGING_KEYS), dtype=float)
+    for element in det.DETECTOR_PARAMETERIZATION:                    # 6 learnable emitter params at prior-center nominals
+        theta[find[element["KEY"]]] = element["VALUE"]
+    for key, value in MET_CAMERA_PHYSICAL.items():                   # 5 SCOPE camera at correct-source MET values
+        theta[find[key]] = value
+    for key, value in (overrides or {}).items():                    # --set-imaging: override any of the 11 imaging params
+        if key not in find:
+            raise ValueError(f"--set-imaging key {key!r} is not an imaging parameter; "
+                             f"valid keys are {det.DETECTOR_IMAGING_KEYS}.")
+        theta[find[key]] = value
+    print("Fixed imaging theta: camera parameters at correct-source MET values ("
+          + ", ".join(f"{k}={v:.4g}" for k, v in MET_CAMERA_PHYSICAL.items())
+          + "); non-camera parameters at prior-center nominals"
+          + (f"; overrides {overrides}" if overrides else "") + ".")
+    return theta
+
+
+# RDS-nuisance keys, in DETECTOR_NUISANCE order (three counts + three diffusivities).
+_NUISANCE_KEYS = [e["KEY"] for e in det.DETECTOR_NUISANCE]
+
+
+def _fixed_nuisance_physical(overrides=None):
+    """Physical RDS-nuisance vector for --fixed-nuisance-RDS: every nuisance parameter held at
+    its prior-center nominal (the log-midpoint of its BoxUniform range), then any ``overrides``
+    (``{key: physical_value}``) applied last. This replaces the fresh random ``draw_nuisance_physical``
+    draw with a deterministic, controlled nuisance, so the emitter counts (monomer ``count_alp``,
+    mobile-dimer ``count_bet``, immobile-dimer ``count_chi``) and diffusivities are pinned to
+    condition-appropriate values rather than sampled from a flat prior (whose ~equal expected
+    counts make every render implausibly dimer-heavy). Returns a ``(len(DETECTOR_NUISANCE),)``
+    array in DETECTOR_NUISANCE order."""
+    centers = {e["KEY"]: e["LOG_BASE"] ** ((e["PRIOR_RANGE"][0] + e["PRIOR_RANGE"][1]) / 2.0)
+               for e in det.DETECTOR_NUISANCE}
+    for key, value in (overrides or {}).items():
+        if key not in centers:
+            raise ValueError(
+                f"--fixed-nuisance-RDS key {key!r} is not an RDS-nuisance parameter; "
+                f"valid keys: {_NUISANCE_KEYS}.")
+        centers[key] = value
+    print("Fixed RDS nuisance: parameters at prior-center nominals"
+          + (f"; overrides {overrides}" if overrides else "")
+          + " (" + ", ".join(f"{k}={centers[k]:.4g}" for k in _NUISANCE_KEYS) + ").")
+    return np.array([centers[k] for k in _NUISANCE_KEYS], dtype=float)
+
+
 def _save_comparison_png(path, experimental, synth, kind, cell, sel_desc, display_norm,
-                         nuisance, imaging_physical):
-    """Static experimental-vs-synthetic panel. Columns pair each condition -- EXPERIMENTAL (col 0) and SYNTH
-    (col 1), each showing the mid frame over its max projection; the third column holds the
-    shared pixel-intensity histogram (top) and a provenance text box (bottom). The text box
-    lists this render's DLI/imaging MAP parameters (out-of-prior ones flagged) and its
-    RDS-nuisance draw, both in absolute units -- the imaging theta is what drove the render,
-    and the particle counts (or the flicker) may drive occupancy and the bright-pixel upper tail,
-    so together they help attribute a histogram mismatch to the imaging estimate or the nuisance
-    draw rather than leaving it unexplained.
+                         nuisance, imaging_physical, fixed_imaging=False, fixed_nuisance=False):
+    """Static experimental-vs-synthetic panel. Col 0 = EXPERIMENTAL and col 1 = SYNTH, each
+    showing the mid frame over its max projection; col 2 holds the shared pixel-intensity
+    histogram in log-y (full range, top) and linear-y (zoomed to the bulk, bottom); col 3 holds
+    the syn/exp RATIO-per-quantile match plot (top -- a flat line on 1.0 = perfect match, read
+    across min/p0.01/median/p90/p99/p99.9/p99.99/max so no single region dominates) over the
+    quantile table + provenance (bottom). The provenance lists this render's DLI/imaging
+    parameters (out-of-prior ones flagged) and its RDS-nuisance draw, so a mismatch can be
+    attributed to the imaging estimate or the nuisance rather than left unexplained.
 
     Both panels and the histogram use the STORED synthetic (``synth_u16``, clipped to the
     non-negative uint16 range), so the comparison is like-with-like against the experimental frames and
     matches the persisted clip -- not the pre-clip float. ``display_norm`` sets the frame
-    color scaling: ``autoscale`` stretches magma to each displayed frame's own min/max (the same
+    color scaling: ``full`` (default) uses a SHARED full-range ``[min, max]`` window over both the
+    experimental and synthetic pixels, so identical intensities map to identical colors and nothing
+    is clipped; ``autoscale`` stretches magma to each displayed frame's own min/max (the same
     per-frame convention the notebook scrub and player use, so a given frame renders identically
-    in all views); ``percentile`` uses a fixed whole-clip window ``[p0.5, p99.5]``. The
-    max-projection panels autoscale to their own range (a summary statistic), and the histogram
-    is in ADU either way."""
+    in all views); ``percentile`` uses a whole-clip window ``[min, p99.99]``. The
+    max-projection panels share the full range in ``full`` mode and autoscale otherwise, and the
+    histogram is in ADU in every mode."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, FixedFormatter, NullLocator
 
+    src_tok = "FIXED" if fixed_imaging else "MAP"
+    imaging_header = ("FIXED imaging (correct-source MET, absolute)" if fixed_imaging
+                      else "INFERRED imaging (MAP theta, absolute)")
+    imaging_note = ("imaging: fixed correct-source MET values" if fixed_imaging
+                    else "imaging: MAP theta of the selected chunk")
+    fig_title = ("Fixed-imaging video check (experimental vs synthetic; correct-source MET)"
+                 if fixed_imaging
+                 else "Posterior-predictive video check (experimental vs synthetic-from-MAP)")
     mid = experimental.shape[0] // 2
     label = {"ALP": "MET-FAB", "BET": "MET-INLB"}.get(kind, kind)
-    fig, ax = plt.subplots(2, 3, figsize=(13, 8.5), dpi=200)
+    fig, ax = plt.subplots(2, 4, figsize=(18, 8.5), dpi=200)
 
-    def _clim(arr_full):
-        # ``percentile`` = whole-clip [p0.5, p99.5] (fixed); ``autoscale`` = None, so matplotlib
-        # stretches each displayed frame to its own min/max (per-frame). The notebook scrub and
-        # player use the identical convention, so a given frame renders the same in every view.
-        if display_norm == "percentile":
-            return float(np.percentile(arr_full, 0.5)), float(np.percentile(arr_full, 99.5))
-        return None, None
+    # --- pixel-intensity quantiles (ADU): drive both the frame display window and the match plot ---
+    exp_r = experimental.ravel(); syn_r = synth.ravel()
+    q_probs = [0, 0.01, 50, 90, 99, 99.9, 99.99, 100]
+    q_names = ["min", "p0.01", "median", "p90", "p99", "p99.9", "p99.99", "max"]
+    eq = np.percentile(exp_r, q_probs); sq = np.percentile(syn_r, q_probs)
+    # The full quantile set drives the match plot + table (below); the frame display window
+    # (below) spans the full range, so no pixels are clipped from the frame color scale.
 
     def _frame(a, arr, title, clim):
         a.imshow(arr, cmap="magma", origin="lower", interpolation="none",
                  vmin=clim[0], vmax=clim[1])
         a.set_title(title, fontsize=9); a.set_xticks([]); a.set_yticks([])
 
-    experimental_clim, synth_clim = _clim(experimental), _clim(synth)
-    # Columns pair each condition: col 0 = EXPERIMENTAL (frame over max projection), col 1 = SYNTH
-    # (same), col 2 = the shared pixel-intensity histogram (top) and the provenance text (bottom).
-    _frame(ax[0, 0], experimental[mid], f"EXPERIMENTAL {label} cell {cell}  frame {mid}", experimental_clim)
-    _frame(ax[1, 0], experimental.max(0), "EXPERIMENTAL  max projection", (None, None))
-    _frame(ax[0, 1], synth[mid], f"SYNTH (MAP {kind} c{cell} {sel_desc})  frame {mid}", synth_clim)
-    _frame(ax[1, 1], synth.max(0), "SYNTH  max projection", (None, None))
-    ax[0, 2].hist(experimental.ravel(), bins=120, histtype="step", density=True, color="tab:blue",
-                  label="experimental"); ax[0, 2].hist(synth.ravel(), bins=120, histtype="step",
-                  density=True, color="tab:orange", label="synth")
-    ax[0, 2].set_yscale("log"); ax[0, 2].set_title("pixel-intensity density (ADU)", fontsize=9)
-    ax[0, 2].legend(fontsize=8)
-    ax[1, 2].axis("off")
-    # INFERRED imaging MAP theta (absolute), out-of-prior parameters flagged with '*'.
+    # Frame display window. 'full' (default): a SHARED full-range [min, max] window over BOTH exp
+    # and synth, so identical intensities map to identical colors and nothing is clipped.
+    # 'percentile': whole-clip [min, p99.99]. 'autoscale': each frame's own min/max.
+    if display_norm == "full":
+        frame_clim = (float(min(eq[0], sq[0])), float(max(eq[-1], sq[-1])))
+        emp, smp = experimental.max(0), synth.max(0)
+        proj_clim = (float(min(emp.min(), smp.min())), float(max(emp.max(), smp.max())))
+        exp_clim = syn_clim = frame_clim
+        exp_proj_clim = syn_proj_clim = proj_clim
+    elif display_norm == "percentile":
+        exp_clim = (float(exp_r.min()), float(np.percentile(exp_r, 99.99)))
+        syn_clim = (float(syn_r.min()), float(np.percentile(syn_r, 99.99)))
+        exp_proj_clim = syn_proj_clim = (None, None)
+    else:                                                                  # autoscale
+        exp_clim = syn_clim = exp_proj_clim = syn_proj_clim = (None, None)
+
+    # col 0 = EXPERIMENTAL (frame over max projection), col 1 = SYNTH (same); col 2 = histograms;
+    # col 3 = the syn/exp ratio-per-quantile match plot over the quantile table + provenance.
+    _frame(ax[0, 0], experimental[mid], f"EXPERIMENTAL {label} cell {cell}  frame {mid}", exp_clim)
+    _frame(ax[1, 0], experimental.max(0), "EXPERIMENTAL  max projection", exp_proj_clim)
+    _frame(ax[0, 1], synth[mid], f"SYNTH ({src_tok} {kind} c{cell} {sel_desc})  frame {mid}", syn_clim)
+    _frame(ax[1, 1], synth.max(0), "SYNTH  max projection", syn_proj_clim)
+
+    # --- histograms with SHARED bins (like-with-like): log-y over the full range (top), and
+    #     linear-y through ~p99.99 (bottom) -- the whole range bar the top-0.01% hot-pixel sliver,
+    #     kept off only so the linear scale stays readable; the tail is reported exactly in the
+    #     quantile table at right, and the log-y panel above shows it in full. ---
+    lo = float(min(exp_r.min(), syn_r.min()))
+    hi_full = float(max(exp_r.max(), syn_r.max()))
+    _i9999 = q_names.index("p99.99")
+    hi_lin = float(max(eq[_i9999], sq[_i9999]) * 1.05)          # linear panel through ~p99.99
+    bins_log = np.linspace(lo, hi_full, 200)
+    bins_lin = np.linspace(lo, hi_lin, 160)
+
+    def _hist(a, bins):
+        a.hist(exp_r, bins=bins, histtype="step", density=True, color="tab:blue", label="experimental")
+        a.hist(syn_r, bins=bins, histtype="step", density=True, color="tab:orange", label="synth")
+        a.tick_params(labelsize=7)
+
+    _hist(ax[0, 2], bins_log); ax[0, 2].set_yscale("log")
+    ax[0, 2].set_title("pixel-intensity density (ADU) - log y, full range", fontsize=8)
+    ax[0, 2].legend(fontsize=7)
+    _hist(ax[1, 2], bins_lin); ax[1, 2].set_xlim(lo, hi_lin)
+    ax[1, 2].set_title(f"linear y, x<={hi_lin:.0f} ADU (to p99.99)", fontsize=8)
+
+    # --- ax[0,3]: syn/exp ratio per quantile -- the direct "do they match?" read.
+    #     A flat line on 1.0 (dashed) is a perfect match; the green band is within +-10%.
+    #     Log-y so a 2x over- and a 2x under-shoot read symmetrically; spans the dark end
+    #     (min, p0.01) to the bright end (p99.99), so no single region dominates the judgment. ---
+    axr = ax[0, 3]
+    ratios = np.array([(sv / ev) if ev > 0 else np.nan for ev, sv in zip(eq, sq)])
+    xq = np.arange(len(q_names))
+    axr.axhspan(0.9, 1.1, color="tab:green", alpha=0.12)
+    axr.axhline(1.0, color="gray", lw=1.0, ls="--")
+    axr.plot(xq, ratios, "-o", color="tab:red", ms=5)
+    axr.set_yscale("log"); axr.set_ylim(0.5, 3.5)
+    # Fixed decimal y-labels; suppress the log MINOR ticks -- in this narrow [0.5, 3.5] range
+    # they otherwise print auto sci-notation labels (e.g. 6x10^-1) that clutter the axis.
+    axr.yaxis.set_major_locator(FixedLocator([0.5, 0.7, 1.0, 1.5, 2.0, 3.0]))
+    axr.yaxis.set_major_formatter(FixedFormatter(["0.5", "0.7", "1.0", "1.5", "2.0", "3.0"]))
+    axr.yaxis.set_minor_locator(NullLocator())
+    axr.tick_params(axis="y", labelsize=7)
+    axr.set_xticks(xq); axr.set_xticklabels(q_names, rotation=45, ha="right", fontsize=7)
+    axr.set_ylabel("synth / exp", fontsize=8)
+    axr.set_title("MATCH: syn/exp per quantile\n(1.0 dashed = perfect; green = within 10%)", fontsize=8)
+    axr.grid(True, axis="y", which="both", alpha=0.25)
+
+    # --- ax[1,3]: quantile table + provenance (imaging theta + RDS nuisance) ---
+    ax[1, 3].axis("off")
     ikeys = [e["KEY"] for e in det.DETECTOR_PARAMETERIZATION]
     img = np.asarray(imaging_physical, dtype=float).ravel()
     plo = np.asarray(det.theta_lower_bound(), dtype=float)
@@ -205,29 +370,24 @@ def _save_comparison_png(path, experimental, synth, kind, cell, sel_desc, displa
         mark = "*" if (lv < plo[i] - 1e-9 or lv > phi[i] + 1e-9) else ""
         dli.append(f"{_short.get(k, k)}={img[i]:.3g}{mark}")
     dli_lines = "\n".join("  " + "  ".join(dli[j:j + 3]) for j in range(0, len(dli), 3))
-    # NUISANCE RDS draw (absolute); the particle counts drive the bright-pixel upper tail.
     nuis = np.asarray(nuisance, dtype=float).ravel()
     npart = []
-    for e, v in zip(det.DETECTOR_NUISANCE, nuis):
-        lab = e["LABEL"].translate({ord(c): None for c in "${}\\"})
-        npart.append(f"{lab}={v:.0f}" if str(e.get("UNIT", "")).lower().startswith("count")
-                     else f"{lab}={v:.3g}")
+    for ent, v in zip(det.DETECTOR_NUISANCE, nuis):
+        lab2 = ent["LABEL"].translate({ord(c): None for c in "${}\\"})
+        npart.append(f"{lab2}={v:.0f}" if str(ent.get("UNIT", "")).lower().startswith("count")
+                     else f"{lab2}={v:.3g}")
     nuis_lines = "\n".join("  " + "  ".join(npart[j:j + 3]) for j in range(0, len(npart), 3))
-    ax[1, 2].text(
+    tbl = f"{'quantile':<8}{'exp':>7}{'synth':>7}{'ratio':>7}\n"
+    for name, ev, sv in zip(q_names, eq, sq):
+        tbl += f"{name:<8}{ev:7.0f}{sv:7.0f}{(sv / ev if ev > 0 else float('inf')):7.2f}\n"
+    ax[1, 3].text(
         0.0, 1.0,
-        f"experimental  {experimental.shape[0]} frames  {experimental.shape[1]}x{experimental.shape[2]}\n"
-        f"synth {synth.shape[0]} frames  {synth.shape[1]}x{synth.shape[2]}\n\n"
-        f"INFERRED imaging (MAP theta, absolute):\n{dli_lines}\n  (* outside training prior)\n\n"
-        f"NUISANCE (RDS draw, absolute):\n{nuis_lines}\n"
-        "  (counts or flicker may drive the bright-pixel tail)\n\n"
-        "motion: fresh RDS-nuisance draw\n"
-        "imaging: MAP theta of the selected chunk\n"
-        "comparison reads imaging appearance,\nnot the experimental trajectory.\n"
-        "synth shown as stored (clipped to >=0)\n"
-        "16-bit; estimator calibrated on the 8-bit rescale\n"
-        f"display norm: {display_norm}",
-        fontsize=7, va="top", family="monospace")
-    fig.suptitle("Posterior-predictive video check (experimental vs synthetic-from-MAP)", fontsize=11)
+        "QUANTILES (ADU)  ratio=synth/exp\n" + tbl + "\n"
+        f"{imaging_header}:\n{dli_lines}\n  (* outside prior)\n"
+        f"NUISANCE (RDS):\n{nuis_lines}\n"
+        f"motion: {'fixed nuisance (pinned)' if fixed_nuisance else 'fresh draw'}; norm {display_norm}",
+        fontsize=6.5, va="top", family="monospace")
+    fig.suptitle(fig_title, fontsize=11)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -246,12 +406,22 @@ def main(args):
                 n_frames = int(tf.series[0].shape[0])   # frame count from metadata; no pixel load
         clip_token = _clip_span_token(n_frames, frame_time) if n_frames else None
         stem = _build_stem(paths.project_alias, map_label, args.kind, args.cell,
-                           args.chunk, args.map_source, clip_token or "<clip_span>")
+                           args.chunk, args.map_source, clip_token or "<clip_span>",
+                           fixed_imaging=args.fixed_imaging_parameters,
+                           fixed_nuisance=bool(args.fixed_nuisance_rds),
+                           run_label=args.run_label)
         print("[DRY RUN] posterior-predictive video would read:")
-        print(f"    MAP database : {map_npz}  [{'OK' if map_npz.exists() else 'MISSING'}]")
+        if args.fixed_imaging_parameters:
+            print("    imaging theta: FIXED to correct-source MET values (no MAP database read); "
+                  "non-camera parameters at prior-center nominals")
+        else:
+            print(f"    MAP database : {map_npz}  [{'OK' if map_npz.exists() else 'MISSING'}]")
         print(f"    experimental .tif    : {experimental_tif}  [{'OK' if experimental_tif.exists() else 'MISSING'}]")
-        sel = f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median (over all chunks)"
-        print(f"    selection    : kind={args.kind} cell={args.cell}  (MAP source: {sel})")
+        if args.fixed_imaging_parameters:
+            print(f"    selection    : kind={args.kind} cell={args.cell}  (imaging: fixed correct-source)")
+        else:
+            sel = f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median (over all chunks)"
+            print(f"    selection    : kind={args.kind} cell={args.cell}  (MAP source: {sel})")
         cl = f"{clip_token} (from the .tif)" if clip_token else "the experimental recording's frame count (read at run time)"
         print(f"    render length: {cl}")
         print(f"    display norm : {args.display_norm}")
@@ -259,17 +429,32 @@ def main(args):
               f"        {stem}_{{Synthetic_Video.npz,Comparison.png,Trajectory.h5}}")
         return
 
-    if not map_npz.exists():
+    if not args.fixed_imaging_parameters and not map_npz.exists():
         raise FileNotFoundError(
-            f"MAP database not found:\n    {map_npz}\nRun the Detector Experiment stage first.")
+            f"MAP database not found:\n    {map_npz}\nRun the Detector Experiment stage first, "
+            f"or pass --fixed-imaging-parameters to skip it.")
     if not experimental_tif.exists():
         raise FileNotFoundError(
             f"Experimental recording not found:\n    {experimental_tif}\n"
             f"(check --kind/--cell and --experiment-span-seconds={args.experiment_span_seconds}).")
 
-    # ---- imaging theta from the selected MAP entry ----
-    imaging_physical = _load_map_theta(map_npz, imaging_keys, args.kind, args.cell,
-                                       args.chunk, args.map_source)
+    # ---- imaging theta: fixed correct-source values, or the selected MAP entry ----
+    if args.fixed_imaging_parameters:
+        overrides = {}
+        for item in args.set_imaging:
+            key, sep, val = item.partition("=")
+            if not sep:
+                raise ValueError(f"--set-imaging expects KEY=VALUE, got {item!r}")
+            overrides[key.strip()] = float(val)
+        imaging_physical = _fixed_imaging_theta(overrides=overrides or None)
+    else:
+        map_learnable = _load_map_theta(map_npz, imaging_keys, args.kind, args.cell,
+                                        args.chunk, args.map_source)          # (6,) physical, learnable order
+        # The camera is marginalized (not inferred). For a posterior-predictive check against the
+        # real MET recording -- acquired with one specific camera -- pin the 5 SCOPE parameters to
+        # their correct-source MET values rather than a random SCOPE draw, matching --fixed-imaging.
+        scope_met = np.array([MET_CAMERA_PHYSICAL[k] for k in det.DETECTOR_SCOPE_KEYS], dtype=float)
+        imaging_physical = np.concatenate([map_learnable, scope_met])        # (11,) DETECTOR_IMAGING order
 
     # ---- experimental recording -> the render length (from the data, never hardcoded) ----
     import tifffile
@@ -281,15 +466,31 @@ def main(args):
                               frames=PARAMETERS.simulation.timing)
     clip_token = _clip_span_token(n_frames, frame_time)
     stem = _build_stem(paths.project_alias, map_label, args.kind, args.cell,
-                       args.chunk, args.map_source, clip_token)
-    src_desc = f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median"
-    print(f"Experimental recording: {n_frames} frames ({clip_token} clip); rendering a matching "
-          f"synthetic from the MAP ({args.kind} cell {args.cell}, {src_desc}).")
+                       args.chunk, args.map_source, clip_token,
+                       fixed_imaging=args.fixed_imaging_parameters,
+                       fixed_nuisance=bool(args.fixed_nuisance_rds),
+                       run_label=args.run_label)
+    if args.fixed_imaging_parameters:
+        print(f"Experimental recording: {n_frames} frames ({clip_token} clip); rendering a matching "
+              f"synthetic with fixed correct-source imaging ({args.kind} cell {args.cell}).")
+    else:
+        src_desc = f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median"
+        print(f"Experimental recording: {n_frames} frames ({clip_token} clip); rendering a matching "
+              f"synthetic from the MAP ({args.kind} cell {args.cell}, {src_desc}).")
 
     # ---- draw the RDS nuisance and simulate one trajectory at the experimental length ----
     import readdy
     out_dir.mkdir(parents=True, exist_ok=True)
-    nuisance = draw_nuisance_physical()
+    if args.fixed_nuisance_rds:
+        nuis_overrides = {}
+        for item in args.fixed_nuisance_rds:
+            key, sep, val = item.partition("=")
+            if not sep:
+                raise ValueError(f"--fixed-nuisance-RDS expects KEY=VALUE, got {item!r}")
+            nuis_overrides[key.strip()] = float(val)
+        nuisance = _fixed_nuisance_physical(overrides=nuis_overrides)
+    else:
+        nuisance = draw_nuisance_physical()
     smut, _theta = build_detector_rds_simulation(nuisance, seed=args.seed, verbose=args.verbose)
     traj_path = out_dir / f"{stem}_Trajectory.h5"
     if traj_path.exists():
@@ -313,7 +514,8 @@ def main(args):
         pro_tray_poses = np.nanmax(a=tray_poses, axis=3)
     synth = render_detector_video(pro_tray_poses=pro_tray_poses,
                                   imaging_physical=imaging_physical,
-                                  dimer_mask=dimer_mask, seed=args.seed, verbose=args.verbose)
+                                  dimer_mask=dimer_mask, dimer_model=args.dimer_model,
+                                  seed=args.seed, verbose=args.verbose)
     synth = np.moveaxis(synth, -1, 0)                          # (H, W, n_frames) -> (n_frames, H, W)
 
     # ---- persist (clip + provenance) and a static comparison figure ----
@@ -325,8 +527,8 @@ def main(args):
     # lives in the same non-negative domain as the experimental frames. This clip is a
     # deliberate, revisit-able choice: n_under / n_over quantify the excursion on
     # every run, so a future or alternative noise model's negative/overflow
-    # behavior can be compared at this exact point. See PROJECT_CONTEXT.md
-    # (DLI Imaging, read-noise note) for why the noise term itself is kept as-is.
+    # behavior can be compared at this exact point. See
+    # REFERENCE_EMCCD_NOISE_MODEL.md for the corrected Poisson-Gamma-Normal model.
     n_under = int(np.count_nonzero(synth < 0.0))
     n_over = int(np.count_nonzero(synth > 65535.0))
     if n_under or n_over:
@@ -336,15 +538,17 @@ def main(args):
     np.savez_compressed(
         str(clips_path),
         experimental=experimental.astype(np.uint16), synth=synth_u16,        # native 16-bit; the viewer scales for display
-        imaging_physical=imaging_physical, imaging_keys=np.array(imaging_keys),
+        imaging_physical=imaging_physical, imaging_keys=np.array(det.DETECTOR_IMAGING_KEYS),
         nuisance=nuisance, kind=args.kind, cell=args.cell,
         chunk=(-1 if args.chunk is None else args.chunk), map_source=args.map_source,
         seed=(-1 if args.seed is None else args.seed),
         frame_time_seconds=frame_time, n_frames=n_frames, experimental_tif=str(experimental_tif))
-    sel_desc = f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median"
+    sel_desc = ("fixed correct-source" if args.fixed_imaging_parameters else
+                (f"chunk {args.chunk}" if args.map_source == "chunk" else "cell-median"))
     _save_comparison_png(out_dir / f"{stem}_Comparison.png", experimental, synth_u16,
                          args.kind, args.cell, sel_desc, args.display_norm,
-                         nuisance, imaging_physical)
+                         nuisance, imaging_physical, fixed_imaging=args.fixed_imaging_parameters,
+                         fixed_nuisance=bool(args.fixed_nuisance_rds))
     print(f"Persisted clip + provenance:\n    {clips_path}")
     print(f"Static comparison figure:\n    {out_dir / (stem + '_Comparison.png')}")
     print(f"Trajectory (provenance):\n    {traj_path}")
@@ -367,15 +571,53 @@ def parse_args(argv):
     p.add_argument("--map-source", choices=("chunk", "cell-median"), default="chunk",
                    help="imaging theta source: 'chunk' = the MAP at the selected (kind, cell, "
                         "chunk) entry (default); 'cell-median' = median over all of the cell's "
-                        "chunk MAPs (a robust single estimate).")
+                        "chunk MAPs (a robust single estimate). Ignored with --fixed-imaging-parameters.")
+    p.add_argument("--fixed-imaging-parameters", action="store_true",
+                   help="VALIDATION-GATE mode: do NOT read the MAP database; instead fix the imaging "
+                        "theta to correct-source values -- camera parameters at the MET config values "
+                        "(MET_CAMERA_PHYSICAL), non-camera parameters at prior-center nominals -- to "
+                        "test whether the corrected forward model recapitulates the experimental pixel "
+                        "histogram with no trained posterior. --chunk/--map-source are ignored.")
+    p.add_argument("--set-imaging", action="append", default=[], metavar="KEY=VALUE",
+                   help="override a fixed-imaging parameter with a physical value (repeatable), e.g. "
+                        "--set-imaging mu_pc=397.5 --set-imaging sigma_pc=0.604 (brightness/PSF "
+                        "calculated from the MET ThunderSTORM localizations). Only with "
+                        "--fixed-imaging-parameters; applied on top of the MET camera values and "
+                        "prior-center nominals. Values outside the training prior render as-is "
+                        "(extrapolated) and are flagged '*' in the figure.")
+    p.add_argument("--fixed-nuisance-RDS", dest="fixed_nuisance_rds",
+                   action="append", default=[], metavar="KEY=VALUE",
+                   help="fix the RDS nuisance -- the reaction-diffusion parameters that build the "
+                        "trajectory -- instead of drawing it fresh from the (flat) nuisance prior: "
+                        "set an RDS-nuisance parameter to a physical value (repeatable), e.g. "
+                        "--fixed-nuisance-RDS count_alp=134 --fixed-nuisance-RDS count_bet=35 "
+                        "--fixed-nuisance-RDS count_chi=31. Keys: count_alp / count_bet / count_chi "
+                        "(monomer / mobile-dimer / immobile-dimer counts) and diffusivity_alp / "
+                        "relative_diffusivity_bet / relative_diffusivity_chi. Any key left unset is "
+                        "held at its prior-center nominal. Passing this flag at all switches the "
+                        "render from a random nuisance draw to this deterministic nuisance, so the "
+                        "monomer:dimer split (hence the bright-pixel tail) is condition-appropriate "
+                        "rather than the prior's implausibly dimer-heavy expectation. Independent of "
+                        "--fixed-imaging-parameters.")
+    p.add_argument("--run-label", type=str, default=None, metavar="TEXT",
+                   help="optional short tag inserted into the output basename (e.g. 'Pure' / "
+                        "'Mixed') so renders that share the same selection -- same cell, both "
+                        "fixed-imaging + fixed-nuisance -- do not overwrite each other. "
+                        "Non-alphanumeric characters are replaced with '_'.")
+    p.add_argument("--dimer-model", dest="dimer_model", choices=("multiply", "sum"), default="sum",
+                   help="how a dimer's two labels combine: 'sum' (default) adds an independent "
+                        "second-label brightness draw (sum of two monomers -- same mean, lighter "
+                        "upper tail; Mutch 2007 convolution / Digman-Gratton Number & Brightness); "
+                        "'multiply' scales one draw by dimer_mule (=2) (heavier tail; retained as an option).")
     p.add_argument("--experiment-span-seconds", type=int, default=20,
                    help="recording length in seconds, used only to locate the .tif (default 20); "
                         "the render length is read from the .tif's actual frame count.")
-    p.add_argument("--display-norm", choices=("autoscale", "percentile"), default="autoscale",
-                   help="color scaling for the Comparison.png mid-frame panels: 'autoscale' "
-                        "(default) stretches magma to each image's own min/max (the reference "
-                        "viewer's behavior); 'percentile' uses a fixed per-video [p0.5, p99.5] "
-                        "window. Does not affect the persisted 16-bit pixels, only the figure.")
+    p.add_argument("--display-norm", choices=("full", "autoscale", "percentile"), default="full",
+                   help="color scaling for the Comparison.png frame panels: 'full' (default) uses "
+                        "a SHARED full-range [min, max] window over BOTH experimental and synthetic, "
+                        "so identical intensities map to identical colors and nothing is clipped; "
+                        "'autoscale' stretches each frame to its own min/max; 'percentile' uses "
+                        "a whole-clip [min, p99.99] window. Figure-only; does not touch the persisted pixels.")
     p.add_argument("--seed", type=int, default=None,
                    help="RNG seed for the RDS sim + render; default None (fresh draw). Fix it "
                         "for a reproducible trajectory across re-runs.")
@@ -383,9 +625,12 @@ def parse_args(argv):
     p.add_argument("--dry-run", action="store_true",
                    help="resolve + validate inputs and print what would be read/written; no sim.")
     args = p.parse_args(argv)
-    if args.map_source == "chunk" and args.chunk is None:
+    if args.set_imaging and not args.fixed_imaging_parameters:
+        p.error("--set-imaging is only valid with --fixed-imaging-parameters.")
+    if not args.fixed_imaging_parameters and args.map_source == "chunk" and args.chunk is None:
         p.error("--chunk is required with --map-source=chunk (the default); "
-                "pass --map-source cell-median to aggregate over the cell's chunks instead.")
+                "pass --map-source cell-median to aggregate over the cell's chunks instead, "
+                "or --fixed-imaging-parameters to skip the MAP database entirely.")
     return args
 
 

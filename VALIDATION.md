@@ -250,26 +250,26 @@ has its own five-stage smoke, run in order on a single GPU with plain `python`.
 It is seedless and requires approval (both rules above). Use one duration for all
 five stages — 2.0 s here; the pipeline is duration-general, but the DLI stage
 checks its frame count against the RDS trajectories, so a single run must share
-one duration. The learnable imaging vector is 10-dimensional.
+one duration. The inferred imaging vector is 6-dimensional — the five EMCCD camera parameters are marginalized as the SCOPE nuisance (drawn at the DLI stage, recorded separately as `Nuisance_SCOPE`), so the DLI stage writes both a `Theta_Set` (6 learnable) and a `Nuisance_SCOPE_Theta_Set` (5 camera) per task.
 
 ```bash
 # 1. Diffusion-only trajectories + imaging theta, per split (seedless)
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 --seed None
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split test  --tasks 4  --task-simulations 10 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split train --tasks 25 --task-simulations 10 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split test  --tasks 5  --task-simulations 10 --seed None
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py --total-time-seconds 2.0 --split eval  --tasks 2  --task-simulations 10 --seed None
 # 2. Render videos, per split (seedless; 8-bit, matching what the estimator trains on)
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 --video-dtype-bits 8 --seed None
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split test  --tasks 4  --task-simulations 10 --video-dtype-bits 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split train --tasks 25 --task-simulations 10 --video-dtype-bits 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split test  --tasks 5  --task-simulations 10 --video-dtype-bits 8 --seed None
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py --total-time-seconds 2.0 --split eval  --tasks 2  --task-simulations 10 --video-dtype-bits 8 --seed None
 # 3. Train the imaging posterior (single GPU)
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py --total-time-seconds 2.0 --epochs 5 --tasks 16 --test-tasks 4 --batch-size 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py --total-time-seconds 2.0 --epochs 5 --tasks 25 --test-tasks 5 --batch-size 8 --seed None
 # 4. MAP recovery on the held-out EVAL set
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Evaluation.py --total-time-seconds 2.0 --eval-tasks 2 --pool-mode unrestricted --seed None
 # 5. Real-data application
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment.py --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode unrestricted --seed None
 ```
 
-This generates 160 / 40 / 20 (train / test / eval) videos. `--pool-mode
+This generates 250 / 50 / 20 (train / test / eval) videos. `--pool-mode
 unrestricted` is mandatory on Evaluation and Experiment: the smoke posterior is
 undertrained, so its mass falls outside the prior box and the default `bounded`
 rejection pool stalls; `bounded` is for a well-trained (production) posterior.
@@ -327,12 +327,12 @@ a minimum recovery count.
 
 The epoch budget and the batch size are both flexible; the batch column is a
 recommendation that scales down with duration to fit GPU memory — adjust it to the
-available hardware. Two epoch budgets are recommended and reach a comparable
-trained state: **50 epochs in a single run** (a fresh run, without `--resurrect`),
-or **25 epochs run twice** — a first fresh round, then a second round with
-`--resurrect` continuing from the saved checkpoint (a crash-safe split for
-wall-time-limited queues, since each `--resurrect` round improves on the previous
-best).
+available hardware. A single run of the full budget (for example, **50 epochs**) is
+the recommended path: the LR warm-restart cycles now happen internally (see the warm
+restart in `train_loop`), reproducing within one run the restart mechanism that a
+chain of `--resurrect` rounds provided. Splitting the budget across `--resurrect`
+rounds (for example, **25 epochs run twice**) remains useful as a crash-safe option
+for wall-time-limited queues — each round continues from the saved checkpoint.
 
 Evaluation and Experiment use `--pool-mode bounded` — the well-trained-posterior
 default, in contrast to the smoke's `unrestricted`. Generation is seedless.
@@ -394,7 +394,7 @@ against any particular reference run. Equivalence rests on three pillars:
 
 3. **Imaging-pipeline functional equivalence.** The DLI stage applies a Gaussian
    point-spread function (erf-based pixel integration), an EMCCD detector model
-   (Poisson photon noise plus Gaussian readout noise), a brightness state
+   (Poisson photoelectrons, stochastic Gamma electron multiplication, and gain-independent Gaussian read noise), a brightness state
    machine, and the duration-independent photobleaching model. The verbose DLI
    banner (`--verbose`) prints the detector parameters, and a rendered video
    (via `--show`) shows sparse fluorescent spots on a near-zero background with
@@ -404,7 +404,7 @@ against any particular reference run. Equivalence rests on three pillars:
    derived from the brightness scale (§6.3 of `DETECTOR_WORKFLOW.md`), while the
    canonical parameter table supplies an explicit transition penalty the
    generator does not accept — a mismatch resolved by the canonical rework
-   (`DETECTOR_WORKFLOW.md` §9.1); the detector DLI stage runs unaffected. The
+   (`DETECTOR_WORKFLOW.md` §9.2); the detector DLI stage runs unaffected. The
 canonical DLI smoke (section 2.2) and the long-duration DLI leg (section 3.3)
 exercise this same path, so they do not run under the current code; use the
 detector DLI stage (section 2.5) to exercise imaging generation meanwhile.

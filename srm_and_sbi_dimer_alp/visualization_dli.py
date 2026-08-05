@@ -31,15 +31,17 @@ def extract_pixel_stats(video: np.ndarray, convert: float = 4.78) -> None:
     """Print pixel-value quantiles and plot a fitted-lognormal histogram.
 
     Reports two quantile lines: one in ADU (raw detector counts) and one in
-    photons (ADU divided by the conversion factor). Then fits a lognormal
+    a coarse photon-scale proxy (ADU divided by the conversion factor). Then fits a lognormal
     distribution to non-zero photon counts and shows a histogram with the
     fit overlay and quantile markers.
 
     Args:
         video: Pixel-value array of any shape (typically a video; the
             function flattens before computing quantiles).
-        convert: ADU-per-photon conversion factor (the EMCCD's `kappa_c`).
-            Default 4.78 matches the typical detector configuration.
+        convert: the conversion factor C = `kappa_c` (electrons per ADU); the
+            ADU-per-photoelectron diagnostic is gamma = g/C (see
+            REFERENCE_EMCCD_NOISE_MODEL.md sec. 6). Default 4.78 e-/ADU matches
+            the representative detector configuration.
     """
     import matplotlib.pyplot as plt
     from IPython import get_ipython

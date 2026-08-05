@@ -23,7 +23,7 @@
 #   KEY=VALUE pairs are the stage's --export knobs (see each stage script header);
 #   anything not passed falls back to that stage script's own default:
 #     simulation  : SPLIT TASK_OFFSET TASK_COUNT TASK_SIMS TOTAL_TIME
-#     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH HEARTBEAT RESURRECT
+#     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH NUM_WORKERS HEARTBEAT RESURRECT
 #                   (RESURRECT=1 continues training from the existing checkpoint)
 #     evaluation  : EVAL_TASKS SUMMARY POOL_MODE TOTAL_TIME
 #     experiment  : KINDS MAX_CELLS CHUNK_STEP SUMMARY POOL_MODE TOTAL_TIME
@@ -39,6 +39,7 @@
 #   ARRAY     Simulation only: --array spec (default 0-0 = one node)
 #   NTPN CPT  Simulation only: --ntasks-per-node / --cpus-per-task (else baked)
 #   GRES      GPU stages: --gres override (else baked gpu:8)
+#   EXCLUDE   --exclude node list -- steer off specific node(s), e.g. one with a degraded /work mount
 #   MON_OUT   batch-log --output dir (else the baked submit-directory --output)
 #
 # timing_label is rendered from TOTAL_TIME exactly as PARAMETERS.simulation.timing.label
@@ -132,7 +133,7 @@ case "$STAGE" in
   inference)
     SUBMIT_SCRIPT="$REPO/Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Inference.sh"
     JOBNAME="SRM_AND_SBI_DIMER_ALP_DETECTOR_${timing_label}_Inference"
-    _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add HEARTBEAT; _add RESURRECT
+    _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add NUM_WORKERS; _add HEARTBEAT; _add RESURRECT
     [ -n "${GPU_PART:-}" ] && SB+=( --partition="$GPU_PART" )
     [ -n "${GRES:-}" ]     && SB+=( --gres="$GRES" )
     [ -n "${MON_OUT:-}" ]  && SB+=( --output="$MON_OUT/%x_%A.out" )
@@ -162,9 +163,10 @@ case "$STAGE" in
     ;;
 esac
 
-[ -n "${ACCT:-}" ] && SB+=( --account="$ACCT" )
-[ -n "${TIME:-}" ] && SB+=( --time="$TIME" )
-[ -n "${DEP:-}" ]  && SB+=( --dependency="$DEP" )
+[ -n "${ACCT:-}" ]    && SB+=( --account="$ACCT" )
+[ -n "${TIME:-}" ]    && SB+=( --time="$TIME" )
+[ -n "${DEP:-}" ]     && SB+=( --dependency="$DEP" )
+[ -n "${EXCLUDE:-}" ] && SB+=( --exclude="$EXCLUDE" )   # steer off specific node(s), e.g. one with a degraded /work mount
 [ -f "$SUBMIT_SCRIPT" ] || { echo "FATAL: stage script not found: $SUBMIT_SCRIPT" >&2; exit 1; }
 
 EXPORT="$(IFS=,; echo "${EXPORT_PARTS[*]}")"

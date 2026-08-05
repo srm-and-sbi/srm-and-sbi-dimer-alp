@@ -393,7 +393,7 @@ class DiagnosticReporter:
     # ------------------------------------------------------------------
     # Figures: save an already-built matplotlib Figure as PNG (dump mode).
     # ------------------------------------------------------------------
-    def save_figure(self, name: str, fig, caption: str = "") -> Optional[Path]:
+    def save_figure(self, name: str, fig, caption: str = "", dpi: int = 200) -> Optional[Path]:
         """Save a matplotlib ``Figure`` as PNG under ``dump_dir/figures/``.
 
         Uses ``Figure.savefig``, which renders through the Agg canvas and so
@@ -404,13 +404,15 @@ class DiagnosticReporter:
             fig: A matplotlib ``Figure`` to save.
             caption: Optional plain-language description, shown beneath the
                 image in the report so the reader knows what the figure shows.
+            dpi: Raster resolution; 200 gives a crisp on-screen figure without
+                oversized files. Callers may raise it for print/publication.
         """
         if not self.dump or self.dump_dir is None:
             return None
         fig_dir = self.dump_dir / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
         png = fig_dir / f"{name}.png"
-        fig.savefig(str(png), dpi=110, bbox_inches="tight")
+        fig.savefig(str(png), dpi=dpi, bbox_inches="tight")
         self._figures.append((name, f"figures/{name}.png", caption))
         print(f"  [dump] figure -> {png}", flush=True)
         return png

@@ -26,8 +26,8 @@ Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_RDS.py \\
-        --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 --seed None
-    (repeat with --split test --tasks 4, and --split eval --tasks 2)
+        --total-time-seconds 2.0 --split train --tasks 25 --task-simulations 10 --seed None
+    (repeat with --split test --tasks 5, and --split eval --tasks 2)
     For the full detector smoke test see section 2.5 (Detector calibration smoke
     test) in VALIDATION.md.
 

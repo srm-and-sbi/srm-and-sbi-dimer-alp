@@ -12,14 +12,21 @@ together (the same sequence as the canonical `simulate_dli`, which is left
 untouched).
 
 Parameter sourcing:
-  - the 10 learnable imaging parameters (`kappa_c/o/g/v`, `mu_r`, `sigma_r`,
-    `mu_pc`, `sigma_pc`, `prob_photo_bleach`, `lambda_rate`)
-    come from the sampled θ in physical space;
-  - `brightness_quantile`, `numb_photo_bleach`, and `dimer_mule` (=√2) are fixed,
+  - the 11 imaging parameters come from ``imaging_physical`` (det.DETECTOR_IMAGING
+    order) in physical space: the 6 learnable inference targets (`mu_r`, `sigma_r`,
+    `mu_pc`, `sigma_pc`, `prob_photo_bleach`, `lambda_rate`) drawn as the training θ,
+    and the 5 SCOPE camera parameters (`gamma`, `kappa_o`, `kappa_b`, `kappa_s`,
+    `kappa_q`) drawn as the marginalized camera nuisance;
+  - the nominal gain/conversion `kappa_g`/`kappa_c` (spec metadata for the
+    `gamma = g/C` drift check), `brightness_quantile`, `numb_photo_bleach`, and
+    `dimer_mule` (=2; inert under the default `sum` dimer model) are fixed,
     read from the Detector parameter table;
   - `delta_frame` is the fixed camera cadence (`PARAMETERS.simulation.timing`),
     matching the canonical pipeline's source.
-Nothing in the canonical modules is modified.
+The canonical building blocks are reused as-is, except the shared `compute_intensity`
+photon-floor argument, renamed `darkcounts` -> `background_photons` for clarity
+(dark current is unmodeled here; the detector fills this floor with the optical
+background `kappa_o`).
 """
 
 import numpy as np
@@ -37,8 +44,10 @@ from .simulation_dli_support import (  # reused unchanged (building blocks)
     sample_psf_width,
 )
 
-# The 10 learnable imaging parameters, in DETECTOR_PARAMETERIZATION order.
-_IMAGING_KEYS = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
+# The full 11-key imaging vector, in det.DETECTOR_IMAGING order: the 6 learnable
+# inference targets followed by the 5 SCOPE camera-nuisance parameters. render reads
+# by key, so this is the fixed contract the DLI stage assembles imaging_physical to.
+_IMAGING_KEYS = det.DETECTOR_IMAGING_KEYS
 
 
 def _fixed(key: str):
@@ -49,22 +58,30 @@ def _fixed(key: str):
 def render_detector_video(pro_tray_poses: np.ndarray,
                           imaging_physical: np.ndarray,
                           dimer_mask=None,
+                          dimer_model: str = "sum",
                           seed=None,
                           verbose: bool = False) -> np.ndarray:
     """Render one video from particle poses and a physical imaging-θ vector.
 
     Mirrors the canonical `simulate_dli` pipeline step-for-step, but sources the
-    imaging parameters from ``imaging_physical`` — the 10 learnable imaging
-    parameters in ``DETECTOR_PARAMETERIZATION`` order, in physical space — instead
-    of the fixed parameter table. Reuses the canonical building blocks unchanged.
+    imaging parameters from ``imaging_physical`` — the 11 imaging parameters in
+    ``DETECTOR_IMAGING`` order (6 learnable targets + 5 SCOPE camera nuisance), in
+    physical space — instead of the fixed parameter table. The renderer reads each
+    value by key, so it is agnostic to whether a parameter was drawn as a learnable
+    target or a nuisance. Reuses the canonical building blocks unchanged.
 
     Args:
         pro_tray_poses: particle coordinates ``(n_frames, n_emitters, 3)`` in nm
             (only x, y are used; z dropped); NaN for absent particles.
-        imaging_physical: physical values of the 10 learnable imaging parameters,
-            in ``DETECTOR_PARAMETERIZATION`` order.
+        imaging_physical: physical values of the 11 imaging parameters,
+            in ``DETECTOR_IMAGING`` order.
         dimer_mask: optional boolean mask ``(1, n_emitters, n_frames)`` flagging
-            dimer-state emitters; their brightness is multiplied by ``dimer_mule``.
+            dimer-state emitters; their brightness is combined per ``dimer_model``.
+        dimer_model: "sum" (default) adds an independent second-label draw -- a dimer is
+            two independent labels whose photon counts add (sum of two monomers: same
+            mean, lighter tail than doubling; an n-mer's brightness is the n-fold
+            convolution of the monomer, Mutch et al. 2007). "multiply" scales one draw by
+            ``dimer_mule`` (heavier tail; retained as an option).
         seed: optional RNG seed for PSF widths, states, and EMCCD noise.
         verbose: forwarded to ``compute_matrices``.
 
@@ -84,12 +101,17 @@ def render_detector_video(pro_tray_poses: np.ndarray,
     pixel_size_nm = stem_geometry.pixel_size_nm
     root_size_px = stem_geometry.root_size_px
 
-    # --- Camera params + EMCCD detector (kappa_* from θ) -------------------
-    camera_conversion = img["kappa_c"]
-    camera_offset = img["kappa_o"] * camera_conversion
-    camera_gain = img["kappa_g"]
-    camera_variance = (img["kappa_v"] * camera_conversion) ** 2
-    detector = EMCCD(offset=camera_offset, gain=camera_gain, variance=camera_variance)
+    # --- Camera params + EMCCD detector (imaging from θ) -------------------
+    # The videos identify gain and conversion only through gamma = g/C (ADU per
+    # photoelectron). add_noise computes Gamma(N, em_gain)/electrons_per_adu, so
+    # em_gain=gamma with electrons_per_adu=1.0 yields Gamma(N, gamma) exactly.
+    detector = EMCCD(
+        quantum_efficiency=img["kappa_q"],       # QE from the SCOPE nuisance (config-anchored ~0.9; only gamma*kappa_q identifiable)
+        em_gain=img["gamma"],                    # gamma = g/C, the sole identifiable gain quantity
+        electrons_per_adu=1.0,                   # C absorbed into gamma
+        read_noise_adu=img["kappa_s"],
+        bias_adu=img["kappa_b"],
+    )
 
     # --- PSF params + per-emitter widths (mu_r, sigma_r from θ) ------------
     per_emitter_sqrt2sigma = sample_psf_width(
@@ -101,7 +123,7 @@ def render_detector_video(pro_tray_poses: np.ndarray,
     PSF = Gaussian(per_emitter_sqrt2sigma)
 
     # --- Photo-physics + CTMC/DTMC matrices --------------------------------
-    # mu_pc, sigma_pc, prob_photo_bleach, lambda_rate from θ; gamma derived (kappa_penalty).
+    # mu_pc, sigma_pc, prob_photo_bleach, lambda_rate from θ; flicker locality (kappa_penalty) derived from the brightness scale.
     # brightness_quantile + numb_photo_bleach fixed; delta_frame = fixed cadence.
     mu_pc = img["mu_pc"]
     sigma_pc = img["sigma_pc"]
@@ -124,11 +146,25 @@ def render_detector_video(pro_tray_poses: np.ndarray,
         scale=mu_pc, shape=sigma_pc, loc=0, seed=seed,
     )
     brightness = compute_brightness(brightness_quantile, scale=mu_pc, shape=sigma_pc, loc=0)
+    # For dimer_model="sum", each dimer's SECOND label needs its OWN independent flicker
+    # trajectory (a dimer = two labels, brightness = X1 + X2). Independent seed so it is not
+    # identical to the first label's; None stays non-deterministic.
+    dimer_states = None
+    if dimer_model == "sum":
+        dimer_states = generate_state_trajectories(
+            nframes=nframes, nemitters=nemitters, P=P,
+            brightness_quantile=brightness_quantile,
+            scale=mu_pc, shape=sigma_pc, loc=0,
+            seed=(None if seed is None else seed + 1),
+        )
 
-    # --- Pixel grid + dark counts ------------------------------------------
-    darkcounts = np.full(
+    # --- Pixel grid + optical background floor -----------------------------
+    # kappa_o = optical background (incident photons): ONE scalar per video,
+    # broadcast over all pixels/frames as the pre-PSF photon floor. Distinct from
+    # dark current (thermal electrons, genuinely zero here, handled by EMCCD).
+    optical_background = np.full(
         shape=(root_size_px, root_size_px),
-        fill_value=PARAMETERS.simulation.dli.darkcounts,
+        fill_value=img["kappa_o"],
         dtype=float,
     )
     xbounds = np.linspace(0, root_size_px, root_size_px + 1)
@@ -141,8 +177,9 @@ def render_detector_video(pro_tray_poses: np.ndarray,
     # --- Noise-free intensity + EMCCD noise --------------------------------
     intensity = compute_intensity(
         tracks=tracks_pixels, states=states, brightness=brightness,
-        darkcounts=darkcounts, xbounds=xbounds, ybounds=ybounds, PSF=PSF,
+        background_photons=optical_background, xbounds=xbounds, ybounds=ybounds, PSF=PSF,
         dimer_mask=dimer_mask, dimer_mule=_fixed("dimer_mule"),
+        dimer_model=dimer_model, dimer_states=dimer_states,
     )
     frames = generate_frames(intensity, detector, seed=seed)
     return frames

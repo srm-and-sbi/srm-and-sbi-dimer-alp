@@ -97,11 +97,11 @@ def convert_video_dtype(video: np.ndarray,
     Clipping: `rescale_intensity` clips values outside `in_range` before
     rescaling, so a negative input pixel maps to the output minimum (0) and an
     over-range pixel to the output maximum. Synthetic frames carry a small
-    negative read-noise excursion from the EMCCD model (`add_noise`) that a real
+    negative excursion from the gain-independent Gaussian read noise added after the register (`add_noise`) that a real
     camera cannot record; clipping to the non-negative range aligns the stored
     synthetic with the real camera domain. This is a deliberate, revisit-able
     choice -- a future or alternative noise model may have different negative
-    behavior. See PROJECT_CONTEXT.md (DLI Imaging, read-noise note).
+    behavior. See REFERENCE_EMCCD_NOISE_MODEL.md.
     """
     if bits_to not in _DTYPE_FOR_BITS:
         raise ValueError(

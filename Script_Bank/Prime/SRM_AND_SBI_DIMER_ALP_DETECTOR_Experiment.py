@@ -9,8 +9,9 @@ seed-then-optimize ``map_estimate`` to *real* experimental videos, for which the
 is no ground truth. Each cell's long recording is split into model-length chunks;
 the MAP theta is estimated per chunk, and the report shows the distribution of
 inferred imaging parameters per experimental condition (kind), so conditions can
-be compared. The inferred parameters are the imaging/DLI model (camera, PSF,
-brightness, flicker); reaction-diffusion biology is marginalized as nuisance.
+be compared. The inferred parameters are the emitter imaging model (PSF,
+brightness, flicker); the camera is marginalized as the SCOPE nuisance and the
+reaction-diffusion biology as the RDS nuisance.
 
 Multi-GPU: with more than one worker (``torchrun``) the (kind, cell) work splits
 across workers round-robin by rank; each worker writes its partial arrays as a
@@ -461,7 +462,7 @@ def main(args: argparse.Namespace) -> None:
     topo = resolve_topology()
     device = topo.device
     vista_device = torch.device("cpu")
-    posterior = artifacts.load_estimator(estimator_path, device=str(device))
+    posterior = artifacts.load_estimator(estimator_path, device=str(device), expected_parameter_keys=det.DETECTOR_PARAMETER_KEYS)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
         # Rebuild the prior on THIS worker's device for bounded rejection sampling.

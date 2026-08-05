@@ -11,11 +11,11 @@ Detector-specific differences below:
   1. It reads the ``_DETECTOR``-namespaced ``(video, imaging-theta)`` pairs written
      by the Detector DLI stage, by passing ``paths = detector_paths(...)`` to
      ``build_datasets`` and ``setup_training``. The estimator's parameter dimension
-     is therefore the 10 learnable imaging parameters (``theta_dim = 10``), not the
+     is therefore the 6 learnable imaging parameters (``theta_dim = 6``), not the
      canonical RDS set, and the prior, bounds, and per-parameter metadata are
      sourced from ``detector_parameterization`` — whose value-based role scheme
-     distinguishes the learnable imaging parameters from the marginalized RDS
-     nuisance rows.
+     distinguishes the learnable imaging parameters from the marginalized RDS and
+     SCOPE camera nuisance rows.
   2. It persists the trained estimator via the self-describing, version-portable
      format (``artifacts.save_estimator``) — a compile-stripped state_dict +
      rebuild spec + metadata — in place of the canonical pickled ``DirectPosterior``,
@@ -36,7 +36,7 @@ duration + fps):
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py \\
-        --total-time-seconds 2.0 --epochs 5 --tasks 16 --test-tasks 4 --batch-size 8 --seed None
+        --total-time-seconds 2.0 --epochs 5 --tasks 25 --test-tasks 5 --batch-size 8 --seed None
 
     # Resume training from the previously saved checkpoint:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py --resurrect
@@ -153,7 +153,7 @@ def main(args: argparse.Namespace) -> None:
     tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
     estimator_path = _estimator_path(paths, data_bank_root, timing_label)   # version-portable estimator artifact (Detector)
     imaging_keys = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
-    theta_dim = len(imaging_keys)                               # 10 learnable imaging params
+    theta_dim = len(imaging_keys)                               # 6 learnable imaging params (camera marginalized as SCOPE)
     video_shape = (timing.frame_count, geom.root_size_px, geom.root_size_px)
 
     print("\nOutput destinations:")
@@ -347,6 +347,7 @@ def main(args: argparse.Namespace) -> None:
         compress=compress,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        num_workers_override=args.num_workers,
         test_tasks=args.test_tasks,
         test_loss_distribution=use_tld,
         paths=paths,
@@ -589,6 +590,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--batch-size", type=int, default=PARAMETERS.inference.training.batch_size,
         help=f"DataLoader batch size (default: {PARAMETERS.inference.training.batch_size}).",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=None,
+        help="Per-run override for the DataLoader worker TOTAL budget (node-wide, divided across "
+             "ranks x loaders; per-GPU ~= value / num_gpus). Beats the machine profile's num_workers; "
+             "unset -> the profile value, or auto (all cores, capped at 8/GPU) when that is <= 0.",
     )
     parser.add_argument(
         "--learning-rate", type=float, default=None,

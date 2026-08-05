@@ -5,7 +5,7 @@
 # Adapts to the allocated GPUs: with >1 GPU it trains data-parallel via
 # DistributedDataParallel (torchrun, one process per GPU); with 1 GPU it is the
 # original single-GPU path. The `gpu` partition allocates a whole node (8 GPUs).
-# Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
+# Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH, NUM_WORKERS,
 #   HEARTBEAT (within-epoch progress: a line every N batches; default ~4/epoch),
 #   RESURRECT (set 1 to load the existing checkpoint and continue training from it
 #     -- continue a run stopped by the wall, or add epochs; unset = fresh run),
@@ -84,11 +84,14 @@ TEST_TASKS="${TEST_TASKS:-2}"
 EPOCHS="${EPOCHS:-50}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 BATCH="${BATCH:-}"   # empty -> script default (PARAMETERS batch_size, 32)
+NUM_WORKERS="${NUM_WORKERS:-}"   # empty -> machine-profile / auto (capped) worker budget; else per-run TOTAL override
 HEARTBEAT="${HEARTBEAT:-}"   # empty -> ~4 within-epoch progress lines/epoch; else a line every N batches
 RESURRECT="${RESURRECT:-}"   # set 1 to load the existing checkpoint and continue; unset/0 -> fresh run
 
 BATCH_ARG=()
 [ -n "$BATCH" ] && BATCH_ARG=(--batch-size "$BATCH")
+NUM_WORKERS_ARG=()
+[ -n "$NUM_WORKERS" ] && NUM_WORKERS_ARG=(--num-workers "$NUM_WORKERS")
 HEARTBEAT_ARG=()
 [ -n "$HEARTBEAT" ] && HEARTBEAT_ARG=(--heartbeat "$HEARTBEAT")
 RESURRECT_ARG=()
@@ -98,7 +101,7 @@ RESURRECT_ARG=()
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Inference.py"
 INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
-             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" )
+             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${NUM_WORKERS_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" )
 
 echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} gpus=${GPUS} seed=None | node $(hostname) ==="
 

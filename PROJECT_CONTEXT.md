@@ -70,11 +70,21 @@ accession S-BSST712).
 - `n_B_0`: Initial dimer count (typically 0)
 - `n_C_0`: Initial immobile dimer count (typically 0)
 
-**Not inferred (detector parameters, fixed here):**
-- Point-spread-function (PSF) width: Gaussian, σ ≈ 150 nm
-- Photon-detection efficiency: ε ≈ 0.6
-- EMCCD gain and readout noise: calibrated from the camera
-- Video frame rate: 50 Hz (20 ms per frame) — a fixed sampling cadence
+**Detector parameters — calibrated, not free constants** (inferred in the
+Stage-1 detector workflow, then held fixed for molecular inference; see §3):
+- Point-spread-function (PSF) width: **inferred** as a lognormal distribution
+  over the Gaussian width (median `mu_r`, log-spread `sigma_r`) — *not* a fixed σ.
+- Brightness and photophysics: **inferred** — emitter brightness (median `mu_pc`,
+  log-spread `sigma_pc`), photobleaching probability `prob_photo_bleach`, and flicker
+  rate `lambda_rate`.
+- The five EMCCD camera parameters — gain-conversion ratio `gamma = g/C`, optical
+  background `kappa_o`, read noise `kappa_s`, baseline `kappa_b`, and quantum
+  efficiency `kappa_q`: **marginalized as the SCOPE camera nuisance**, not inferred.
+  They are non-identifiable from the videos (only the product `gamma·kappa_q` sets the
+  amplitude), so each is drawn from an a-priori box and integrated over
+  (`DETECTOR_WORKFLOW.md` §9.3); `g` and `C` are fixed nominal spec metadata for the
+  `gamma` drift check.
+- Video frame rate: 50 Hz (20 ms per frame) — a fixed sampling cadence.
 - Recording length: supplied per run via `total_time_seconds` (commonly 2 s,
   5 s, or 10 s)
 
@@ -175,19 +185,31 @@ and memory counts for diagnosing resource behavior, and is off by default.
 5. Discretize to an integer pixel count (8- or 16-bit) and save a compressed
    `.zarr` video set.
 
-**Dimer brightness model:** Each emitter flagged as a dimer (species B or C) has
-its per-frame brightness multiplied by `dimer_mule = √2 ≈ 1.414` — *not* the
-naive 2× of two co-located fluorophores. Two consistent physical interpretations:
+**Dimer brightness model:** A dimer is two labels within one point-spread function,
+so single-emitter fitting (ThunderSTORM, or the eye) records **one** spot whose
+photons combine. The model combines the two labels by the **sum** of two independent
+monomer brightness draws (`dimer_model="sum"`, the default): each label is drawn from
+the same per-monomer brightness log-normal (`mu_pc`, `sigma_pc`) with its own
+independent flicker trajectory, and their photon counts **add**. This is the
+physically grounded combination for two independent, always-on labels — an *n*-mer's
+brightness distribution is the *n*-fold convolution of the monomer's (Mutch et al.
+2007; Digman & Gratton number-and-brightness) — giving a dimer a mean of `~2×` a
+monomer with a lighter upper tail than rigidly doubling one draw. It is corroborated
+by the data: the fitted per-spot intensity is `~1.8×` between the monomer-dominated
+Fab and the dimer-rich InlB condition (a lower bound, given the analysis
+intensity-range clip; see `DETECTOR_WORKFLOW.md` §6.4–§6.5).
 
-- **Shot-noise-equivalent scaling.** The signal-to-noise ratio for the sum of
-  two independent Poisson sources scales as `√(2N) / √N = √2` versus a single
-  source. If "brightness" here represents the noise-equivalent detection metric
-  (rather than raw photon count), the `√2` factor matches.
-- **Geometric mean of bright/dark states.** Fluorophore blinking puts each
-  emitter stochastically into a dark or bright state. The time-averaged
-  effective brightness of a dimer is `GM(1×, 2×) = √2`, consistent with the two
-  fluorophores spending roughly equal time in the {one active, both active}
-  configurations.
+The retained alternative, `dimer_model="multiply"` (which the canonical `simulate_dli`
+passes explicitly), rigidly scales a single monomer draw by `dimer_mule` — a
+per-dataset photophysical constant in `[1, 2]`: **`2`** for two permanently-on,
+both-present labels (the MET ATTO 647N default); **`√2 ≈ 1.41`** when only ~one label
+is visible on average (a photoswitching dye, whose time-averaged brightness is the
+geometric mean `GM(1×, 2×) = √2`, or ~50% labeling). It shares the `~2×` mean but
+has a heavier upper tail, and is kept for sensitivity checks.
+
+The condition difference (Fab vs InlB) is carried by the **dimer fraction** (the
+species counts), with the combination model and the per-monomer brightness `mu_pc`
+shared across conditions — not by a per-condition brightness.
 
 **Photobleaching model:** Each emitter can irreversibly transition to a dark
 (bleached) state, applied per frame through a two-state transition matrix. The
@@ -223,34 +245,25 @@ lumps together bleaching, diffusion out of the field, blinking and gaps, and
 unbinding; it describes a different process and is not substituted for
 `prob_photo_bleach`.)
 
-**Detector read-noise term (documented discrepancy).** The EMCCD forward model
-adds readout noise in a single function, `add_noise`, reproducing the reference
-implementation (https://github.com/PessoaP/simulated_tracking, `detection.py`); it
-departs from the physically standard EMCCD model in two ways: (1) it scales a unit
-normal by `variance / gain^2` — a variance where a standard deviation is required
-— and (2) it adds the draw before the gain multiplication rather than after the
-multiplication register. Together these set the effective post-gain readout
-standard deviation to `variance / gain` (about 376 ADU at the fixed camera gain)
-rather than the gain-independent `sqrt(variance) = kappa_v * kappa_c` (about 238
-ADU) the parameter naming implies. The standard treatment adds readout noise as a
-gain-independent Gaussian of standard deviation `sqrt(variance)` after the register
-(Robbins & Hadwen 2003, IEEE Trans. Electron Devices 50(5):1227–1232; Basden,
-Haniff & Mackay 2003, MNRAS 345(3):985–991; Hirsch et al. 2013, PLoS ONE
-8(1):e53671).
+**Detector noise model (EMCCD Poisson–Gamma–Normal).** The imaging stage renders
+camera counts in a single function, `add_noise` (`simulation_dli_support.py`),
+following the physically grounded EMCCD chain specified in
+`REFERENCE_EMCCD_NOISE_MODEL.md`: Poisson photoelectrons, stochastic `Gamma(N, g)`
+electron multiplication (excess-noise factor `F² = 2`), conversion to ADU by the
+factor `C`, a gain-independent Gaussian read noise of standard deviation `σ` added
+*after* the register, and a constant camera baseline `b`. The gain `g` and
+conversion `C` enter the image likelihood only through the ratio `γ = g/C` (the
+ADU-per-photoelectron), so `γ` is inferred directly and `g`/`C` are fixed nominal
+metadata; the optical background `kappa_o`, read noise `σ`, and baseline `b` are
+identified directly from the background and dark pixels.
 
-The term is retained deliberately, with a known limitation. The `variance / gain`
-form depends on the gain. Where the imaging parameters are held fixed, this only
-rescales the fitted `variance` and leaves the rendered output unchanged, so the
-rendered pixel-intensity distribution can be tuned to come close to — though not
-exactly reproduce — the real one; the negative tail is removed by the non-negative
-storage clip (`convert_video_dtype`). Where the gain is itself inferred (imaging
-calibration), the same dependence couples the read-noise parameters with the gain
-and contributes to the gain's weak identifiability. (Parameter recovery is
-validated on the held-out synthetic EVAL namespace; real recordings have no ground
-truth.) A candidate correction — a gain-independent read-noise of standard
-deviation `sqrt(variance)` added after the gain, changing both the variable and the
-operation order in `add_noise` — would remove this coupling and is left to a later
-iteration, since it changes the forward model on which the estimators are trained.
+The read-noise term produces a small negative excursion (pixels below the baseline, and
+rarely values above the sensor range); the non-negative storage clip in
+`convert_video_dtype` removes it, aligning the stored synthetic with the recordable
+camera domain, and its floor is re-examined against the read-noise scale after
+re-calibration. Parameter recovery is validated on the held-out synthetic EVAL
+namespace; real recordings have no ground truth. See `REFERENCE_EMCCD_NOISE_MODEL.md`
+for the full specification, moments, prior ranges, and sources.
 
 **Output:** A `.zarr` video set (chunked array, efficient I/O). Shape
 `(frame_count, height, width)` — for example `(100, 256, 256)` at 2 s and 50 Hz.
@@ -295,7 +308,13 @@ optional `--resurrect` flag to continue from an existing checkpoint)
    then continues the standard training loop from those weights. A new optimum
    overwrites the same checkpoint. This supports incremental training across
    separate invocations.
-4. **Output:** Posterior samples are obtained by passing a real experimental
+4. **In-run warm restart (automatic):** The training loop monitors the learning
+   rate; once it has decayed to its floor and stalled there without improving, the
+   loop reloads the best checkpoint and restarts the rate at a decaying peak, so a
+   single run performs the restart cycles that a chain of `--resurrect` invocations
+   would. Governed by `warm_restart_dwell` (epochs of stalled floor before a restart;
+   `0` disables it); composes with `--resurrect`.
+5. **Output:** Posterior samples are obtained by passing a real experimental
    video (or a synthetic holdout) through the trained network.
 
 **Output:**
@@ -592,7 +611,8 @@ reference run element-by-element. Three pillars carry this:
    and simulation builders construct exactly the declared model for a given
    theta.
 3. **Imaging-pipeline functional equivalence.** The Gaussian PSF (erf-based
-   pixel integration), the EMCCD model (Poisson plus Gaussian readout), the
+   pixel integration), the EMCCD model (Poisson photoelectrons, stochastic Gamma
+   multiplication, Gaussian readout), the
    brightness state machine, and the duration-independent photobleaching model
    produce videos of the correct shape, dtype, and value distribution.
 
@@ -761,11 +781,11 @@ This calls for theoretical or empirical analysis.
 (uniform versus log-normal)? Should informative priors from the biophysical
 literature be used?
 
-**S3. Posterior convergence across repeated resurrect invocations.** When
-inference is re-run with `--resurrect` repeatedly, each run continuing from the
-previous optimum, how many invocations are needed for posterior stability? Is
-there a principled stopping criterion beyond an empirical plateau (for example, a
-test-loss delta below tolerance)?
+**S3. Posterior convergence across restart cycles.** The training loop now performs
+warm-restart cycles automatically within a single run (and `--resurrect` chains them
+across runs); how many cycles are needed for posterior stability, and is there a
+principled stopping criterion beyond an empirical plateau (for example, a test-loss
+delta below tolerance, or a restart that fails to improve the best)?
 
 **S4. Out-of-distribution robustness.** If the network is trained at one
 recording length and tested at a different one (for example, trained on 2 s

@@ -28,9 +28,9 @@ Outputs (the ``{timing_label}`` token, e.g. ``5S_50FPS``, is rendered from
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Simulation_DLI.py \\
-        --total-time-seconds 2.0 --split train --tasks 16 --task-simulations 10 \\
+        --total-time-seconds 2.0 --split train --tasks 25 --task-simulations 10 \\
         --video-dtype-bits 8 --seed None
-    (repeat with --split test --tasks 4, and --split eval --tasks 2)
+    (repeat with --split test --tasks 5, and --split eval --tasks 2)
     (add --dry-run to resolve config + inputs and print planned I/O without rendering)
     For the full detector smoke test see section 2.5 (Detector calibration smoke
     test) in VALIDATION.md.
@@ -76,6 +76,16 @@ from srm_and_sbi_dimer_alp.utils import (
 _DTYPE_FOR_BITS = {8: np.uint8, 16: np.uint16}
 
 
+def _nuisance_scope_path(paths, task_alias, data_bank_root, timing_label, compress, split):
+    """SCOPE camera-nuisance provenance file: the theta-set path with the object token
+    swapped ``Theta_Set`` -> ``Nuisance_SCOPE_Theta_Set`` (reuses the canonical path
+    pattern; no new path code). Holds the 5 marginalized camera draws in
+    ``det.DETECTOR_SCOPE_KEYS`` order, parallel to the learnable Theta_Set and the RDS
+    Nuisance_RDS_Theta_Set (DETECTOR_WORKFLOW.md sec. 7 / 9.3)."""
+    base = paths.theta_set_path(task_alias, data_bank_root, timing_label, compress, split)
+    return base.with_name(base.name.replace("Theta_Set", "Nuisance_SCOPE_Theta_Set"))
+
+
 def main(args: argparse.Namespace) -> None:
     """Run the full DLI rendering pipeline per the CLI args."""
     timing = RunTiming(
@@ -97,11 +107,17 @@ def main(args: argparse.Namespace) -> None:
     paths = det.detector_paths(PARAMETERS.paths)   # Detector-qualified prefix
     div = "=" * 72
 
-    # Learnable imaging prior (the inference target / training label): 10 params,
-    # in DETECTOR_PARAMETERIZATION order, sampled in log10 space.
-    imaging_keys = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
+    # Imaging draw, sampled in log10 space: the 6 learnable inference targets (the
+    # training label, Theta_Set) and the 5 SCOPE camera-nuisance params (marginalized,
+    # recorded as Nuisance_SCOPE). Together they are the full 11-key imaging vector the
+    # renderer consumes, in det.DETECTOR_IMAGING order (learnable first, then SCOPE).
+    learnable_keys = det.DETECTOR_PARAMETER_KEYS      # 6 -> Theta_Set (the inference target)
+    scope_keys = det.DETECTOR_SCOPE_KEYS              # 5 -> Nuisance_SCOPE (marginalized camera)
+    imaging_keys = det.DETECTOR_IMAGING_KEYS          # 11 = learnable + SCOPE (render order)
     ilow = np.array(det.theta_lower_bound())
     ihigh = np.array(det.theta_upper_bound())
+    slow = np.array(det.scope_lower_bound())
+    shigh = np.array(det.scope_upper_bound())
 
     print(div)
     print(f" {paths.project_alias} — Detector Simulation_DLI (imaging from theta)")
@@ -167,6 +183,9 @@ def main(args: argparse.Namespace) -> None:
     print(f"  writes theta sets   : <data_bank>/{paths.theta_subdir}/"
           f"{paths.project_alias}_{timing_label}_Theta_Set_TASK_{{n}}.{output_fmt}   "
           f"(imaging-theta labels; the inference target)")
+    print(f"  writes SCOPE sets    : <data_bank>/{paths.theta_subdir}/"
+          f"{paths.project_alias}_{timing_label}_Nuisance_SCOPE_Theta_Set_TASK_{{n}}.{output_fmt}   "
+          f"(marginalized camera nuisance)")
     print(f"  reads trajectories  : <data_bank>/{paths.video_subdir}/"
           f"{paths.trajectory_repo}/{paths.project_alias}_{timing_label}_TASK_{{n}}/"
           f"{paths.project_alias}_{timing_label}_TASK_{{n}}_SIM_{{m}}.h5")
@@ -176,7 +195,10 @@ def main(args: argparse.Namespace) -> None:
 
     if args.verbose:
         print("\nLearnable imaging theta (the inference target / training label):")
-        for key, lo, hi in zip(imaging_keys, ilow, ihigh):
+        for key, lo, hi in zip(learnable_keys, ilow, ihigh):
+            print(f"  {key:<24}  : log10 ∈ [{lo:+.3f}, {hi:+.3f}]   (10^ → physical)")
+        print("SCOPE camera nuisance (marginalized; recorded as Nuisance_SCOPE):")
+        for key, lo, hi in zip(scope_keys, slow, shigh):
             print(f"  {key:<24}  : log10 ∈ [{lo:+.3f}, {hi:+.3f}]   (10^ → physical)")
 
     print(f"\n{div}\n")
@@ -187,17 +209,21 @@ def main(args: argparse.Namespace) -> None:
     # reading that task's diffusion-only trajectories (from the Detector RDS stage); otherwise all of --tasks.
     task_indices = [args.task_id] if args.task_id is not None else list(range(args.tasks))
 
-    # ---- Draw the imaging theta for every task up front (the inference target /
-    # training label). Sized (n_rows, sims, n_imaging) and indexed per task, so a
-    # given task index draws the SAME imaging theta whether the run covers all
-    # tasks or a single --task-id (HPC array fan-out): the row index is stable.
-    # PLAIN default_rng(seed) (default None -> non-deterministic); each ranged
-    # imaging parameter is sampled in log10 space and mapped to physical by 10**.
+    # ---- Draw the imaging parameters for every task up front, in log10 space then
+    # mapped to physical by 10**. Two blocks: the learnable theta (the inference
+    # target / training label) and the SCOPE camera nuisance (marginalized). Both are
+    # sized (n_rows, sims, n) and indexed per task, so a given task index draws the
+    # SAME values whether the run covers all tasks or a single --task-id (HPC array
+    # fan-out): the row index is stable. PLAIN default_rng(seed) (default None ->
+    # non-deterministic).
     n_rows = max(task_indices) + 1
     rng = np.random.default_rng(args.seed)
-    imaging_log10 = rng.uniform(low=ilow, high=ihigh,
-                                size=(n_rows, args.task_simulations, len(ilow)))
-    imaging_sets = np.power(10, imaging_log10)   # physical (the labels)
+    learnable_sets = np.power(10, rng.uniform(
+        low=ilow, high=ihigh,
+        size=(n_rows, args.task_simulations, len(ilow))))     # (.., 6) physical labels
+    scope_sets = np.power(10, rng.uniform(
+        low=slow, high=shigh,
+        size=(n_rows, args.task_simulations, len(slow))))     # (.., 5) physical SCOPE nuisance
 
     # ---- Dry run: resolve the planned workload + input/output destinations and
     # exit before the render loop and any directory creation -- so it computes
@@ -213,8 +239,8 @@ def main(args: argparse.Namespace) -> None:
         print(f"[DRY RUN] plans {n_tasks} task(s) (index {task_span}) x "
               f"{args.task_simulations} sim(s) = {planned} video(s), "
               f"split _{split}.")
-        print(f"[DRY RUN] imaging-theta labels drawn: shape {imaging_sets.shape} "
-              f"(n_rows, sims, {len(ilow)} imaging params), persisted as the training label.")
+        print(f"[DRY RUN] imaging draw: learnable {learnable_sets.shape} (Theta_Set) "
+              f"+ SCOPE {scope_sets.shape} (Nuisance_SCOPE).")
         missing = 0
         for task in task_indices:
             theta_set_path = paths.theta_set_path(
@@ -229,9 +255,14 @@ def main(args: argparse.Namespace) -> None:
                     missing += 1
             video_set_path = paths.video_set_path(
                 task, data_bank_root, timing_label, compress, split)
+            scope_set_path = _nuisance_scope_path(
+                paths, task, data_bank_root, timing_label, compress, split)
             print(f"  writes theta set    (task {task}): {theta_set_path}")
-            print(f"    imaging[sim 0] (physical): "
-                  f"{dict(zip(imaging_keys, np.round(imaging_sets[task, 0], 4).tolist()))}")
+            print(f"  writes SCOPE set     (task {task}): {scope_set_path}")
+            print(f"    learnable[sim 0] (physical): "
+                  f"{dict(zip(learnable_keys, np.round(learnable_sets[task, 0], 4).tolist()))}")
+            print(f"    SCOPE[sim 0] (physical): "
+                  f"{dict(zip(scope_keys, np.round(scope_sets[task, 0], 4).tolist()))}")
             print(f"  reads trajectories  (task {task}): "
                   f"{traj_present}/{args.task_simulations} present")
             print(f"  writes video set    (task {task}): {video_set_path}")
@@ -249,14 +280,19 @@ def main(args: argparse.Namespace) -> None:
         if args.verbose:
             log_memory_state()
 
-        # ---- Persist this task's imaging theta (the training label) ---
-        # Drawn above into imaging_sets; the Detector DRAWS + writes the imaging
-        # theta here, where the canonical stage reads a pre-written theta set.
-        theta_data = imaging_sets[task_alias]   # (task_simulations, n_imaging), physical
+        # ---- Persist this task's imaging draw: the learnable theta (the training
+        # label, Theta_Set) and the SCOPE camera nuisance (Nuisance_SCOPE). The
+        # Detector DRAWS + writes both here, where the canonical stage reads a
+        # pre-written theta set. Rendered together per sim (theta ++ scope).
+        theta_data = learnable_sets[task_alias]   # (task_simulations, 6), physical labels
+        scope_data = scope_sets[task_alias]       # (task_simulations, 5), physical SCOPE nuisance
         theta_set_path = paths.theta_set_path(
             task_alias, data_bank_root, timing_label, compress, split)
         theta_set_path.parent.mkdir(parents=True, exist_ok=True)
+        scope_set_path = _nuisance_scope_path(
+            paths, task_alias, data_bank_root, timing_label, compress, split)
         print(f"  Writing imaging theta:  {theta_set_path}")
+        print(f"  Writing SCOPE nuisance: {scope_set_path}")
         if compress:
             theta_compressor = numcodecs.Blosc(
                 cname="zstd", clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE,
@@ -267,8 +303,15 @@ def main(args: argparse.Namespace) -> None:
                 compressor=theta_compressor,
             )
             theta_store[:, :] = theta_data
+            scope_store = zarr.open(
+                store=str(scope_set_path), mode="w", shape=scope_data.shape,
+                chunks=(1, scope_data.shape[1]), dtype=np.float64,
+                compressor=theta_compressor,
+            )
+            scope_store[:, :] = scope_data
         else:
             save_theta_set(theta_set_path, theta_data, compress=False)
+            save_theta_set(scope_set_path, scope_data, compress=False)
 
         # ---- Create the video-set store/buffer ------------------------
         video_set_path = paths.video_set_path(
@@ -341,10 +384,12 @@ def main(args: argparse.Namespace) -> None:
                 )
                 pro_tray_poses = np.nanmax(a=tray_poses, axis=3)
 
-            theta = theta_data[sim]   # this simulation's imaging-theta label (physical)
+            # Assemble the full 11-key imaging vector (det.DETECTOR_IMAGING order):
+            # the 6 learnable labels followed by the 5 SCOPE camera-nuisance draws.
+            imaging_physical = np.concatenate([theta_data[sim], scope_data[sim]])
             frames = render_detector_video(
                 pro_tray_poses=pro_tray_poses,
-                imaging_physical=theta,
+                imaging_physical=imaging_physical,
                 dimer_mask=dimer_mask,
                 seed=args.seed,   # default None -> non-deterministic
                 verbose=args.verbose,

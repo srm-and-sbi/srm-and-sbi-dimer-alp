@@ -138,75 +138,90 @@ class Detector(ABC):
 
 
 class EMCCD(Detector):
-    """Electron-multiplying CCD detector model.
+    """Electron-multiplying CCD detector: Poisson-Gamma-Normal forward model.
 
-    The pipeline applied to a noise-free photon-count image `intensity`
-    (see `add_noise`):
-
-        1. Poisson shot noise:   frames  = Poisson(intensity)
-        2. Readout-noise draw:   frames += standard_normal * variance / gain^2
-        3. Gain multiplication:  frames *= gain
-        4. Offset addition:      frames += offset    (ADU)
-
-    The result is an image in ADU (analog-to-digital units, i.e. detector
-    counts). Steps 1-4 reproduce the reference implementation
-    (https://github.com/PessoaP/simulated_tracking, `detection.py`).
-
-    Read-noise caveat (documented; the term is kept as written for now). The
-    readout draw above departs from the physically standard EMCCD model in two
-    ways: it scales the unit normal by `variance / gain^2` -- a variance where a
-    standard deviation belongs -- and it is added BEFORE the gain multiplication
-    (step 2, ahead of step 3) rather than after the multiplication register.
-    Together these make the effective post-gain readout standard deviation
-    `variance / gain`, not the gain-independent `sqrt(variance) = kappa_v * kappa_c`
-    the parameter name implies; in the standard model the readout noise is a
-    gain-independent Gaussian added after the register, standard deviation
-    `sqrt(variance)` (Robbins & Hadwen 2003; Basden, Haniff & Mackay 2003; Hirsch
-    et al. 2013).
-
-    The `variance / gain` form depends on the gain: with the gain held fixed it is
-    absorbed into the fitted `variance` and leaves the rendered output unchanged,
-    but with the gain inferred it couples the read-noise and gain parameters and
-    contributes to the gain's weak identifiability. A candidate correction -- draw
-    `standard_normal * sqrt(variance)` and add it after `frames *= gain`, changing
-    both the variable and the operation order -- lives entirely in `add_noise` and
-    would remove this dependence; the precise correction is not yet settled and is
-    left to a later iteration. See the read-noise note under DLI Imaging in
-    PROJECT_CONTEXT.md.
-
-    Args:
-        offset: per-pixel baseline added after gain (ADU).
-        gain: electron-multiplying gain factor (dimensionless).
-        variance: readout-noise variance (ADU^2); see the units caveat above.
+    Attributes:
+        quantum_efficiency: photon -> photoelectron probability, in [0, 1].
+        em_gain: mean electron-multiplication gain, output e- per input e- (> 0).
+        electrons_per_adu: conversion factor C, output e- per ADU (> 0).
+        read_noise_adu: Gaussian read-noise standard deviation, in ADU (>= 0).
+        bias_adu: electronic baseline added after conversion, in ADU.
+        dark_current_e_per_s: thermal dark current, e- per pixel per s (default 0).
+        cic_e_per_frame: clock-induced charge, e- per pixel per frame (default 0).
+        exposure_s: exposure time in seconds; scales dark current per frame (default 0).
     """
 
-    def __init__(self, offset: float, gain: float, variance: float):
-        self.offset = offset
-        self.gain = gain
-        self.variance = variance
+    def __init__(self, quantum_efficiency: float, em_gain: float,
+                 electrons_per_adu: float, read_noise_adu: float, bias_adu: float,
+                 dark_current_e_per_s: float = 0.0, cic_e_per_frame: float = 0.0,
+                 exposure_s: float = 0.0):
+        if not 0.0 <= quantum_efficiency <= 1.0:
+            raise ValueError("quantum_efficiency must lie in [0, 1]")
+        if em_gain <= 0:
+            raise ValueError("em_gain must be positive")
+        if electrons_per_adu <= 0:
+            raise ValueError("electrons_per_adu must be positive")
+        if read_noise_adu < 0:
+            raise ValueError("read_noise_adu must be non-negative")
+        if dark_current_e_per_s < 0 or cic_e_per_frame < 0 or exposure_s < 0:
+            raise ValueError("dark current, CIC, and exposure must be non-negative")
+        self.quantum_efficiency = quantum_efficiency
+        self.em_gain = em_gain
+        self.electrons_per_adu = electrons_per_adu
+        self.read_noise_adu = read_noise_adu
+        self.bias_adu = bias_adu
+        self.dark_current_e_per_s = dark_current_e_per_s
+        self.cic_e_per_frame = cic_e_per_frame
+        self.exposure_s = exposure_s
 
 
 def add_noise(intensity: np.ndarray,
               detector: EMCCD,
               seed: Optional[int] = None) -> np.ndarray:
-    """Apply EMCCD noise (Poisson + Gaussian) and the gain+offset transformation.
+    """Render EMCCD counts from expected incident photons.
+
+    Applies the Poisson-Gamma-Normal chain (sec. 2): Poisson photoelectrons,
+    stochastic Gamma electron multiplication, conversion to ADU, gain-independent
+    Gaussian read noise, and bias.
 
     Args:
-        intensity: Noise-free photon-count image (same shape as the desired
-            output frames). Negative entries are clipped to 0 by the Poisson
-            sampler implicitly.
-        detector: An EMCCD instance with offset, gain, variance.
-        seed: Optional RNG seed for both the Poisson and Gaussian draws.
+        intensity: Expected incident photons per pixel per frame; finite and
+            non-negative. Emitter signal and optical background must already be summed.
+        detector: An EMCCD instance (sec. 2 unit contract).
+        seed: Optional RNG seed; None (default) draws non-deterministically.
 
     Returns:
-        Array of the same shape as `intensity`, in ADU.
+        Array of the same shape as `intensity`, in ADU (floating point).
     """
     rng = np.random.default_rng(seed)
-    frames = rng.poisson(intensity).astype(float)
-    readout = rng.standard_normal(frames.shape) * detector.variance / (detector.gain ** 2)
-    frames += readout
-    frames *= detector.gain
-    frames += detector.offset
+    expected_photons = np.asarray(intensity, dtype=np.float64)
+    if not np.all(np.isfinite(expected_photons)):
+        raise ValueError("intensity contains non-finite values")
+    if np.any(expected_photons < 0):
+        raise ValueError("intensity must be non-negative")
+
+    # Stage 1 - photoelectrons (Poisson thinning; optional dark current + CIC).
+    mean_input_electrons = (
+        detector.quantum_efficiency * expected_photons
+        + detector.dark_current_e_per_s * detector.exposure_s
+        + detector.cic_e_per_frame
+    )
+    input_electrons = rng.poisson(mean_input_electrons)
+
+    # Stage 2 - electron multiplication: Gamma(shape=N, scale=g); zero input -> zero output.
+    output_electrons = np.zeros(expected_photons.shape, dtype=np.float64)
+    positive = input_electrons > 0
+    output_electrons[positive] = rng.gamma(
+        shape=input_electrons[positive].astype(np.float64),
+        scale=detector.em_gain,
+    )
+
+    # Stage 3 - conversion to ADU.
+    frames = output_electrons / detector.electrons_per_adu
+    # Stage 4 - gain-independent Gaussian read noise (ADU), after multiplication.
+    frames += rng.standard_normal(frames.shape) * detector.read_noise_adu
+    # Stage 5 - electronic bias.
+    frames += detector.bias_adu
     return frames
 
 
@@ -320,12 +335,14 @@ def add_pixel_counts(intensity: np.ndarray,
 def compute_intensity(tracks: np.ndarray,
                       states: np.ndarray,
                       brightness: np.ndarray,
-                      darkcounts: np.ndarray,
+                      background_photons: np.ndarray,
                       xbounds: np.ndarray,
                       ybounds: np.ndarray,
                       PSF: Gaussian,
                       dimer_mask: Optional[np.ndarray] = None,
-                      dimer_mule: float = np.sqrt(2)) -> np.ndarray:
+                      dimer_mule: float = 2.0,
+                      dimer_model: str = "sum",
+                      dimer_states: Optional[np.ndarray] = None) -> np.ndarray:
     """Compute the noise-free per-pixel photon-count image.
 
     Args:
@@ -335,36 +352,62 @@ def compute_intensity(tracks: np.ndarray,
             an integer in `range(n_brightness_states)` per frame per emitter.
         brightness: 1D array of brightness values (photon counts) indexed by
             state, length `n_brightness_states`.
-        darkcounts: 2D array of shape `(n_pix_x, n_pix_y)` — per-pixel
-            baseline (zero by default; can encode non-zero dark current).
+        background_photons: 2D array of shape `(n_pix_x, n_pix_y)` — the pre-PSF
+            per-pixel photon floor added under the emitter signal. Zero by default
+            (no background); the detector fills it with the optical background
+            `kappa_o`. This is NOT dark current (thermal electrons do not pass
+            through QE and are handled separately by `EMCCD`).
         xbounds, ybounds: 1D arrays of pixel-boundary positions.
         PSF: `Gaussian` instance with per-emitter `sqrt_2sigma`.
         dimer_mask: Optional boolean array of shape `(1, n_emitters, n_frames)`
             flagging emitters in dimer states (B or C). Their brightness is
-            multiplied by `dimer_mule` to model the brighter signal from a
-            dimer compared to a monomer.
-        dimer_mule: Multiplier for dimer-flagged emitter brightness.
-            Default `sqrt(2)` (two molecules' worth of brightness, summed
-            in quadrature; equivalent to coherent addition of equal-phase
-            sources).
+            combined per `dimer_model` -- the `sum` default adds an independent
+            second-label draw; `multiply` scales one draw by `dimer_mule` -- to
+            model the brighter signal from a dimer compared to a monomer.
+        dimer_mule: Merged-dimer brightness relative to a monomer, applied ONLY
+            under `dimer_model="multiply"` (a dimer is two labels within one PSF,
+            imaged as one spot whose photons combine). Regime-dependent in [1, 2]:
+            `2.0` = two PERMANENTLY-ON labels (the always-on ATTO 647N case);
+            `sqrt(2)` ~= 1.41 when only ~one label is visible on average
+            (photoswitching dye, or ~50% labeling). See PROJECT_CONTEXT.md.
+        dimer_model: how a dimer's two labels combine. "sum" (default): the merged
+            brightness is the SUM of two INDEPENDENT monomer brightnesses (photons add; an
+            n-mer's intensity distribution is the n-fold convolution of the monomer's, Mutch
+            et al. 2007 Biophys J; Digman & Gratton 2008 Number & Brightness) -- same mean
+            as `dimer_mule=2` but a lighter upper tail; requires `dimer_states`. "multiply":
+            brightness is scaled by `dimer_mule` (a fixed factor of one monomer draw).
+        dimer_states: the second label's INDEPENDENT brightness state trajectory (same shape
+            as `states`); used only when `dimer_model="sum"`.
 
     Returns:
         Intensity array of shape `(n_pix_x, n_pix_y, n_frames)`, in photon
         counts (positive, real-valued).
     """
-    # Broadcast darkcounts along the frame axis -> (n_pix_x, n_pix_y, n_frames).
-    intensity = np.repeat(darkcounts[:, :, None], tracks.shape[0], axis=2)
+    # Broadcast the photon floor along the frame axis -> (n_pix_x, n_pix_y, n_frames).
+    intensity = np.repeat(background_photons[:, :, None], tracks.shape[0], axis=2)
     # Look up per-emitter, per-frame brightness from the state index.
     # states.T has shape (n_emitters, n_frames); indexing brightness produces (n_emitters, n_frames);
     # reshape to (1, n_emitters, n_frames) for broadcast in add_pixel_counts.
     brightness_array = brightness[states.T].reshape(1, states.shape[1], -1)
     if dimer_mask is not None:
-        # Scale dimer-state emitters by dimer_mule = sqrt(2), NOT a naive 2x of
-        # two co-located fluorophores. The sqrt(2) is the shot-noise-equivalent
-        # factor (S/N of two independent Poisson sources scales as sqrt(2)),
-        # equivalently the geometric mean of the bright/dark blinking states,
-        # GM(1x, 2x) = sqrt(2). See the dimer brightness model in PROJECT_CONTEXT.md.
-        brightness_array[dimer_mask] *= dimer_mule
+        if dimer_model == "sum":
+            # Physically-motivated dimer: two co-located labels, photons ADD, so the merged
+            # brightness is the SUM of two INDEPENDENT monomer brightnesses -- an n-mer's
+            # intensity distribution is the n-fold convolution of the monomer's (Mutch et al.
+            # 2007 Biophys J; Digman & Gratton 2008 Number & Brightness). Same mean as
+            # dimer_mule=2 but a lighter upper tail than doubling one draw. dimer_states is the
+            # second label's INDEPENDENT flicker trajectory.
+            if dimer_states is None:
+                raise ValueError("dimer_model='sum' requires dimer_states (the second label's "
+                                 "independent brightness state trajectory).")
+            second = brightness[dimer_states.T].reshape(1, dimer_states.shape[1], -1)
+            brightness_array[dimer_mask] += second[dimer_mask]
+        else:
+            # 'multiply': merged-spot brightness = monomer * dimer_mule. A dimer is
+            # two labels within one PSF, imaged as ONE spot whose photons combine; dimer_mule in
+            # [1, 2]: 2 for two permanently-on labels (photons sum -- the always-on ATTO 647N
+            # case); sqrt(2) under blinking / partial labeling. See PROJECT_CONTEXT.md.
+            brightness_array[dimer_mask] *= dimer_mule
     intensity = add_pixel_counts(intensity, tracks, brightness_array, xbounds, ybounds, PSF)
     return intensity
 
@@ -648,7 +691,7 @@ def _propagate_chain(states: np.ndarray,
 def simulate_dli(pro_tray_poses: np.ndarray,
                  theta: np.ndarray,
                  dimer_mask: Optional[np.ndarray] = None,
-                 dimer_mule: float = np.sqrt(2),
+                 dimer_mule: float = 2.0,
                  seed: Optional[int] = None,
                  verbose: bool = False) -> np.ndarray:
     """Run the full DLI pipeline: particle poses + theta -> noisy video frames.
@@ -679,8 +722,8 @@ def simulate_dli(pro_tray_poses: np.ndarray,
         dimer_mask: Optional boolean mask of shape `(1, n_emitters, n_frames)`
             flagging dimer-state particles (B or C); their brightness is
             multiplied by `dimer_mule`.
-        dimer_mule: Brightness multiplier for dimer-flagged emitters.
-            Default `sqrt(2)`.
+        dimer_mule: Merged-dimer brightness relative to a monomer (default `2.0`;
+            regime-dependent in [1, 2] -- see `compute_intensity` / PROJECT_CONTEXT.md).
         seed: Optional RNG seed for all randomness in the pipeline (PSF widths,
             initial states, state trajectories, Poisson + Gaussian noise).
         verbose: If True, print intermediate diagnostic values.
@@ -770,12 +813,16 @@ def simulate_dli(pro_tray_poses: np.ndarray,
         tracks=tracks_pixels,
         states=states,
         brightness=brightness,
-        darkcounts=darkcounts,
+        background_photons=darkcounts,
         xbounds=xbounds,
         ybounds=ybounds,
         PSF=PSF,
         dimer_mask=dimer_mask,
         dimer_mule=dimer_mule,
+        # Canonical DLI path supplies no independent second-label trajectory, so it opts into
+        # the multiply model explicitly; the sum default is for the Detector path (which builds
+        # the second trajectory in render_detector_video).
+        dimer_model="multiply",
     )
 
     # --- Add EMCCD noise (Poisson + Gaussian readout) ----------------------

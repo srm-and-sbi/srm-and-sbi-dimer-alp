@@ -116,16 +116,22 @@ def save_estimator(estimator, *, embedding_args, maf_args, theta_dim, video_shap
     )
 
 
-def load_estimator(path, device: str = "cpu") -> DirectPosterior:
+def load_estimator(path, device: str = "cpu", *, expected_parameter_keys=None) -> DirectPosterior:
     """Rebuild a `DirectPosterior` from a `save_estimator` artifact, version-portably.
 
     Reconstructs the uncompiled estimator from the rebuild spec under the current
     torch, loads the compile-stripped weights (`weights_only=True`), verifies the
     checksum, and attaches a fresh device-aware `BoxUniform` prior. No
     torch-internal or compiled code is deserialized.
+
+    If ``expected_parameter_keys`` is given, the artifact's stored parameter schema
+    is checked first (`assert_schema_compatible`) and a mismatch raises before any
+    rebuild — so a legacy artifact is rejected loudly, never misread column-for-column.
     """
     data = np.load(path, allow_pickle=False)
     manifest = json.loads(str(data["manifest"]))
+    if expected_parameter_keys is not None:
+        assert_schema_compatible(manifest, expected_parameter_keys=expected_parameter_keys)
     spec = manifest["rebuild_spec"]
 
     weights = data["weights"]
@@ -163,3 +169,39 @@ def load_estimator_manifest(path) -> dict:
         manifest["prior_low"] = data["prior_low"].tolist()
         manifest["prior_high"] = data["prior_high"].tolist()
     return manifest
+
+
+def assert_schema_compatible(manifest_or_path, *, expected_parameter_keys) -> None:
+    """Reject an estimator artifact whose parameter schema differs from the current one.
+
+    A trained estimator's theta vector has a fixed meaning BY POSITION, recorded as
+    ``parameter_keys`` in its manifest. When the parameterization changes while the
+    vector length stays the same (e.g. the detector camera block moving from
+    ``kappa_c``/``kappa_g`` to ``gamma``/``kappa_o``), a legacy artifact would rebuild
+    and run silently under the WRONG semantics. This guard makes that failure loud: it
+    compares the stored ``parameter_keys`` (content and order) against
+    ``expected_parameter_keys`` and raises on any difference.
+
+    Args:
+        manifest_or_path: an already-parsed manifest dict, or a path to a
+            `save_estimator` `.npz` (its manifest is read; no estimator rebuild).
+        expected_parameter_keys: the current schema's ordered learnable-parameter keys
+            (e.g. `DETECTOR_PARAMETER_KEYS`).
+
+    Raises:
+        ValueError: if the stored ``parameter_keys`` are absent or differ from
+            ``expected_parameter_keys``.
+    """
+    manifest = (manifest_or_path if isinstance(manifest_or_path, dict)
+                else load_estimator_manifest(manifest_or_path))
+    stored = list(manifest.get("parameter_keys", []))
+    expected = list(expected_parameter_keys)
+    if stored != expected:
+        raise ValueError(
+            "estimator schema mismatch: this artifact was trained under a different "
+            "parameterization and must not be loaded under the current schema "
+            "(equal-length theta vectors would otherwise be misread column-for-column).\n"
+            f"  stored   ({len(stored)}): {stored}\n"
+            f"  expected ({len(expected)}): {expected}\n"
+            "Regenerate and retrain under the current schema."
+        )

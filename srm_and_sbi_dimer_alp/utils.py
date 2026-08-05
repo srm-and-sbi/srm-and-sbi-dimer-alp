@@ -70,9 +70,12 @@ def console_log_context(args, stage: str, paths=None, data_bank_root=None):
     context. ``args`` is expected to carry ``total_time_seconds`` and optionally
     ``split`` (RDS / DLI); both are read defensively.
 
-    ``paths`` / ``data_bank_root`` select the namespace and both default to the
-    canonical ``PARAMETERS.paths`` / ``PARAMETERS.machine.data_bank_root``
-    (byte-identical to previous behavior). A Detector stage passes its aliased
+    ``paths`` / ``data_bank_root`` select the namespace. ``paths`` defaults to the
+    canonical ``PARAMETERS.paths``; ``data_bank_root`` defaults to
+    ``PARAMETERS.machine.root_for(split)`` -- the same per-split tier the
+    DiagnosticReporter dumps into (the scratch tier for TRAIN/TEST) -- so the
+    transcript co-locates with the dump instead of splitting across filesystems on
+    a two-tier machine. A Detector stage passes its aliased
     Paths (``detector_parameterization.detector_paths(...)``) so the ``run_label``
     carries the ``_DETECTOR`` tag and the transcript lands in a
     Detector-identifiable Debug directory, never colliding with the canonical one.
@@ -82,8 +85,18 @@ def console_log_context(args, stage: str, paths=None, data_bank_root=None):
     # Imported here (not at module top) to avoid a circular import at load time.
     from .parameterization import PARAMETERS, RunTiming
     paths = paths if paths is not None else PARAMETERS.paths
+    split = getattr(args, "split", None)
+    split = split.upper() if split else None
     if data_bank_root is None:
-        data_bank_root = PARAMETERS.machine.data_bank_root
+        # Co-locate the transcript with the DiagnosticReporter dump, which lives on
+        # root_for(split) -- the scratch tier for TRAIN/TEST, the permanent tier
+        # otherwise. Defaulting to the permanent data_bank_root regardless of split
+        # split a TRAIN/TEST debug bundle across two filesystems on a two-tier machine.
+        # Guard the split-less case (root_for expects a split string) with the permanent tier.
+        data_bank_root = (
+            PARAMETERS.machine.root_for(split) if split
+            else PARAMETERS.machine.data_bank_root
+        )
     total_time_seconds = getattr(args, "total_time_seconds", None)
     if total_time_seconds is None:
         raise ValueError(
@@ -93,8 +106,6 @@ def console_log_context(args, stage: str, paths=None, data_bank_root=None):
     timing = RunTiming(
         total_time_seconds=total_time_seconds, frames=PARAMETERS.simulation.timing,
     )
-    split = getattr(args, "split", None)
-    split = split.upper() if split else None
     path = paths.debug_run_dir(
         data_bank_root, timing.label, stage, split) / "console.log"
     return tee_stdout(path)

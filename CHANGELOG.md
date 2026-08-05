@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 - 2026-08-05
+
+The DETECTOR calibration workflow becomes the production imaging-calibration path: the
+diffraction-limited-imaging parameters are inferred with the physics frozen to pure diffusion, the
+camera block is marginalized as an independent SCOPE nuisance, and the EMCCD forward model is the
+corrected Poisson–Gamma–Normal chain. The learnable inference target is the 6-parameter emitter model;
+the 5 camera parameters are drawn as a nuisance and rendered into every video. This changes the
+estimator parameter dimension (`theta_dim` 10 → 6) and the data schema — estimators and datasets from
+0.3.x are not compatible; regenerate the dataset and retrain.
+
+### Changed
+
+- **Detector inference target: 6 imaging parameters.** The learnable target is the emitter model —
+  PSF (`mu_r`, `sigma_r`), brightness (`mu_pc`, `sigma_pc`), photophysics (`prob_photo_bleach`,
+  `lambda_rate`). The camera chain (`gamma`, `kappa_o`, `kappa_b`, `kappa_s`, `kappa_q`) is reclassified
+  from learnable to a marginalized **SCOPE** nuisance, drawn from tight a-priori boxes and rendered into
+  every video; only the identifiable combinations (`gamma·kappa_q` effective gain, the ADU floor, the
+  additive baseline) are constrained. `kappa_g`/`kappa_c` are retained as fixed spec metadata for the
+  `gamma = g/C` drift check. New symbols `DETECTOR_PARAMETER_KEYS`, `DETECTOR_NUISANCE_SCOPE`,
+  `DETECTOR_IMAGING`/`DETECTOR_IMAGING_KEYS`, `DETECTOR_SCOPE_KEYS`; the imaging vector is 6 learnable +
+  5 SCOPE = 11 keys, and the estimator load path enforces a schema guard against a mismatched target.
+- **Corrected EMCCD noise model (Poisson–Gamma–Normal).** `EMCCD`/`add_noise` apply Poisson
+  photoelectrons → stochastic `Gamma(N, em_gain)` electron multiplication (excess-noise factor
+  `F² = 2`) → conversion → gain-independent Gaussian read noise added after the register → bias,
+  replacing the gain-scaled-variance-before-register form.
+- **Dimer brightness: `sum` model by default.** A dimer's per-frame brightness is the sum of two
+  independent monomer draws (mean `2·E[X]`, lighter upper tail than doubling), each with its own
+  photophysical state; `dimer_model="multiply"` (rigid `dimer_mule` scaling) is retained as an option.
+- **RDS count nuisance extended to `[1, 316]` per species** (log10 floor `1.0 → 0.0`), covering sparse
+  monomer-dominated fields.
+- **In-run warm-restart LR schedule** (`InferenceTraining.warm_restart_dwell`): the learning-rate
+  restart cycles now happen within a single run, reproducing within one job the mechanism a chain of
+  `--resurrect` rounds provided; the DataLoader worker budget is capped per GPU with a per-run
+  `--num-workers` override.
+
+### Added
+
+- **`NuisanceDLI`** (`detector_nuisance_dli.py`) — a self-contained, samplable marginalized-parameter
+  artifact with a five-choice posterior-sample pool (`raw`, `map_estimate_pool`, `gaussian`, `box`,
+  `box_user`) and weight-checksum pool caching, built directly from the estimator and the recordings.
+  It subsumes the former standalone `Nuisance` class.
+- **Analysis utilities** (special-situation, not pipeline stages): `..._DETECTOR_Embedding_Space_Distance`
+  (experimental-vs-synthetic MMD + C2ST), `..._DETECTOR_Flicker_Rate_Derivation` (the `lambda_rate`
+  autocorrelation-time derivation), and `..._Test_Loss_Distribution_Analysis`.
+
+### Removed
+
+- **`nuisance.py`** — its `Nuisance` class is absorbed into `NuisanceDLI` (`detector_nuisance_dli.py`).
+
+### Migration
+
+- The detector inference target changed from 10 to 6 parameters and the training distribution changed
+  (SCOPE camera boxes, extended count nuisance), so datasets and estimators built on the 0.3.x target
+  are incompatible. Regenerate the dataset and retrain.
+
 ## 0.3.2 - 2026-07-19
 
 Align the `Complex3DCNN` constructor defaults with the production network configuration and correct a

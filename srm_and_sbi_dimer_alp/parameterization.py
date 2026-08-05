@@ -568,7 +568,7 @@ class SimulationRDS:
 @dataclass(frozen=True)
 class SimulationDLI:
     """DLI-stage runtime defaults."""
-    dimer_mule: float = 1.4142135623730951         # sqrt(2); brightness multiplier for dimers
+    dimer_mule: float = 2.0                         # merged-dimer brightness vs monomer; 2 = two always-on labels (photons sum, MET), sqrt(2) under blinking/partial labeling (see PROJECT_CONTEXT.md)
     darkcounts: int = 0                            # baseline; no per-pixel dark current
     sqrt_2sigma_dist_label: str = "lognormal"      # PSF width sampling distribution
 
@@ -589,9 +589,14 @@ class InferenceTraining:
     batch_size: int = 32
     learning_rate_minimum: float = 1.0e-5
     learning_rate_maximum_factor: int = 128        # 2^7
-    scheduler_factor: float = 0.5                  # ReduceLROnPlateau gamma
+    scheduler_factor: float = 0.5                  # ReduceLROnPlateau gamma; also the warm-restart amplitude-decay base
     scheduler_patience: int = 1
     scheduler_tolerance_factor: float = 10.0       # tolerance = lr_min * factor
+    # Warm restart: after the LR decays to learning_rate_minimum and stays there this
+    # many epochs WITHOUT a new best, reload the best checkpoint and restart the LR at
+    # the previous peak * scheduler_factor (a decaying sawtooth) -- an in-run resurrect
+    # that self-terminates once the peak reaches the floor. 0 disables.
+    warm_restart_dwell: int = 2
     augmentation: bool = True                      # rotation + horizontal/vertical flip
     # Dataset-sizing defaults for the three-namespace split (TRAIN / TEST / EVAL),
     # consumed by the generation orchestrator. CORE = TRAIN + TEST.
@@ -782,9 +787,11 @@ PARAMETERS = Parameters(machine=load_machine_profile())
 #     RunTiming.frame_time_seconds). If a run overrides
 #     `frame_time_seconds`, consumers should use the runtime value directly
 #     rather than this default.
-#   - 'capture_radius' VALUE is hardcoded to 20 (= 2 *
-#     SimulationStem.particle_diameter_nm, with the default 10 nm diameter).
-#     Same caveat as 'delta_frame' for runtime overrides.
+#   - 'capture_radius' is the Smoluchowski contact radius of two monomers
+#     (2 * monomer_radius = 1 * diameter = particle_diameter_nm = 10 nm). The table
+#     VALUE is display-only; build_system derives the active value from
+#     PARAMETERS.simulation.stem.particle_diameter_nm, so it tracks per-dataset
+#     geometry (particle_diameter_nm is the single physical input).
 
 _PARAMETERIZATION_RAW_NESTED: dict[str, list[dict]] = {
     # ----- Reaction-Diffusion System -----
@@ -800,7 +807,7 @@ _PARAMETERIZATION_RAW_NESTED: dict[str, list[dict]] = {
     ],
     'dimerization_dissociation': [  # K_ON, K_OFF
         {'KEY': 'relative_rate_dimerization', 'VALUE': 10**(-1), 'PRIOR_RANGE': (-2, 0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Dimensionless', 'DERIVED_UNIT': 'Square Micrometer Per (Count*Second)', 'LABEL': r'$R_{ON}$', 'NOTE': 'Learnable Parameter'},
-        {'KEY': 'capture_radius', 'VALUE': 20, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Nanometer', 'DERIVED_UNIT': None, 'LABEL': r'$\rho_{CAP}$', 'NOTE': 'Known Parameter'},
+        {'KEY': 'capture_radius', 'VALUE': 10, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Nanometer', 'DERIVED_UNIT': None, 'LABEL': r'$\rho_{CAP}$', 'NOTE': 'Known Parameter'},
         {'KEY': 'rate_dissociation', 'VALUE': 10**0, 'PRIOR_RANGE': (-1, 1), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count Per Second', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{OFF}$', 'NOTE': 'Learnable Parameter'},
     ],
     'immobilization_mobilization': [  # K_B_C, K_C_B

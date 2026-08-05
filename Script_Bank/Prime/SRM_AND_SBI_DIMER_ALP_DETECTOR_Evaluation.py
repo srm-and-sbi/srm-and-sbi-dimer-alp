@@ -400,7 +400,7 @@ def main(args: argparse.Namespace) -> None:
     topo = resolve_topology()
     device = topo.device
     vista_device = torch.device("cpu")
-    posterior = artifacts.load_estimator(estimator_path, device=str(device))
+    posterior = artifacts.load_estimator(estimator_path, device=str(device), expected_parameter_keys=det.DETECTOR_PARAMETER_KEYS)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
         # Rebuild the prior on THIS worker's device for bounded rejection sampling.

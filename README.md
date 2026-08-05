@@ -11,7 +11,7 @@ Names are consistent across the surfaces a user touches:
 - **GitHub repository** — kebab-case: `srm-and-sbi-dimer-alp`.
 - **Python package** — snake_case: `srm_and_sbi_dimer_alp` (the repo name with hyphens normalized to underscores).
 - **Runtime identifiers** (entry-point script names, output-file prefixes) — SCREAMING_SNAKE, composed as `[program]_[model]_[iteration]_[stage]_[sub-stage]`, e.g. `SRM_AND_SBI_DIMER_ALP_Simulation_RDS`. The prefix encodes provenance so data files remain self-describing once they leave the repository.
-- The trailing **three-letter suffix** (`alp`) is the iteration tag; sibling iterations advance the suffix (`bet`, `chi`, …).
+- The trailing **three-letter suffix** (`bet`) is this iteration's tag; sibling iterations carry their own (`alp`, `chi`, …).
 
 ## Getting Started
 
