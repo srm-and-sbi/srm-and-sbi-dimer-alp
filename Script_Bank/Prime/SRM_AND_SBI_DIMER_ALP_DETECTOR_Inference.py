@@ -31,6 +31,10 @@ duration + fps):
 
     <data_bank>/<labor_subdir>/<alias>_DETECTOR_{timing_label}_Optimum_ANN.pth
         -- the best-so-far estimator checkpoint (overwritten on each new optimum).
+    <data_bank>/<labor_subdir>/<alias>_DETECTOR_{timing_label}_Resurrect_State_ANN.pth
+        -- the full training state (model + optimizer + scheduler + epoch + warm-restart
+           counters), written atomically every epoch. A --resurrect requeue hot-restarts
+           from this exact state; a transient resume file, not a scientific deliverable.
     <data_bank>/<posit_subdir>/<alias>_DETECTOR_{timing_label}_Estimator.npz
         -- the version-portable estimator artifact (the Detector's posterior artifact).
 
@@ -150,6 +154,7 @@ def main(args: argparse.Namespace) -> None:
 
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
+    resurrect_state_path = paths.resurrect_state_path(data_bank_root, timing_label)  # full-state hot-restart file
     tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
     estimator_path = _estimator_path(paths, data_bank_root, timing_label)   # version-portable estimator artifact (Detector)
     imaging_keys = [entry["KEY"] for entry in det.DETECTOR_PARAMETERIZATION]
@@ -163,6 +168,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"  reads thetas    : <data_bank>/{paths.theta_subdir}/"
           f"{paths.project_alias}_{timing_label}_Theta_Set_TASK_{{{task_range}}}.zarr")
     print(f"  writes ckpt     : {checkpoint_path}")
+    print(f"  writes resume   : {resurrect_state_path}   (full-state hot restart; every epoch)")
     print(f"  writes estimator: {estimator_path}   (version-portable)")
 
     # ---- Dry-run preview --------------------------------------------------
@@ -244,7 +250,8 @@ def main(args: argparse.Namespace) -> None:
           f"+ TemporalTransformer(heads={network_cfg.attention_heads})")
     print("  estimator : MAF (z_score=structured, dropout=0.1, batch_norm=True)")
     if args.resurrect:
-        print(f"  RESURRECT : will load checkpoint from {checkpoint_path}")
+        print(f"  RESURRECT : hot-restart from {resurrect_state_path} if present, "
+              f"else cold-load {checkpoint_path}")
 
     if args.verbose:
         print("\nDetailed training hyperparameters:")
@@ -444,6 +451,10 @@ def main(args: argparse.Namespace) -> None:
                       f"(test loss {best_test_loss:.5f}); backup deferred to finish",
                       flush=True)
 
+    # Schema stamp for the resurrect-state guard: a hot restart refuses a file whose
+    # parameter_keys / timing_label do not match this run (see load_resume_state).
+    resume_meta = {"timing_label": timing_label, "parameter_keys": imaging_keys}
+
     losses_train, losses_test, losses_replay, optimum_loss_test = train_loop(
         estimator=training_setup["estimator"],
         model=training_setup["model"],
@@ -462,6 +473,8 @@ def main(args: argparse.Namespace) -> None:
         verbose=args.verbose,
         test_loss_distribution=use_tld,
         on_new_best=commit_new_best,
+        resurrect_state_path=resurrect_state_path,
+        resume_meta=resume_meta,
     )
 
     if reporter.enabled:
@@ -622,9 +635,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--resurrect", action="store_true",
-        help="Load the previously saved optimum-ANN checkpoint before training "
-             "and continue from those weights. Each --resurrect run improves on "
-             "the previous best.",
+        help="Resume training. Hot-restart from the full resurrect-state "
+             "(Resurrect_State_ANN: model + optimizer + scheduler + epoch + warm-restart "
+             "counters) when it exists, so the LR schedule continues seamlessly across "
+             "requeues; if absent (first run under this feature, or deleted), fall back "
+             "to loading the best optimum-ANN checkpoint weights into a fresh optimizer "
+             "at the peak LR. Each --resurrect run continues improving on the previous best.",
     )
     parser.add_argument(
         "--replay-loss", action="store_true",

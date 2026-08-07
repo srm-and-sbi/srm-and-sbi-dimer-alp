@@ -200,7 +200,10 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
 
 **Expected**: a network checkpoint at
 `<data_bank>/Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN.pth` and a pickled
-posterior at `<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl`.
+posterior at `<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl`. The
+training loop also writes a full-state resume file beside the checkpoint,
+`<data_bank>/Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Resurrect_State_ANN.pth`, updated
+every epoch — its presence is what lets a later `--resurrect` hot-restart (see §2.4).
 One epoch on a handful of (video, theta) pairs will not produce a useful
 posterior, but it exercises the full training and save path, including the
 network construction and the data loader. This command loads no TEST set, so it
@@ -229,18 +232,31 @@ will raise `CUDA out of memory` partway into the first epoch. Two options:
   (select the CPU backend in `env_snapshots/README.md` and the CPU compute
   backend in the machine profile).
 
-### 2.4 Resurrect (continue from an existing checkpoint)
+### 2.4 Resurrect (continue from an existing run)
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
     --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed None --resurrect --verbose
 ```
 
-**Expected**: the run loads the checkpoint saved by the inference smoke test,
-prints a line reporting the loaded checkpoint and its baseline loss, then runs
-one more epoch starting from those weights. The checkpoint is overwritten only
-if the continued run improves on the baseline. This mode is useful for
-incremental training across separate invocations.
+**Expected**: because the inference smoke test (§2.3) left a full-state resume file
+beside the checkpoint, this run **hot-restarts** — it prints a
+`HOT RESTART: resumed full state ...` line reporting the resumed global epoch and
+learning rate, then runs one more epoch continuing the exact optimizer + learning-rate
+schedule (no re-converging, no LR reset). This §2.3-style command loads no TEST set, so
+it keeps the last-epoch checkpoint each epoch and the reported best test loss is `inf`;
+add `--test-tasks 1` to exercise best-on-test selection, where the checkpoint is
+overwritten only on a new best. If the resume file is
+absent (for example deleted, or a run predating this feature), the same command falls
+back to a **cold** restart — loading the best checkpoint weights into a fresh optimizer
+at the peak LR (a `RESURRECT (cold: ...)` line) — and then writes a resume file so the
+next `--resurrect` hot-restarts. This makes incremental training across separate,
+wall-time-limited invocations behave like one continuous run.
+
+**Continuity check** (optional): run §2.3 with `--epochs 4` and note the epoch-4
+learning rate; then run this `--resurrect` command — the printed global epoch resumes
+where §2.3 left off and the learning rate continues from the saved schedule rather than
+jumping back to the peak.
 
 ### 2.5 Detector calibration smoke test
 
@@ -327,12 +343,14 @@ a minimum recovery count.
 
 The epoch budget and the batch size are both flexible; the batch column is a
 recommendation that scales down with duration to fit GPU memory — adjust it to the
-available hardware. A single run of the full budget (for example, **50 epochs**) is
-the recommended path: the LR warm-restart cycles now happen internally (see the warm
-restart in `train_loop`), reproducing within one run the restart mechanism that a
-chain of `--resurrect` rounds provided. Splitting the budget across `--resurrect`
-rounds (for example, **25 epochs run twice**) remains useful as a crash-safe option
-for wall-time-limited queues — each round continues from the saved checkpoint.
+available hardware. The epoch budget is per invocation. Splitting it across
+`--resurrect` rounds (for example, **25 epochs run twice**) is the crash-safe path for
+wall-time-limited queues and now costs nothing: each round hot-restarts from the full
+resume file, so the two rounds continue one uninterrupted optimizer + learning-rate
+schedule — equivalent to a single **50-epoch** run, without the re-convergence a cold
+restart used to spend at each requeue. The in-run LR warm restart (see `train_loop`) is
+a within-run plateau-escape at the LR floor, and its state persists across requeues too,
+so the sawtooth is continuous across rounds.
 
 Evaluation and Experiment use `--pool-mode bounded` — the well-trained-posterior
 default, in contrast to the smoke's `unrestricted`. Generation is seedless.

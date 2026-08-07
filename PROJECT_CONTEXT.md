@@ -132,7 +132,10 @@ workflow.
 **Output:** A pickled posterior and a trained neural-network checkpoint. Both are
 written under canonical, duration-stamped names that every downstream stage loads
 (`Posit/…_Posterior.pkl`, `Labor/…_Optimum_ANN.pth`), and a re-run on the same
-duration overwrites them. So that superseded models stay identifiable and recoverable,
+duration overwrites them. During training the loop also writes a transient full-state
+resume file beside the checkpoint (`Labor/…_Resurrect_State_ANN.pth`) every epoch, from
+which a `--resurrect` requeue hot-restarts; it is overwritten continuously and is not a
+downstream deliverable. So that superseded models stay identifiable and recoverable,
 every finished run also writes a provenance-named backup of both — encoding the
 train/test set sizes, epochs, and test loss — and any archived checkpoint can be
 rebuilt into its posterior without retraining. See the HPC operations runbook
@@ -304,16 +307,26 @@ optional `--resurrect` flag to continue from an existing checkpoint)
    `p(θ | x)` from the simulated pairs. The embedding is a 3D convolutional
    video encoder followed by a temporal transformer (§6).
 3. **Resurrect mode (optional, runtime flag):** With `--resurrect`, the script
-   loads the existing optimum checkpoint, records its replay loss as a baseline,
-   then continues the standard training loop from those weights. A new optimum
-   overwrites the same checkpoint. This supports incremental training across
-   separate invocations.
+   resumes training. When a full-state resume file is present it **hot-restarts**
+   from the exact latest state — model weights, optimizer moments, learning-rate
+   schedule, global epoch, and warm-restart counters — so the schedule continues
+   seamlessly and no epochs are spent re-converging. When it is absent (the first
+   resumed run, or the file was deleted) it falls back to loading the best-on-test
+   checkpoint weights into a fresh optimizer at the peak learning rate, then writes a
+   resume file so the next requeue hot-restarts. A new optimum overwrites the
+   checkpoint. This makes incremental training across separate, wall-time-limited
+   invocations behave like one continuous run.
 4. **In-run warm restart (automatic):** The training loop monitors the learning
    rate; once it has decayed to its floor and stalled there without improving, the
-   loop reloads the best checkpoint and restarts the rate at a decaying peak, so a
-   single run performs the restart cycles that a chain of `--resurrect` invocations
-   would. Governed by `warm_restart_dwell` (epochs of stalled floor before a restart;
-   `0` disables it); composes with `--resurrect`.
+   loop reloads the best checkpoint and restarts the rate at a decaying peak — a
+   plateau-escape that periodically re-raises the rate to find a better optimum. Each
+   restart peak is `warm_restart_factor` (default 0.25) times the previous, a dedicated
+   amplitude knob separate from the per-epoch anneal `scheduler_factor`, so the restart
+   stays a gentle probe (a quarter of the peak) rather than a jump halfway back up. Its
+   state is carried in the resume file, so the sawtooth continues mid-stride across a
+   `--resurrect` requeue rather than resetting. Governed by `warm_restart_dwell`
+   (epochs of stalled floor before a restart; `0` disables it); composes with
+   `--resurrect`.
 5. **Output:** Posterior samples are obtained by passing a real experimental
    video (or a synthetic holdout) through the trained network.
 

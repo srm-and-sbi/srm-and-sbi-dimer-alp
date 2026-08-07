@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.1 - 2026-08-06
+
+Training resume becomes seamless across requeues, and the inference launch gains a
+learning-rate override. Both changes touch the two inference entry points (`Inference`,
+`DETECTOR_Inference`) and the shared training loop; no data-schema or estimator-format
+change, so existing datasets and estimators remain valid.
+
+### Added
+
+- **Full-state resume (`Resurrect_State_ANN`).** The training loop writes a complete
+  training-state file — model weights, AdamW moments, `ReduceLROnPlateau` schedule,
+  global epoch, best-so-far test loss, and the warm-restart counters — beside the
+  optimum checkpoint (`Labor/…_Resurrect_State_ANN.pth`), atomically (temp file +
+  `os.replace`) every epoch. With `--resurrect`, when the file is present the run
+  **hot-restarts** from this exact state, so the learning-rate schedule continues
+  seamlessly and no epochs are spent re-converging; when absent it falls back to the
+  prior behavior (best-checkpoint weights into a fresh optimizer at the peak LR) and
+  then writes the file, so subsequent requeues hot-restart. A chain of `--resurrect`
+  rounds now behaves like one continuous run. New symbols:
+  `parameterization.Paths.resurrect_state_pattern` / `resurrect_state_path`, and
+  `inference_support.save_resume_state` / `load_resume_state` (with a `timing_label` +
+  `parameter_keys` schema guard that refuses a mismatched resume file). The in-run
+  warm-restart sawtooth is retained as a within-run plateau-escape and its state
+  (`warm_restart_peak`, floor-dwell tally) is carried in the resume file, so it
+  continues across requeues rather than resetting.
+- **`warm_restart_factor` knob (default 0.25).** The warm-restart amplitude decay is now
+  a dedicated `InferenceTraining` setting, separate from `scheduler_factor` (the
+  per-epoch anneal step): each restart peak is `warm_restart_factor` times the previous,
+  so a restart stays a gentle probe of a converged model (first restart a quarter of the
+  peak) rather than a jump halfway back up. Previously this decay was coupled to
+  `scheduler_factor` (0.5).
+- **`--learning-rate` on the HPC inference wrappers.** An `LR` environment knob on
+  `SRM_AND_SBI_DIMER_ALP_HPC_Inference.sh` and `…_DETECTOR_HPC_Inference.sh` forwards
+  `--learning-rate` to the entry point, so a resumed chain can start below the peak LR.
+
 ## 0.4.0 - 2026-08-05
 
 The DETECTOR calibration workflow becomes the production imaging-calibration path: the

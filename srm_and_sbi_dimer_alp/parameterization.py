@@ -213,6 +213,7 @@ class Paths:
     theta_set_pattern: str = "{project_alias}_{timing_label}_Theta_Set_TASK_{task_alias}_{split}.{ext}"
     video_set_pattern: str = "{project_alias}_{timing_label}_Video_Set_TASK_{task_alias}_{split}.{ext}"
     checkpoint_pattern: str = "{project_alias}_{timing_label}_Optimum_ANN.pth"
+    resurrect_state_pattern: str = "{project_alias}_{timing_label}_Resurrect_State_ANN.pth"
     posterior_pattern: str = "{project_alias}_{timing_label}_Posterior.pkl"
     test_loss_distribution_pattern: str = "{project_alias}_{timing_label}_Test_Loss_Distribution.npz"
     recovery_pattern: str = "{project_alias}_{timing_label}_MAP_Recovery"
@@ -283,6 +284,23 @@ class Paths:
     def checkpoint_path(self, data_bank_root: Path, timing_label: str) -> Path:
         """Full path for the optimum-ANN checkpoint file."""
         filename = self.checkpoint_pattern.format(
+            project_alias=self.project_alias,
+            timing_label=timing_label,
+        )
+        return data_bank_root / self.labor_subdir / filename
+
+    def resurrect_state_path(self, data_bank_root: Path, timing_label: str) -> Path:
+        """Full path for the resurrect-state file -- the complete training state
+        (model + optimizer + scheduler + epoch + optimum + warm-restart counters)
+        written atomically every epoch so a ``--resurrect`` requeue hot-restarts from
+        the exact latest state instead of a fresh optimizer at peak LR.
+
+        A transient resume file, not a scientific deliverable: it is always
+        overwritten with the latest state and carries no provenance descriptor
+        (unlike the checkpoint backups), so the read logic is a single ``exists()``
+        check. Lives beside the optimum checkpoint in ``labor_subdir``.
+        """
+        filename = self.resurrect_state_pattern.format(
             project_alias=self.project_alias,
             timing_label=timing_label,
         )
@@ -589,14 +607,21 @@ class InferenceTraining:
     batch_size: int = 32
     learning_rate_minimum: float = 1.0e-5
     learning_rate_maximum_factor: int = 128        # 2^7
-    scheduler_factor: float = 0.5                  # ReduceLROnPlateau gamma; also the warm-restart amplitude-decay base
+    scheduler_factor: float = 0.5                  # ReduceLROnPlateau gamma (per-epoch LR anneal step)
     scheduler_patience: int = 1
     scheduler_tolerance_factor: float = 10.0       # tolerance = lr_min * factor
-    # Warm restart: after the LR decays to learning_rate_minimum and stays there this
-    # many epochs WITHOUT a new best, reload the best checkpoint and restart the LR at
-    # the previous peak * scheduler_factor (a decaying sawtooth) -- an in-run resurrect
-    # that self-terminates once the peak reaches the floor. 0 disables.
+    # Warm restart: after the LR decays to learning_rate_minimum and stays there
+    # warm_restart_dwell epochs WITHOUT a new best, reload the best checkpoint and
+    # restart the LR at the previous sawtooth peak * warm_restart_factor -- a decaying
+    # in-run plateau-escape that self-terminates once the next peak would reach the
+    # floor. warm_restart_dwell = 0 disables it. warm_restart_factor is deliberately a
+    # SEPARATE knob from scheduler_factor (the per-epoch anneal step): it sets the
+    # restart AMPLITUDE decay, keeping each restart a gentle probe of a converged model
+    # (0.25 -> the first restart is a quarter of the peak) rather than a large jump
+    # halfway back up. Persisted in the resurrect-state, so the sawtooth is continuous
+    # across a --resurrect requeue.
     warm_restart_dwell: int = 2
+    warm_restart_factor: float = 0.25              # restart-peak amplitude decay per warm restart (not the anneal step)
     augmentation: bool = True                      # rotation + horizontal/vertical flip
     # Dataset-sizing defaults for the three-namespace split (TRAIN / TEST / EVAL),
     # consumed by the generation orchestrator. CORE = TRAIN + TEST.

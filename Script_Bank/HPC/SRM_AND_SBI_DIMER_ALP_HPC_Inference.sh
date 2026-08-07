@@ -85,12 +85,15 @@ EPOCHS="${EPOCHS:-50}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 BATCH="${BATCH:-}"   # empty -> script default (PARAMETERS batch_size, 32)
 HEARTBEAT="${HEARTBEAT:-}"   # empty -> ~4 within-epoch progress lines/epoch; else a line every N batches
+LR="${LR:-}"   # per-run starting (peak) LR; empty -> Prime default (learning_rate_minimum*max_factor = 1.28e-03)
 RESURRECT="${RESURRECT:-}"   # set 1 to load the existing checkpoint and continue; unset/0 -> fresh run
 
 BATCH_ARG=()
 [ -n "$BATCH" ] && BATCH_ARG=(--batch-size "$BATCH")
 HEARTBEAT_ARG=()
 [ -n "$HEARTBEAT" ] && HEARTBEAT_ARG=(--heartbeat "$HEARTBEAT")
+LR_ARG=()
+[ -n "$LR" ] && LR_ARG=(--learning-rate "$LR")   # forward the starting-LR override; unset -> default peak
 RESURRECT_ARG=()
 [ "$RESURRECT" = 1 ] && RESURRECT_ARG=(--resurrect)   # only the value 1 resumes; unset/0/other = fresh
 
@@ -98,7 +101,7 @@ RESURRECT_ARG=()
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py"
 INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
-             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" )
+             --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" "${LR_ARG[@]}" )
 
 echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} gpus=${GPUS} seed=None | node $(hostname) ==="
 

@@ -22,8 +22,11 @@ Module contents:
         compute_validation_loss(...) -- mean validation loss across a loader.
 
     Training loop
-        train_loop(...)              -- epoch loop with optional RESURRECT
-                                        (load existing checkpoint and continue).
+        train_loop(...)              -- epoch loop with optional RESURRECT: hot-restart
+                                        from the full resurrect-state (optimizer +
+                                        scheduler + epoch + warm-restart counters) when
+                                        present, else the best-checkpoint cold fallback.
+        save_resume_state / load_resume_state -- atomic full-state resume I/O.
 
     Posterior I/O
         save_posterior(posterior, prior_device, path)
@@ -430,6 +433,102 @@ def build_optimizer_scheduler(estimator: nn.Module, learning_rate: float):
     return optimizer, scheduler
 
 
+class ResumeStateMismatch(RuntimeError):
+    """Raised when a resurrect-state's schema (``parameter_keys``) or ``timing_label``
+    does not match the current run. Distinct from a corrupt/unreadable file: a mismatch
+    is a deliberate refusal (``--resurrect`` was pointed at an incompatible run) and must
+    propagate, whereas an unreadable file degrades to the cold checkpoint fallback.
+    """
+
+
+def save_resume_state(path: Path, *, estimator: nn.Module, optimizer: optim.Optimizer,
+                      scheduler, epoch: int, optimum_loss_test: float,
+                      warm_restart_peak: float, epochs_at_min_lr: int,
+                      resume_meta: Optional[dict] = None) -> None:
+    """Atomically write the full training state for a ``--resurrect`` hot restart.
+
+    The resurrect-state bundles everything needed to continue training seamlessly
+    across a requeue: the model weights, the AdamW moments + current LR (both in the
+    optimizer state), the ReduceLROnPlateau plateau counters (in the scheduler state),
+    the global epoch, the best-so-far TEST loss, and the warm-restart sawtooth
+    counters. Unlike the best-on-TEST checkpoint (weights only), this is the *latest*
+    state, written every epoch.
+
+    Atomicity + durability: write a sibling ``.tmp``, ``fsync`` it, then ``os.replace``
+    (an atomic rename on the same filesystem) and ``fsync`` the containing directory. So a
+    mid-write kill (wall clock) or a node/power failure cannot leave a truncated or
+    half-written file that would poison the next resume: the data is durable before the
+    rename is exposed, and the rename itself is durable after -- the worst case is resuming
+    from the previous epoch's complete state. Rank 0 only (the caller guards this). The
+    reader still degrades to the cold checkpoint if a resume file is somehow unreadable.
+    """
+    state = {
+        "model": estimator.state_dict(),
+        "optimizer": optimizer.state_dict(),      # AdamW moments + current LR (param_groups)
+        "scheduler": scheduler.state_dict(),      # ReduceLROnPlateau counters (best, num_bad_epochs, ...)
+        "epoch": int(epoch),
+        "optimum_loss_test": float(optimum_loss_test),
+        "warm_restart_peak": float(warm_restart_peak),
+        "epochs_at_min_lr": int(epochs_at_min_lr),
+        "lr": float(optimizer.param_groups[0]["lr"]),   # log/debug only; authoritative LR rides in optimizer state
+        "resume_meta": dict(resume_meta) if resume_meta else {},
+        "torch_version": torch.__version__,
+    }
+    tmp_path = path.with_name(path.name + ".tmp")
+    with open(tmp_path, "wb") as handle:
+        torch.save(state, handle)
+        handle.flush()
+        os.fsync(handle.fileno())          # data durable before the rename is exposed
+    os.replace(str(tmp_path), str(path))   # atomic name swap
+    # Persist the directory entry too, so the rename survives a power/node failure.
+    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def load_resume_state(path: Path, estimator: nn.Module, optimizer: optim.Optimizer,
+                      scheduler, resume_meta: Optional[dict] = None) -> dict:
+    """Restore a resurrect-state written by `save_resume_state`, in place.
+
+    Restores the model, optimizer, and scheduler state and returns the full state dict
+    (the caller reads ``epoch``, ``optimum_loss_test``, ``warm_restart_peak``,
+    ``epochs_at_min_lr``). ``weights_only=False`` because this is our own trusted
+    artifact carrying optimizer + scheduler objects, not just tensors.
+
+    Schema guard: when ``resume_meta`` is supplied, the stored ``parameter_keys`` and
+    ``timing_label`` must match the current run, else the restore is refused with a
+    located error -- a stale or mismatched file fails loudly (naming the fix) instead
+    of silently loading. The model ``load_state_dict`` is strict, so an architecture
+    mismatch is caught independently.
+    """
+    state = torch.load(str(path), map_location="cpu", weights_only=False)
+    stored = state.get("resume_meta") or {}
+    if resume_meta:
+        old_keys = list(stored.get("parameter_keys") or [])
+        new_keys = list(resume_meta.get("parameter_keys") or [])
+        if old_keys and new_keys and old_keys != new_keys:
+            raise ResumeStateMismatch(
+                f"Resurrect-state schema mismatch at {path}: state parameter_keys "
+                f"{old_keys} != run {new_keys}. Refusing to hot-restart a mismatched "
+                f"schema; delete the file to start a cold --resurrect.")
+        old_tl = stored.get("timing_label")
+        new_tl = resume_meta.get("timing_label")
+        if old_tl and new_tl and old_tl != new_tl:
+            raise ResumeStateMismatch(
+                f"Resurrect-state timing mismatch at {path}: state '{old_tl}' != run "
+                f"'{new_tl}'. Refusing to hot-restart; delete the file to start cold.")
+    estimator.load_state_dict(state["model"])   # strict: architecture guard
+    # optimizer/scheduler restored in place. Optimizer.load_state_dict casts the AdamW
+    # moments to each param's device automatically (the params are already on-device)
+    # and keeps the step counter on CPU for the non-capturable path, so no manual device
+    # placement is needed here.
+    optimizer.load_state_dict(state["optimizer"])
+    scheduler.load_state_dict(state["scheduler"])
+    return state
+
+
 def setup_training(estimator: nn.Module,
                    train_tasks: int,
                    data_bank_root: Path,
@@ -781,7 +880,9 @@ def train_loop(estimator: nn.Module,
                heartbeat_every: Optional[int] = None,
                verbose: bool = False,
                test_loss_distribution: bool = False,
-               on_new_best: Optional[Callable] = None) -> tuple:
+               on_new_best: Optional[Callable] = None,
+               resurrect_state_path: Optional[Path] = None,
+               resume_meta: Optional[dict] = None) -> tuple:
     """Run the training loop with optimum-checkpoint tracking, optional RESURRECT, and in-run warm restarts.
 
     Args:
@@ -800,19 +901,39 @@ def train_loop(estimator: nn.Module,
         train_sampler: The DistributedSampler when distributed (its `set_epoch` is
             called each epoch to reshuffle the shard); None on a single worker.
         epochs: Number of epochs. Defaults to `PARAMETERS.inference.training.epochs`.
-        resurrect: If True, load the checkpoint before training and continue.
+        resurrect: If True, resume before training: hot-restart from the full
+            resurrect-state at `resurrect_state_path` when it exists (exact
+            optimizer/scheduler/epoch/warm-restart state), else fall back to loading
+            the best-on-TEST checkpoint weights into the fresh optimizer at the peak LR.
         replay_loss: If True, compute the per-epoch eval-mode TRAIN loss.
         heartbeat_every: Emit a within-epoch progress line every N batches (rank 0
             only). None -> ~4 lines/epoch (max(1, n_batches // 4)).
         verbose: If True, print per-batch progress.
+        resurrect_state_path: Path to the full-state resume file (`Resurrect_State_ANN`).
+            Written atomically every epoch (rank 0); on a `--resurrect` requeue it drives
+            the hot restart when present. None disables the resurrect-state, so
+            `--resurrect` uses only the cold checkpoint fallback.
+        resume_meta: Optional {`timing_label`, `parameter_keys`} stamped into the
+            resurrect-state and checked on hot restart, so a stale/mismatched file is
+            refused rather than silently loaded.
+
+    Epochs are per invocation: `epochs` is how many epochs THIS call runs, always
+    starting a fresh 0..epochs-1 loop; on a hot restart the global epoch counter (for
+    logging + the resurrect-state) continues from the resumed value, but the schedule
+    itself is carried by the restored optimizer/scheduler state, not by an epoch index.
 
     Warm restart (config `warm_restart_dwell`): once the LR has decayed to the
     scheduler floor and held there `warm_restart_dwell` epochs without a new best,
     reload the best checkpoint, rebuild a fresh optimizer + scheduler at the previous
-    peak times `scheduler_factor` (a decaying sawtooth), and continue -- an in-run
-    equivalent of a `--resurrect` cycle, without requeuing. The peak decays each
-    restart and self-terminates once it would reach the floor. `warm_restart_dwell ==
-    0` disables it; `--resurrect` is unaffected (a resurrected run restarts fresh).
+    peak times `warm_restart_factor` (a decaying sawtooth), and continue -- a within-run
+    plateau-escape at the LR floor. `warm_restart_factor` (default 0.25) is a separate
+    config knob from the per-epoch anneal `scheduler_factor`: it sets the restart
+    amplitude, keeping each restart a gentle probe (a quarter of the peak) rather than a
+    large jump halfway back up. The peak decays each restart and self-terminates once
+    the next peak would reach the floor. `warm_restart_dwell == 0` disables it. Its state
+    (`warm_restart_peak`, the floor-dwell tally) is persisted in the resurrect-state,
+    so a `--resurrect` requeue continues the sawtooth mid-stride rather than resetting
+    it -- the schedule behaves as one continuous run across requeues.
 
     Distributed: TRAIN and TEST are both sharded across ranks (DistributedSampler)
     and their per-rank mean losses are all-reduced, so every rank's scheduler +
@@ -859,24 +980,75 @@ def train_loop(estimator: nn.Module,
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
         return float((t / topo.world_size).item())
 
+    # ---- Warm-restart state (a within-run plateau-escape at the LR floor) -----
+    # Once the LR decays to the floor and dwells there `warm_restart_dwell` epochs
+    # without a new best, reload the best checkpoint and restart the LR at the previous
+    # peak * `warm_restart_factor` (a decaying sawtooth; the restart-amplitude knob, kept
+    # separate from the per-epoch anneal scheduler.factor). Disabled when
+    # warm_restart_dwell == 0. These are the fresh-run defaults; a hot restart (below)
+    # overrides them from the resurrect-state so the sawtooth continues across a requeue.
+    warm_restart_dwell = PARAMETERS.inference.training.warm_restart_dwell
+    warm_restart_peak = optimizer.param_groups[0]["lr"]  # current sawtooth peak; starts at the initial (peak) LR
+    epochs_at_min_lr = 0                                  # consecutive floor epochs without a new best
+
     optimum_loss_test = float("inf")
+    start_epoch = 0   # global epoch offset; nonzero only on a hot restart
     if resurrect:
-        # All ranks load the same checkpoint -- staged to CPU, then placed onto each
-        # rank's own device by load_state_dict -- so the replicas stay identical and no
-        # single device accumulates every rank's copy. No barrier needed here: the
-        # checkpoint is from a prior completed run, so no rank writes it before this read.
-        estimator.load_state_dict(
-            torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
-        if has_val:
-            # Sharded TEST loss across ranks (see the per-epoch block below).
-            optimum_loss_test = _reduce_mean(
-                compute_validation_loss(estimator, val_loader, device, verbose=verbose))
+        state = None
+        if resurrect_state_path is not None and resurrect_state_path.exists():
+            # HOT restart: resume the exact full state (model + optimizer + scheduler +
+            # epoch + optimum + warm-restart counters). All ranks load the same
+            # rank-0-written file from the prior job -- no barrier needed (no rank writes
+            # it before this read) -- so the replicas stay identical.
+            try:
+                state = load_resume_state(resurrect_state_path, estimator, optimizer,
+                                          scheduler, resume_meta=resume_meta)
+            except ResumeStateMismatch:
+                # Deliberate refusal: --resurrect was pointed at an incompatible run. Fail
+                # loudly rather than silently downgrade to a mismatched cold restart.
+                raise
+            except Exception as exc:
+                # Present but unreadable (truncated/corrupt after a crash, or a partial
+                # rsync): exists() is True but torch.load raises. Degrade to the cold
+                # checkpoint instead of crashing the requeue chain; the next epoch rewrites
+                # a clean resume file. All ranks read the same shared file, so they take
+                # this branch identically and stay in lockstep.
+                state = None
+                if is_main:
+                    print(f"RESURRECT: resume file {resurrect_state_path} is present but "
+                          f"unreadable ({type(exc).__name__}: {exc}); falling back to a "
+                          f"cold restart from the checkpoint.", flush=True)
+        if state is not None:
+            # HOT restart bookkeeping -- optimum_loss_test comes from the state, so no
+            # baseline TEST pass is needed.
+            start_epoch = int(state["epoch"]) + 1
+            optimum_loss_test = float(state["optimum_loss_test"])
+            warm_restart_peak = float(state["warm_restart_peak"])
+            epochs_at_min_lr = int(state["epochs_at_min_lr"])
             if is_main:
-                print(f"RESURRECT: loaded checkpoint from {checkpoint_path}; "
-                      f"baseline test loss = {optimum_loss_test:.5f}")
-        elif is_main:
-            print(f"RESURRECT: loaded checkpoint from {checkpoint_path} "
-                  f"(no test set; last-epoch checkpointing).")
+                print(f"HOT RESTART: resumed full state from {resurrect_state_path}; "
+                      f"continuing at global epoch {start_epoch}, "
+                      f"lr={optimizer.param_groups[0]['lr']:.2e}, "
+                      f"best test loss = {optimum_loss_test:.5f}.", flush=True)
+        else:
+            # COLD fallback (resurrect-state absent, or present-but-unreadable above): load
+            # the best weights into the FRESH optimizer at the peak LR -- the
+            # pre-resurrect-state behavior. All ranks load the same checkpoint, staged to
+            # CPU then placed onto each rank's own device. The next epoch writes a
+            # resurrect-state, so subsequent requeues hot-restart.
+            estimator.load_state_dict(
+                torch.load(str(checkpoint_path), map_location="cpu", weights_only=True))
+            if has_val:
+                # Sharded TEST loss across ranks (see the per-epoch block below).
+                optimum_loss_test = _reduce_mean(
+                    compute_validation_loss(estimator, val_loader, device, verbose=verbose))
+                if is_main:
+                    print(f"RESURRECT (cold: fresh optimizer at peak LR): loaded checkpoint "
+                          f"from {checkpoint_path}; baseline test loss = "
+                          f"{optimum_loss_test:.5f}", flush=True)
+            elif is_main:
+                print(f"RESURRECT (cold): loaded checkpoint from {checkpoint_path} "
+                      f"(no test set; last-epoch checkpointing).", flush=True)
 
     n_batches = len(train_loader)
     # Within-epoch progress cadence: a line every `heartbeat` batches. Default
@@ -895,18 +1067,10 @@ def train_loop(estimator: nn.Module,
             flush=True,
         )
 
-    # ---- Warm-restart state (in-run resurrect when the LR bottoms out) -------
-    # Once the LR decays to the floor and dwells there `warm_restart_dwell` epochs
-    # without a new best, reload the best checkpoint and restart the LR at the previous
-    # peak * the plateau factor (a decaying sawtooth) -- an in-run --resurrect cycle
-    # without requeuing. Disabled when warm_restart_dwell == 0.
-    warm_restart_dwell = PARAMETERS.inference.training.warm_restart_dwell
-    warm_restart_peak = optimizer.param_groups[0]["lr"]  # current restart peak; starts at the initial LR
-    epochs_at_min_lr = 0                                  # consecutive floor epochs without a new best
-
     loop_start = time.time()
     for epoch in range(epochs):
         epoch_start = time.time()
+        global_epoch = start_epoch + epoch   # 0-indexed global epoch, continuous across requeues
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)   # reshuffle this rank's shard each epoch
         # ---- Training pass ------------------------------------------------
@@ -994,8 +1158,10 @@ def train_loop(estimator: nn.Module,
         eta = (elapsed / (epoch + 1)) * (epochs - epoch - 1)   # mean epoch time x remaining
         if is_main:
             replay_str = f"{epoch_replay:.5f}" if replay_loss else "off"
+            epoch_tag = (f"Epoch {epoch + 1}|{epochs} (global {global_epoch + 1})"
+                         if start_epoch else f"Epoch {epoch + 1}|{epochs}")
             print(
-                f"Epoch {epoch + 1}|{epochs}    "
+                f"{epoch_tag}    "
                 f"train={epoch_train:.5f}    test={epoch_test:.5f}    "
                 f"replay={replay_str}    lr={scheduler.get_last_lr()[0]:.2e}    "
                 f"epoch={epoch_secs:.1f}s    elapsed={time.strftime('%H:%M:%S', time.gmtime(elapsed))}    "
@@ -1011,7 +1177,9 @@ def train_loop(estimator: nn.Module,
             at_floor = optimizer.param_groups[0]["lr"] <= scheduler.min_lrs[0]
             epochs_at_min_lr = (epochs_at_min_lr + 1
                                 if (at_floor and not new_best_this_epoch) else 0)
-            next_peak = warm_restart_peak * scheduler.factor
+            # Amplitude decay uses warm_restart_factor -- a separate knob from the
+            # per-epoch anneal scheduler.factor -- so restarts stay a gentle probe.
+            next_peak = warm_restart_peak * PARAMETERS.inference.training.warm_restart_factor
             # Fire once the floor has stalled long enough, and only while the decayed
             # peak stays above the floor (else the restart is a no-op -- the sawtooth
             # has annealed to nothing and we just ride the floor to the end).
@@ -1033,6 +1201,20 @@ def train_loop(estimator: nn.Module,
                           f"epoch(s) without improving; reloaded best (test loss "
                           f"{optimum_loss_test:.5f}) and restarted LR at {warm_restart_peak:.2e}.",
                           flush=True)
+
+        # ---- Resurrect-state (full training state; rank 0; every epoch; atomic) ----
+        # Written at the END of the epoch, so if a warm restart fired above it captures
+        # the post-restart optimizer/scheduler + counters. A --resurrect requeue
+        # hot-restarts from this exact state (see the resurrect block near the top). A
+        # transient resume file -- always overwritten, never a scientific deliverable;
+        # only rank 0 writes it and no rank reads it during the run, so no barrier.
+        if is_main and resurrect_state_path is not None:
+            save_resume_state(
+                resurrect_state_path,
+                estimator=estimator, optimizer=optimizer, scheduler=scheduler,
+                epoch=global_epoch, optimum_loss_test=optimum_loss_test,
+                warm_restart_peak=warm_restart_peak, epochs_at_min_lr=epochs_at_min_lr,
+                resume_meta=resume_meta)
 
     # ---- Final model ------------------------------------------------------
     if has_val:
