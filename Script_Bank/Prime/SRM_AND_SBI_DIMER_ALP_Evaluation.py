@@ -42,9 +42,10 @@ from srm_and_sbi_dimer_alp.evaluation import (
     recovery_table,
     _theta_repr,
 )
-from srm_and_sbi_dimer_alp.inference_support import load_posterior, resolve_topology
+from srm_and_sbi_dimer_alp import artifacts
+from srm_and_sbi_dimer_alp.inference_support import resolve_topology
 from srm_and_sbi_dimer_alp.io import load_data
-from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming, build_prior
+from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, PARAMETER_KEYS, RunTiming, build_prior
 from srm_and_sbi_dimer_alp.utils import console_log_context
 from srm_and_sbi_dimer_alp.visualization_inference import figure_recovery_combined
 
@@ -250,7 +251,7 @@ def main(args: argparse.Namespace) -> None:
     torch._dynamo.config.suppress_errors = True
 
     timing_label = timing.label
-    posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    estimator_path = paths.estimator_path(data_bank_root, timing_label)
     recovery_dir = paths.map_recovery_dir(data_bank_root, timing_label)
     recovery_array_path = paths.map_recovery_array_path(data_bank_root, timing_label)
 
@@ -312,7 +313,7 @@ def main(args: argparse.Namespace) -> None:
         print(f"  --posterior-samples  : {posterior_samples}")
     progress_path = recovery_dir / "progress.log"
     print("\nOutput destinations:")
-    print(f"  reads posterior : {posterior_path}")
+    print(f"  reads estimator : {estimator_path}")
     print(f"  reads EVAL      : <data_bank>/{paths.video_subdir}/"
           f"{paths.project_alias}_{timing_label}_Video_Set_TASK_{{0..{args.eval_tasks - 1}}}_EVAL.zarr")
     print(f"  writes report   : {recovery_dir}")
@@ -326,7 +327,7 @@ def main(args: argparse.Namespace) -> None:
         eval_video_path = paths.video_set_path(0, data_bank_root, timing_label, compress, "EVAL")
         eval_theta_path = paths.theta_set_path(0, data_bank_root, timing_label, compress, "EVAL")
         inputs = [
-            ("posterior", posterior_path),
+            ("estimator artifact", estimator_path),
             ("EVAL video set (task 0)", eval_video_path),
             ("EVAL theta set (task 0)", eval_theta_path),
         ]
@@ -358,19 +359,21 @@ def main(args: argparse.Namespace) -> None:
         _merge_shards(reporter, args, eval_cfg, recovery_dir, recovery_array_path, run_start)
         return
 
-    reporter.check_file("posterior", posterior_path)
+    reporter.check_file("estimator artifact", estimator_path)
 
     topo = resolve_topology()
     device = topo.device
     vista_device = torch.device("cpu")
-    posterior = load_posterior(posterior_path)
+    posterior = artifacts.load_estimator(estimator_path, device=str(device),
+                                          expected_parameter_keys=PARAMETER_KEYS)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
         # Rebuild the prior on THIS worker's device for bounded rejection sampling.
-        # The pickled posterior's _prior lives on the single-GPU save device (cuda:0);
-        # under multi-GPU sharding each rank binds its own cuda:local_rank, so reusing
-        # _prior directly would mix devices (cuda:0 vs cuda:r). Rebuilding is equivalent
-        # on the single-GPU path (raw build_prior on the same device as _prior).
+        # Under multi-GPU sharding each rank binds its own cuda:local_rank, so the prior
+        # must live on this rank's device. load_estimator already attaches a device-aware
+        # prior; rebuilding here from the current parameterization keeps it explicit and
+        # pinned to this rank's device (the schema guard ensures the artifact's bounds
+        # match the current parameterization, so the rebuilt prior is equivalent).
         posterior.prior = build_prior(device=str(device))
 
     # ---- This worker's task shard ----------------------------------------

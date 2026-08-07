@@ -8,7 +8,7 @@ the diffusion readout is interpreted quantitatively. It is written so the analys
 be understood and reused without reverse-engineering the code.
 
 This is a special-scope, ad-hoc reuse of a trained posterior on data from a different
-study — analogous to the Construction special-situation entry point. It is not one of
+study. It is not one of
 the canonical pipeline stages and is kept out of the stage dispatcher.
 
 ## The controls, and why diffusion is the readout

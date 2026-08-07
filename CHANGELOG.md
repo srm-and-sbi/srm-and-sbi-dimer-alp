@@ -5,6 +5,66 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.2 - 2026-08-07
+
+The canonical ("biology") DLI forward model is brought onto the corrected imaging physics
+proven in the detector workflow, parameter roles become value-based, and the trained estimator
+gains a version-portable on-disk format. The canonical `simulate_dli` — which had been calling
+retired `EMCCD`/`compute_matrices` signatures — runs again. This changes the DLI data schema
+(camera keys, dimer model, background floor) and the reaction-diffusion prior ranges; no canonical
+estimators or datasets existed under the old model, so nothing trained is invalidated. The detector
+workflow is unaffected.
+
+### Changed
+
+- **Canonical DLI forward-model rework.** `simulate_dli` builds the corrected Poisson–Gamma–Normal
+  `EMCCD` (`em_gain=gamma`, `electrons_per_adu=1.0`, `read_noise_adu=kappa_s`, `bias_adu=kappa_b`,
+  `quantum_efficiency=kappa_q`), replacing the retired `EMCCD(offset, gain, variance)`. The pre-PSF
+  photon floor is the optical background `kappa_o` (not a zero dark-count floor). Dimers render by the
+  `sum` model — two independent labels, each with its own flicker trajectory — replacing `multiply`
+  (retained as a sensitivity alternative). Flicker locality is fixed (`kappa_penalty=1`); the retired
+  `gamma_penalty` is gone. Mirrors `render_detector_video`.
+- **Camera is the SCOPE camera nuisance (canonical too).** The camera chain (`gamma`, `kappa_o`,
+  `kappa_b`, `kappa_s`, `kappa_q`) is marginalized as the SCOPE nuisance — drawn per simulation from
+  tight a-priori log10 boxes (transient, no artifact; `DETECTOR_WORKFLOW.md` §9.3) — rather than fixed
+  known constants. `kappa_g`/`kappa_c` are retained as fixed spec metadata for the
+  `gamma = kappa_g/kappa_c` drift check; `kappa_v` is retired.
+- **Reaction-diffusion prior ranges** widened to match the detector nuisance ranges: per-species count
+  `(1.75, 2.25) → (0.0, 2.5)` (log10; `[1, 316]`), `diffusivity_alp (-1, 0) → (-1.25, -0.25)`,
+  `relative_diffusivity_bet (-0.75, -0.25) → (-0.625, -0.125)`; `relative_diffusivity_chi` unchanged.
+- **Value-based parameter roles.** Each parameter's role is read from its `(VALUE, PRIOR_RANGE)` cell
+  via `role_of` and the `NUISANCE`/`POSTERIOR` sentinels, so a block can be held fixed, inferred, or
+  marginalized without structural change. The learnable subset (`VALUE`-not-a-sentinel AND
+  `PRIOR_RANGE`-not-`None`) is exactly the 10 reaction-diffusion parameters.
+- **Fixed imaging operating point.** The photophysics (`mu_r`, `sigma_r`, `mu_pc`, `sigma_pc`,
+  `prob_photo_bleach`, `lambda_rate`) are held fixed at the detector's prior center (`VALUE = 10**mid`),
+  pending marginalization from the pooled `Nuisance_DLI` artifact in a later step.
+
+### Added
+
+- **Version-portable estimator artifact** (`artifacts.save_estimator` / `load_estimator`): a
+  self-describing `Estimator.npz` — compile-stripped `state_dict` + rebuild spec + a `parameter_keys`
+  schema guard — replaces the torch-version-locked pickled `DirectPosterior` (`Posterior.pkl`). The
+  Inference stage writes it; Evaluation and Experiment load it and reject a schema mismatch loudly.
+- **`draw_scope_camera`** (`simulation_dli_support.py`): draws one SCOPE camera vector per simulation,
+  log10-uniform over the a-priori boxes, mirroring the detector DLI stage's draw.
+
+### Removed
+
+- **`Construction_Optimum_ANN` special-situation entry point** — retired; its purpose is obsolete under
+  the version-portable estimator (a checkpoint no longer needs a separate pickle-rebuild step, and the
+  Inference stage writes the portable estimator directly). Its HPC-runbook and cross-doc references are
+  removed.
+- **Retired parameters/fields:** `gamma_penalty`, `kappa_v`, and the `SimulationDLI.darkcounts` field
+  (superseded by the `kappa_o` optical-background floor).
+
+### Migration
+
+- The canonical DLI data schema and reaction-diffusion prior ranges changed, so any dataset or estimator
+  built under the old model is inconsistent with this one. No canonical artifacts existed (the pipeline
+  was never run in production), so nothing is invalidated; the biology workflow is regenerated and
+  retrained from scratch under the corrected model.
+
 ## 0.4.1 - 2026-08-06
 
 Training resume becomes seamless across requeues, and the inference launch gains a

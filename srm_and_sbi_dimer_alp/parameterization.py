@@ -214,7 +214,7 @@ class Paths:
     video_set_pattern: str = "{project_alias}_{timing_label}_Video_Set_TASK_{task_alias}_{split}.{ext}"
     checkpoint_pattern: str = "{project_alias}_{timing_label}_Optimum_ANN.pth"
     resurrect_state_pattern: str = "{project_alias}_{timing_label}_Resurrect_State_ANN.pth"
-    posterior_pattern: str = "{project_alias}_{timing_label}_Posterior.pkl"
+    estimator_pattern: str = "{project_alias}_{timing_label}_Estimator.npz"
     test_loss_distribution_pattern: str = "{project_alias}_{timing_label}_Test_Loss_Distribution.npz"
     recovery_pattern: str = "{project_alias}_{timing_label}_MAP_Recovery"
     experiment_recovery_pattern: str = "{project_alias}_{timing_label}_MAP_Experiment"
@@ -306,9 +306,15 @@ class Paths:
         )
         return data_bank_root / self.labor_subdir / filename
 
-    def posterior_path(self, data_bank_root: Path, timing_label: str) -> Path:
-        """Full path for the posterior pickle file."""
-        filename = self.posterior_pattern.format(
+    def estimator_path(self, data_bank_root: Path, timing_label: str) -> Path:
+        """Full path for the version-portable estimator artifact (.npz).
+
+        The self-describing estimator format (compile-stripped state_dict + rebuild
+        spec + metadata; see ``artifacts.save_estimator``) that supersedes the
+        torch-version-locked posterior pickle. Lives beside the former posterior in
+        ``posit_subdir``.
+        """
+        filename = self.estimator_pattern.format(
             project_alias=self.project_alias,
             timing_label=timing_label,
         )
@@ -370,11 +376,11 @@ class Paths:
         descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)
         return data_bank_root / self.labor_subdir / f"{stem}_{descriptor}.{ext}"
 
-    def backup_posterior_path(self, data_bank_root: Path, timing_label: str,
+    def backup_estimator_path(self, data_bank_root: Path, timing_label: str,
                               train_videos: int, test_videos: int,
                               epochs: int, test_loss: float) -> Path:
-        """Provenance-named backup of the posterior, alongside the canonical one."""
-        base = self.posterior_pattern.format(
+        """Provenance-named backup of the estimator artifact, alongside the canonical one."""
+        base = self.estimator_pattern.format(
             project_alias=self.project_alias, timing_label=timing_label)
         stem, ext = base.rsplit(".", 1)
         descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)
@@ -386,33 +392,12 @@ class Paths:
         """Provenance-named backup of the test-loss distribution, alongside the
         canonical one. ``epochs`` carries the epoch this best occurred at for a
         new-best backup, or the total planned epochs for the finish backup (the
-        two coexist), exactly like the posterior/checkpoint backups."""
+        two coexist), exactly like the estimator/checkpoint backups."""
         base = self.test_loss_distribution_pattern.format(
             project_alias=self.project_alias, timing_label=timing_label)
         stem, ext = base.rsplit(".", 1)
         descriptor = self.backup_descriptor(train_videos, test_videos, epochs, test_loss)
         return data_bank_root / self.posit_subdir / f"{stem}_{descriptor}.{ext}"
-
-    def posterior_path_for_checkpoint(self, checkpoint_path: Path,
-                                      data_bank_root: Path) -> Path:
-        """Posterior path matching a given checkpoint (canonical or a backup).
-
-        Derives the output name from the checkpoint's own filename by swapping the
-        object token and extension -- ``Optimum_ANN`` -> ``Posterior``, ``.pth`` ->
-        ``.pkl`` -- and placing it under ``Posit/``. A canonical checkpoint maps to
-        the canonical posterior; a descriptor-named backup checkpoint maps to the
-        matching backup posterior (the descriptor rides along unchanged). Lets a
-        posterior be rebuilt from any archived checkpoint under a consistent name.
-        """
-        name = checkpoint_path.name
-        if "Optimum_ANN" not in name or not name.endswith(".pth"):
-            raise ValueError(
-                f"cannot derive a posterior name from {name!r}: expected an "
-                f"'Optimum_ANN' checkpoint ending in '.pth'. Pass an explicit "
-                f"posterior path instead."
-            )
-        posterior_name = name.replace("Optimum_ANN", "Posterior")[:-len(".pth")] + ".pkl"
-        return data_bank_root / self.posit_subdir / posterior_name
 
     def debug_run_dir(self, data_bank_root: Path, timing_label: str, stage: str,
                       split: Optional[str] = None) -> Path:
@@ -587,8 +572,8 @@ class SimulationRDS:
 class SimulationDLI:
     """DLI-stage runtime defaults."""
     dimer_mule: float = 2.0                         # merged-dimer brightness vs monomer; 2 = two always-on labels (photons sum, MET), sqrt(2) under blinking/partial labeling (see PROJECT_CONTEXT.md)
-    darkcounts: int = 0                            # baseline; no per-pixel dark current
     sqrt_2sigma_dist_label: str = "lognormal"      # PSF width sampling distribution
+    # darkcounts removed (W1): the pre-PSF photon floor is the SCOPE-drawn optical background kappa_o (REFERENCE_EMCCD_NOISE_MODEL.md sec. 5); dark current is handled inside EMCCD (dark_current_e_per_s=0).
 
 
 @dataclass(frozen=True)
@@ -818,16 +803,26 @@ PARAMETERS = Parameters(machine=load_machine_profile())
 #     PARAMETERS.simulation.stem.particle_diameter_nm, so it tracks per-dataset
 #     geometry (particle_diameter_nm is the single physical input).
 
+# Value-based parameter-role sentinels (DETECTOR_WORKFLOW.md sec. 5). A row whose
+# VALUE is one of these strings is a role marker, not a concrete value: NUISANCE means
+# "marginalized -- drawn per simulation, never inferred"; POSTERIOR means "drawn from a
+# trained posterior". Defined above the parameter table so rows can carry them (the
+# role dispatcher `role_of` that reads them lives further below, beside the filters).
+NUISANCE_SENTINEL = "NUISANCE"
+POSTERIOR_SENTINEL = "POSTERIOR"
+_SENTINELS = (NUISANCE_SENTINEL, POSTERIOR_SENTINEL)
+
+
 _PARAMETERIZATION_RAW_NESTED: dict[str, list[dict]] = {
     # ----- Reaction-Diffusion System -----
     'count': [  # particle_species_population_counts
-        {'KEY': 'count_alp', 'VALUE': 10**2, 'PRIOR_RANGE': (1.75, 2.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'DERIVED_UNIT': None, 'LABEL': r'$C_{A}$', 'NOTE': 'Learnable Parameter'},
-        {'KEY': 'count_bet', 'VALUE': 10**2, 'PRIOR_RANGE': (1.75, 2.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'DERIVED_UNIT': None, 'LABEL': r'$C_{B}$', 'NOTE': 'Learnable Parameter'},
-        {'KEY': 'count_chi', 'VALUE': 10**2, 'PRIOR_RANGE': (1.75, 2.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'DERIVED_UNIT': None, 'LABEL': r'$C_{C}$', 'NOTE': 'Learnable Parameter'},
+        {'KEY': 'count_alp', 'VALUE': 10**1.25, 'PRIOR_RANGE': (0.0, 2.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'DERIVED_UNIT': None, 'LABEL': r'$C_{A}$', 'NOTE': 'Learnable Parameter'},
+        {'KEY': 'count_bet', 'VALUE': 10**1.25, 'PRIOR_RANGE': (0.0, 2.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'DERIVED_UNIT': None, 'LABEL': r'$C_{B}$', 'NOTE': 'Learnable Parameter'},
+        {'KEY': 'count_chi', 'VALUE': 10**1.25, 'PRIOR_RANGE': (0.0, 2.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count', 'DERIVED_UNIT': None, 'LABEL': r'$C_{C}$', 'NOTE': 'Learnable Parameter'},
     ],
     'diffusivity': [  # diffusion_coefficients / diffusion_constants
-        {'KEY': 'diffusivity_alp', 'VALUE': 10**(-0.5), 'PRIOR_RANGE': (-1, 0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Square Micrometer Per Second', 'DERIVED_UNIT': None, 'LABEL': r'$D_{A}$', 'NOTE': 'Learnable Parameter'},
-        {'KEY': 'relative_diffusivity_bet', 'VALUE': 10**(-0.5), 'PRIOR_RANGE': (-0.75, -0.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Dimensionless', 'DERIVED_UNIT': 'Square Micrometer Per Second', 'LABEL': r'$R_{B}$', 'NOTE': 'Learnable Parameter'},
+        {'KEY': 'diffusivity_alp', 'VALUE': 10**(-0.75), 'PRIOR_RANGE': (-1.25, -0.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Square Micrometer Per Second', 'DERIVED_UNIT': None, 'LABEL': r'$D_{A}$', 'NOTE': 'Learnable Parameter'},
+        {'KEY': 'relative_diffusivity_bet', 'VALUE': 10**(-0.375), 'PRIOR_RANGE': (-0.625, -0.125), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Dimensionless', 'DERIVED_UNIT': 'Square Micrometer Per Second', 'LABEL': r'$R_{B}$', 'NOTE': 'Learnable Parameter'},
         {'KEY': 'relative_diffusivity_chi', 'VALUE': 10**(-1.5), 'PRIOR_RANGE': (-2, -1), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Dimensionless', 'DERIVED_UNIT': 'Square Micrometer Per Second', 'LABEL': r'$R_{C}$', 'NOTE': 'Learnable Parameter'},
     ],
     'dimerization_dissociation': [  # K_ON, K_OFF
@@ -840,25 +835,34 @@ _PARAMETERIZATION_RAW_NESTED: dict[str, list[dict]] = {
         {'KEY': 'rate_mobility', 'VALUE': 10**0, 'PRIOR_RANGE': (-1, 1), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Count Per Second', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{MOBILITY}$', 'NOTE': 'Learnable Parameter'},
     ],
     # ----- Diffraction-Limited Imaging -----
-    'camera': [  # EMCCD detector parameters ('kappa_*' suffix)
-        {'KEY': 'kappa_c', 'VALUE': 4.75, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{c}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'kappa_o', 'VALUE': 250, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Photon', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{o}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'kappa_g', 'VALUE': 150, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{g}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'kappa_v', 'VALUE': 50, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Photon', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{v}$', 'NOTE': 'Known Parameter'},
+    'camera': [  # EMCCD camera chain (REFERENCE_EMCCD_NOISE_MODEL.md): gamma, kappa_o, kappa_b, kappa_s, kappa_q marginalized as the SCOPE camera nuisance (non-identifiable; DETECTOR_WORKFLOW.md sec. 9.3, marginalized in both workflows); kappa_g, kappa_c fixed nominal spec metadata (gamma = kappa_g/kappa_c).
+        {'KEY': 'gamma', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (1.62, 1.625), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'ADU Per Electron', 'DERIVED_UNIT': None, 'LABEL': r'$\gamma$',
+         'NOTE': 'Gain-conversion ratio gamma = kappa_g/kappa_c (ADU per photoelectron) -- the only gain quantity the videos identify. Marginalized as a SCOPE camera nuisance: inferring it splits the peak-ADU amplitude with mu_pc (only gamma*kappa_q is identifiable), so it is drawn from its a-priori box rather than treated as a calibration target (DETECTOR_WORKFLOW.md sec. 9.3). Config-exact reference: kappa_g/kappa_c = 200/4.78 = 41.84, identical across all MET cells (both Fab and InlB camera protocols); box [41.7, 42.2].'},
+        {'KEY': 'kappa_o', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (1.455, 1.465), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'Photon', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{o}$',
+         'NOTE': 'Optical background offset: incident photons per pixel per frame, pre-gain, one scalar per movie; amplified by gamma*kappa_q to set the ADU floor. Marginalized as a SCOPE camera nuisance (non-identifiable; DETECTOR_WORKFLOW.md sec. 9.3). Reference = ThunderSTORM offset[photon] median, a condition-independent background: Fab 28.9 / InlB 28.6 (pooled 28.7). Narrow box [28.5, 29.2] around the measured value: a broad offset lets the gain*offset floor dominate the video-to-video variation (embedding collapse).'},
+        {'KEY': 'kappa_b', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (2.24, 2.25), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'ADU', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{b}$',
+         'NOTE': 'Camera baseline: post-gain ADU constant, added last. Marginalized as a SCOPE camera nuisance (non-identifiable; DETECTOR_WORKFLOW.md sec. 9.3). Config-exact reference: MET configured baseline = 175, identical across all cells (both conditions); box [173.8, 177.8].'},
+        {'KEY': 'kappa_s', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (1.02, 1.025), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': 'ADU', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{s}$',
+         'NOTE': 'Read noise: post-register Gaussian sigma (ADU). Marginalized as a SCOPE camera nuisance: it does not dominate the SNR (the EM register amplifies signal above the read-noise floor) and is only weakly identifiable (DETECTOR_WORKFLOW.md sec. 9.3). Reference = camera datasheet ~10.5 ADU; box [10.5, 10.6] (weakly identifiable but pinned tight to the datasheet value, like the other camera constants).'},
+        {'KEY': 'kappa_q', 'VALUE': NUISANCE_SENTINEL, 'PRIOR_RANGE': (-0.05, -0.04), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{q}$',
+         'NOTE': 'Quantum efficiency, applied once in the Poisson step. Marginalized as a SCOPE camera nuisance: only the product gamma*kappa_q is identifiable from the videos (DETECTOR_WORKFLOW.md sec. 9.3). Config-exact reference: MET quantumEfficiency = 0.90, identical across all cells; box [0.89, 0.91].'},
+        {'KEY': 'kappa_g', 'VALUE': 200, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{g}$',
+         'NOTE': 'Nominal EM gain g from the MET acquisition config (ThunderSTORM camera protocol; audit-pending). Not inferred -- kept as spec metadata so the drawn gamma (SCOPE nuisance) can be checked against kappa_g/kappa_c (drift check).'},
+        {'KEY': 'kappa_c', 'VALUE': 4.78, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Electron Per ADU', 'DERIVED_UNIT': None, 'LABEL': r'$\kappa_{c}$',
+         'NOTE': 'Nominal conversion C (e-/ADU) from the MET acquisition config (photons2ADU field; audit-pending). Not inferred -- kept as spec metadata for the gamma drift check. gamma = kappa_g / kappa_c.'},
     ],
     'psf': [  # Point Spread Function (lowercased for casing consistency)
-        {'KEY': 'mu_r', 'VALUE': 1.5, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\mu_{r}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'sigma_r', 'VALUE': 0.15, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\sigma_{r}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'mu_pc', 'VALUE': 250, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\mu_{pc}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'sigma_pc', 'VALUE': 0.5, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\sigma_{pc}$', 'NOTE': 'Known Parameter'},
+        {'KEY': 'mu_r', 'VALUE': 10**0.15, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\mu_{r}$', 'NOTE': 'Fixed at the corrected imaging operating point (DETECTOR_WORKFLOW.md sec. 6.2 prior center 10**mid); marginalized from Nuisance_DLI in production (W4).'},
+        {'KEY': 'sigma_r', 'VALUE': 10**(-0.625), 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\sigma_{r}$', 'NOTE': 'Fixed at the corrected imaging operating point (DETECTOR_WORKFLOW.md sec. 6.2 prior center 10**mid); marginalized from Nuisance_DLI in production (W4).'},
+        {'KEY': 'mu_pc', 'VALUE': 10**2.375, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\mu_{pc}$', 'NOTE': 'Fixed at the corrected imaging operating point (DETECTOR_WORKFLOW.md sec. 6.2 prior center 10**mid); marginalized from Nuisance_DLI in production (W4).'},
+        {'KEY': 'sigma_pc', 'VALUE': 10**(-0.375), 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\sigma_{pc}$', 'NOTE': 'Fixed at the corrected imaging operating point (DETECTOR_WORKFLOW.md sec. 6.2 prior center 10**mid); marginalized from Nuisance_DLI in production (W4).'},
     ],
     'transitivity': [  # CTMC Generator Matrix + DTMC Stochastic Matrix (emitter brightness state transitions)
         {'KEY': 'brightness_quantile', 'VALUE': [0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95], 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': None, 'NOTE': 'Hyper Parameter'},
         {'KEY': 'delta_frame', 'VALUE': 0.020, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Second', 'DERIVED_UNIT': None, 'LABEL': r'$\delta_{f}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'prob_photo_bleach', 'VALUE': 0.1, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\rho_{pb}$', 'NOTE': 'Known Parameter'},
+        {'KEY': 'prob_photo_bleach', 'VALUE': 10**(-1.25), 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\rho_{pb}$', 'NOTE': 'Fixed at the corrected imaging operating point (DETECTOR_WORKFLOW.md sec. 6.2 prior center 10**mid); marginalized from Nuisance_DLI in production (W4).'},
         {'KEY': 'numb_photo_bleach', 'VALUE': 100, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\psi_{pb}$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'lambda_rate', 'VALUE': 5, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\lambda$', 'NOTE': 'Known Parameter'},
-        {'KEY': 'gamma_penalty', 'VALUE': 0.025, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\gamma$', 'NOTE': 'Known Parameter'},
+        {'KEY': 'lambda_rate', 'VALUE': 10**0.5, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'DERIVED_UNIT': None, 'LABEL': r'$\lambda$', 'NOTE': 'Fixed at the corrected imaging operating point (DETECTOR_WORKFLOW.md sec. 6.2 prior center 10**mid); marginalized from Nuisance_DLI in production (W4). Flicker locality is fixed (kappa_penalty=1 in compute_matrices); gamma_penalty retired.'},
     ],
 }
 
@@ -888,15 +892,60 @@ PARAMETER_RAW_FIND: dict[str, int] = {
     para['KEY']: index for index, para in enumerate(PARAMETERIZATION_RAW)
 }
 
-# Filtered list (learnable subset): only entries with PRIOR_RANGE
+
+# ---- Value-based parameter roles ---------------------------------------------
+# The role of each parameter is read from its (VALUE, PRIOR_RANGE) cell, so a block
+# can be held Fixed, inferred as a Posterior (learnable), or marginalized as a
+# Nuisance without structural change. A concrete VALUE + a range is learnable; a
+# concrete VALUE + no range is fixed; the sentinels (defined above the table) mark the
+# nuisance/posterior roles. Ported from the Detector workflow (DETECTOR_WORKFLOW.md
+# sec. 5). The camera block is marginalized as the SCOPE camera nuisance (drawn per
+# simulation from its a-priori box, DETECTOR_WORKFLOW.md sec. 9.3); the remaining imaging
+# rows resolve to 'fixed', so the learnable subset is exactly the 10 RDS parameters.
+
+
+def role_of(entry: dict) -> str:
+    """Value-based role of one parameter entry.
+
+    Returns 'learnable', 'fixed', 'nuisance_spec', 'nuisance_object', or 'posterior'.
+    Dispatch is sentinel-based and never tests whether VALUE is numeric, so a
+    list-valued fixed parameter (e.g. brightness_quantile) is classified correctly.
+    The learnable subset is VALUE-not-a-sentinel AND PRIOR_RANGE-not-None
+    (DETECTOR_WORKFLOW.md sec. 5, constraint 2): a nuisance-from-spec row also carries
+    a range, so a bare PRIOR_RANGE test would wrongly pull it into the inference prior.
+    POSTERIOR with a range is undefined -- a posterior draw carries its own support.
+    """
+    value, prior_range = entry['VALUE'], entry['PRIOR_RANGE']
+    is_sentinel = isinstance(value, str) and value in _SENTINELS
+    if value == POSTERIOR_SENTINEL:
+        if prior_range is not None:
+            raise ValueError(
+                f"parameter {entry['KEY']!r}: POSTERIOR with a PRIOR_RANGE is undefined "
+                f"(a posterior draw carries its own support); set PRIOR_RANGE=None.")
+        return 'posterior'
+    if value == NUISANCE_SENTINEL:
+        return 'nuisance_spec' if prior_range is not None else 'nuisance_object'
+    if not is_sentinel and prior_range is not None:
+        return 'learnable'
+    return 'fixed'
+
+
+# Filtered list (learnable subset): VALUE-not-a-sentinel AND PRIOR_RANGE-not-None.
 PARAMETERIZATION: list[dict] = [
-    para for para in PARAMETERIZATION_RAW if para['PRIOR_RANGE'] is not None
+    para for para in PARAMETERIZATION_RAW if role_of(para) == 'learnable'
 ]
 
 # Index map: KEY -> position in PARAMETERIZATION (for theta-vector indexing)
 PARAMETER_FIND: dict[str, int] = {
     para['KEY']: index for index, para in enumerate(PARAMETERIZATION)
 }
+
+# Ordered learnable-parameter keys = the theta-vector schema. Passed to
+# artifacts.load_estimator(expected_parameter_keys=...) / assert_schema_compatible to
+# hard-reject an estimator whose parameter schema differs (equal-length theta vectors
+# would otherwise be misread column-for-column). Mirrors
+# detector_parameterization.DETECTOR_PARAMETER_KEYS.
+PARAMETER_KEYS: list[str] = [para['KEY'] for para in PARAMETERIZATION]
 
 
 # =============================================================================

@@ -60,10 +60,10 @@ _DTYPE_FOR_BITS = {8: np.uint8, 16: np.uint16}
 # entries in PARAMETERIZATION_RAW; the group labels are display-only.
 _DLI_PARAM_GROUPS = {
     "PSF (Point Spread Function)": ["mu_r", "sigma_r", "mu_pc", "sigma_pc"],
-    "EMCCD camera": ["kappa_c", "kappa_o", "kappa_g", "kappa_v"],
+    "EMCCD camera (SCOPE nuisance)": ["gamma", "kappa_o", "kappa_b", "kappa_s", "kappa_q", "kappa_g", "kappa_c"],
     "State machine (brightness transitivity)": [
         "brightness_quantile", "delta_frame", "prob_photo_bleach",
-        "numb_photo_bleach", "lambda_rate", "gamma_penalty",
+        "numb_photo_bleach", "lambda_rate",
     ],
 }
 
@@ -141,9 +141,8 @@ def main(args: argparse.Namespace) -> None:
 
     print("\nDLI runtime defaults:")
     print(f"  dimer_mule              : {dli_cfg.dimer_mule}   "
-          f"(√2; brightness boost for dimers — see PROJECT_CONTEXT.md)")
-    print(f"  darkcounts              : {dli_cfg.darkcounts}                    "
-          f"(baseline; no per-pixel dark current)")
+          f"(multiply-model factor; inert under the sum model — see PROJECT_CONTEXT.md)")
+    print(f"  optical background      : SCOPE nuisance kappa_o (drawn per sim; pre-PSF photon floor)")
     print(f"  sqrt_2sigma_dist_label  : {dli_cfg.sqrt_2sigma_dist_label}            "
           f"(PSF width sampling distribution)")
 
@@ -168,7 +167,12 @@ def main(args: argparse.Namespace) -> None:
                 val = para["VALUE"]
                 unit = para["UNIT"]
                 unit_str = f"        units: {unit}" if unit else ""
-                print(f"  {key:<24}  : {val}{unit_str}")
+                if isinstance(val, str):   # role sentinel (e.g. NUISANCE): show the drawn box, not the marker
+                    lo, hi = para["PRIOR_RANGE"]
+                    box = f"10^[{lo}, {hi}]" if para.get("LOG_FLAG") else f"[{lo}, {hi}]"
+                    print(f"  {key:<24}  : {val} (drawn per sim; {box}){unit_str}")
+                else:
+                    print(f"  {key:<24}  : {val}{unit_str}")
 
     print(f"\n{div}\n")
 

@@ -385,70 +385,29 @@ submit line at the script's baked defaults.
 
 ## 6. Special-situation entry points (run ad hoc)
 
-The four stages in §1 form the standard, dispatcher-driven pipeline. A few entry
-points sit outside that dispatcher — special-situation steps run by hand when a
-specific case calls for them. They are deliberately kept out of the `Submit.sh`
-dispatcher and the stage wrapper set, so the standard submission surface stays
-exactly the four stages. Run them ad hoc with the recipe here rather than
-building new launch machinery.
+The four stages in §1 form the standard, dispatcher-driven pipeline. A handful of
+ad-hoc utilities sit outside it — the post-hoc analyses and calibration builders in
+`Script_Bank/Analysis/` (for example the pooled `Nuisance_DLI` construction, the
+embedding-space distance, and the flicker-rate derivation). They are deliberately
+kept out of the `Submit.sh` dispatcher and the stage wrapper set, so the standard
+submission surface stays exactly the four stages.
 
-### Construct a posterior from a checkpoint
-
-`Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py` rebuilds a
-`DirectPosterior` pickle from a saved `Optimum_ANN.pth` checkpoint **without
-training**: it constructs the estimator exactly as Inference does, loads the
-checkpoint weights into it, and pickles the posterior. Use it to
-
-- move a trained model between machines — copy the small `.pth`, then construct
-  the `.pkl` locally (a pickle embeds device state and is not portably moved);
-- recover a posterior from a run that checkpointed but was stopped (e.g. a wall
-  timeout) before it reached its own save block; or
-- rebuild the posterior for an archived backup checkpoint (§7) — point
-  `--checkpoint` at the backup and the matching backup posterior is produced.
-
-It is single-process, single-GPU — there is nothing to shard — and its cost is
-the one-time `torch.compile` in `build_maf` (a few minutes). Run it with plain
-`python`, not `torchrun`.
-
-Locally (add `--dry-run` first to validate the checkpoint and inputs without GPU use):
-
-```bash
-MACHINE_PROFILE=<profile> python \
-    Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py --total-time-seconds 2.0
-```
-
-On Slurm — a one-off `sbatch --wrap` that sources `hpc_local.env` (§5) for the
-machine config and requests a single GPU on the check partition. Submit from the
-repo root; the job name follows the §3 pattern with a `Construction` descriptor:
-
-```bash
-cd /path/to/srm-and-sbi-dimer-alp
-sbatch --partition=gpu_test --gres=gpu:1 --cpus-per-task=16 --mem=64G --time=00:30:00 \
-       --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Construction \
-       --output="$MON_OUT/%x_%A.out" \
-       --wrap='set -e; . Script_Bank/HPC/hpc_local.env; source "$CONDA_SETUP"; \
-               conda activate SRM_AND_SBI_ENVY_V0; export MACHINE_PROFILE="${MACHINE_PROFILE:?}"; \
-               python -u Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py --total-time-seconds 2.0'
-```
-
-By default reads `Labor/..._{timing_label}_Optimum_ANN.pth` and writes
-`Posit/..._{timing_label}_Posterior.pkl`. Pass `--checkpoint <path>` to build from a
-specific checkpoint instead — e.g. a provenance-named backup (§7)
-`..._Optimum_ANN_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pth`; the output
-posterior name is then derived to match (`Optimum_ANN` → `Posterior`, `.pth` →
-`.pkl`), so the rebuilt `.pkl` tracks the weights it came from (override with
-`--posterior`). Swap the `timing_label` token in the job name and
-`--total-time-seconds` together for other durations.
+Each is documented in its own companion `.md` and is run by hand — single-process
+with plain `python`, not `torchrun`. When one needs a GPU, launch it with a one-off
+`sbatch --wrap` on the check partition that sources `hpc_local.env` (§5) and
+activates `SRM_AND_SBI_ENVY_V0`, following the §3 job-name pattern with the
+utility's own descriptor. The DETECTOR calibration workflow has its own submission
+machinery (§8).
 
 ---
 
 ## 7. Artifact backups
 
-The trained artifacts — a posterior (`Posit/…_Posterior.pkl`) and its checkpoint
+The trained artifacts — an estimator (`Posit/…_Estimator.npz`) and its checkpoint
 (`Labor/…_Optimum_ANN.pth`) — are overwritten in place whenever the stage that
-produces them re-runs (a fresh Inference run, or a Construction rebuild, §6). The
-canonical names never change: they are the live objects every downstream stage
-(Evaluation, Experiment, Construction) loads. To keep a superseded model
+produces them re-runs (a fresh Inference run). The canonical names never change:
+they are the live objects every downstream stage (Evaluation, Experiment) loads.
+To keep a superseded model
 identifiable and recoverable after it is overwritten, a copy is set aside under a
 distinct name — automatically by a finished run, or by hand for an ad-hoc keep.
 
@@ -456,9 +415,9 @@ distinct name — automatically by a finished run, or by hand for an ad-hoc keep
 
 A finished Inference run that loaded a TEST set (`--test-tasks > 0`, so a
 model-selection loss exists) writes, alongside the canonical checkpoint and
-posterior, a provenance-named copy of each. The suffix records what the bare
-`state_dict` and posterior pickle cannot carry themselves — the run's training
-scale and result — inserted before the extension:
+estimator, a provenance-named copy of each. The suffix records the run's training
+scale and result in the filename itself — legible at a glance, without opening the
+artifact — inserted before the extension:
 
     <original-stem>_TRAIN+TEST_<train>+<test>_Epoch_<n>_TEST_LOSS_<loss>.<ext>
 
@@ -477,16 +436,14 @@ For a 200K-train / 50K-test run over 25 epochs that reached a best test loss of
 −17.05, the pair is:
 
     Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pth
-    Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.pkl
+    Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Estimator_TRAIN+TEST_200K+50K_Epoch_25_TEST_LOSS_-17.05.npz
 
-The backup is a copy, so the canonical `…_Optimum_ANN.pth` / `…_Posterior.pkl`
+The backup is a copy, so the canonical `…_Optimum_ANN.pth` / `…_Estimator.npz`
 stay the active artifacts and a backup is never picked up as the live model. Across
 warm-started runs the canonical checkpoint is additionally protected by
 save-on-improvement — it is overwritten only when the current run beats the loaded
 best on the TEST set — so each accepted optimum is preserved under its own backup
-name. To make a backup the active model again, copy it onto the canonical name; to
-rebuild its posterior from the checkpoint alone, point Construction's `--checkpoint`
-at the backup (§6).
+name. To make a backup the active model again, copy it onto the canonical name.
 
 A run with no TEST set (`--test-tasks 0`, which trains on all of TRAIN and keeps
 the last-epoch checkpoint) has no selection loss to name a backup by, so it writes
@@ -503,9 +460,9 @@ extension:
     <original-stem>_<TAG>_<DD.MM.YYYY>.<ext>
 
 ```bash
-# preserve the current best 2S posterior + its checkpoint before an overwriting run
-cp Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl \
-   Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior_PREPROD_01.07.2026.pkl
+# preserve the current best 2S estimator + its checkpoint before an overwriting run
+cp Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Estimator.npz \
+   Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Estimator_PREPROD_01.07.2026.npz
 cp Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN.pth \
    Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN_PREPROD_01.07.2026.pth
 ```
@@ -516,7 +473,7 @@ production run); `<DD.MM.YYYY>` is the date (e.g. `01.07.2026`).
 ### Both kinds land beside the original
 
 Whether automatic or manual, the suffix sits before the extension, so a backup
-never matches the `…_Posterior.pkl` / `…_Optimum_ANN.pth` names the pipeline loads —
+never matches the `…_Estimator.npz` / `…_Optimum_ANN.pth` names the pipeline loads —
 it is kept, but never picked up as the active artifact. Keep each backup in the
 same `Posit/` or `Labor/` directory as its original; if that storage tier is not
 itself backed up (for example a scratch `data_bank_root`), also copy the backup to

@@ -171,9 +171,8 @@ def main(args: argparse.Namespace) -> None:
 
     print("\nDLI runtime defaults:")
     print(f"  dimer_mule              : {dli_cfg.dimer_mule}   "
-          f"(√2; brightness boost for dimers — see PROJECT_CONTEXT.md)")
-    print(f"  darkcounts              : {dli_cfg.darkcounts}                    "
-          f"(baseline; no per-pixel dark current)")
+          f"(multiply-model factor; inert under the sum model — see PROJECT_CONTEXT.md)")
+    print(f"  optical background      : SCOPE nuisance kappa_o (drawn per sim; pre-PSF photon floor)")
     print(f"  sqrt_2sigma_dist_label  : {dli_cfg.sqrt_2sigma_dist_label}            "
           f"(PSF width sampling distribution)")
 

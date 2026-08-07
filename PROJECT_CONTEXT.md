@@ -129,18 +129,16 @@ workflow.
 **Objective:** Infer the RDS parameters (`θ`) conditional on the fixed detector:
 `p(θ | video, β_fixed)`.
 
-**Output:** A pickled posterior and a trained neural-network checkpoint. Both are
-written under canonical, duration-stamped names that every downstream stage loads
-(`Posit/…_Posterior.pkl`, `Labor/…_Optimum_ANN.pth`), and a re-run on the same
-duration overwrites them. During training the loop also writes a transient full-state
+**Output:** A version-portable estimator artifact and a trained neural-network
+checkpoint. Both are written under canonical, duration-stamped names that every
+downstream stage loads (`Posit/…_Estimator.npz`, `Labor/…_Optimum_ANN.pth`), and a
+re-run on the same duration overwrites them. During training the loop also writes a transient full-state
 resume file beside the checkpoint (`Labor/…_Resurrect_State_ANN.pth`) every epoch, from
 which a `--resurrect` requeue hot-restarts; it is overwritten continuously and is not a
 downstream deliverable. So that superseded models stay identifiable and recoverable,
 every finished run also writes a provenance-named backup of both — encoding the
-train/test set sizes, epochs, and test loss — and any archived checkpoint can be
-rebuilt into its posterior without retraining. See the HPC operations runbook
-(*Artifact backups* and *Special-situation entry points*) for the naming, restore,
-and rebuild conventions.
+train/test set sizes, epochs, and test loss. See the HPC operations runbook
+(*Artifact backups*) for the naming and restore conventions.
 
 ---
 
@@ -331,7 +329,8 @@ optional `--resurrect` flag to continue from an existing checkpoint)
    video (or a synthetic holdout) through the trained network.
 
 **Output:**
-- A pickled posterior (`DirectPosterior`).
+- A version-portable estimator artifact (`Estimator.npz`), loaded downstream as a
+  `DirectPosterior`.
 - A trained network checkpoint (encoder, transformer, and posterior-parameterizer
   weights), saved whenever a new optimum is reached.
 
@@ -475,16 +474,6 @@ configuration, calls package functions, and writes outputs to the
 configuration-defined paths. The package is installed editable, so script edits
 to the package take effect without reinstallation.
 
-Alongside the standard pipeline stages, `Script_Bank/Prime/` holds one
-special-situation entry point — `SRM_AND_SBI_DIMER_ALP_Construction_Optimum_ANN.py`,
-which rebuilds a saved posterior from an `Optimum_ANN` checkpoint without
-retraining. It produces the same posterior artifact the Inference stage would,
-for the situations where retraining is not wanted: moving a trained model
-between machines, or recovering a posterior from a run stopped before it wrote
-one. In those workflows it is the step that feeds the downstream Evaluation and
-Experiment stages. It is run ad hoc, outside the standard four-stage dispatcher;
-the HPC operations runbook (`Script_Bank/HPC/README.md`) documents its launch.
-
 `Script_Bank/Analysis/` collects post-hoc analyses that run on completed outputs
 rather than producing pipeline artifacts:
 `SRM_AND_SBI_DIMER_ALP_Experiment_Temporal_Dynamics.py` tracks each inferred
@@ -500,7 +489,7 @@ behavior of the generation stack.
 posterior — with no retraining — to MAP-estimate parameters from real recordings of two
 oligomeric-state control receptors, the constitutive monomer CD86 and the constitutive dimer
 CTLA-4 (BioImage Archive accession S-BIAD1369). A special-scope, ad-hoc reuse of the posterior
-on a different study's data (analogous to the Construction entry point), it clones the
+on a different study's data, it clones the
 Experiment stage bar the dataset folder, output directory, and default conditions, and is kept
 out of the stage dispatcher. Run it under the inference environment (single-process or
 multi-GPU sharded, with a `--merge` pass to concatenate shards; `--dry-run` first); it writes a
@@ -554,7 +543,7 @@ defined on-disk artifact. Module paths are relative to the package
 | Parameter prior and specification (ranges, log flags, units, labels; log-uniform prior and bounds) | `parameterization.py` → `PARAMETERS` (a `Parameters` singleton) with `build_prior()`, `theta_lower_bound()`, `theta_upper_bound()`, `parameter_find()` | (configuration in code; sampled theta persisted in the RDS theta-set `.zarr`) |
 | NPE + MAF estimator with 3D-CNN + temporal-transformer embedding | `inference_network.py` → `Complex3DCNN` (video encoder), `TemporalTransformer` (with `AttentionBlock`, `PositionalEncoding`); training wired in `inference_support.py` → `setup_training()`, `train_loop()` (with the resurrect branch) | (in-memory network; checkpoint + posterior written below) |
 | Leak-proof TRAIN / TEST / EVAL split, sizing rule, and dataset construction | entry point `SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py` (runs RDS → DLI per split with the `CORE = TRAIN + TEST`, `EVAL = max(floor, 0.1·CORE)` sizing); dataset assembly in `inference_support.py` → `build_datasets()` (with `VideoDataset`, `normalize_video()`) | `_TRAIN` / `_TEST` / `_EVAL`-suffixed trajectory `.h5` and video `.zarr` namespaces |
-| Posterior training run (gradient updates on TRAIN, selection on TEST) | entry point `SRM_AND_SBI_DIMER_ALP_Inference.py` (drives `build_datasets()` → `setup_training()` → `train_loop()` → `save_posterior()`) | pickled posterior (`DirectPosterior`, via `inference_support.py` → `save_posterior()`); network checkpoint at each new optimum |
+| Posterior training run (gradient updates on TRAIN, selection on TEST) | entry point `SRM_AND_SBI_DIMER_ALP_Inference.py` (drives `build_datasets()` → `setup_training()` → `train_loop()`, then `artifacts.save_estimator()`) | version-portable estimator artifact (`Estimator.npz`, via `artifacts.py` → `save_estimator()`), loaded downstream as a `DirectPosterior`; network checkpoint at each new optimum |
 | MAP recovery and calibration on held-out EVAL | `evaluation.py` → `map_estimate()` (seed-then-optimize: `collect_theta_prex()`, `collect_score_prex()`, `extract_elite_prex()`, `optimize_elite()`), `posterior_summary()`, `recovery_stats()`, `recovery_table()`, `posterior_coverage_table()`; driven by entry point `SRM_AND_SBI_DIMER_ALP_Evaluation.py` | recovery report (figures + tables + arrays + a live `progress.log`) under the validation output directory |
 | Real-data application (no ground truth) | same `evaluation.py` estimator (`map_estimate()`, `experiment_table()`); driven by entry point `SRM_AND_SBI_DIMER_ALP_Experiment.py` | per-condition inferred-parameter report under the validation output directory |
 | Configuration, paths, storage routing, and file I/O | `parameterization.py` → `Paths`, `MachineProfile` / `load_machine_profile()`, `FrameConfig`, `RunTiming`; `io.py` → `load_data()`, `save_video_set()`, `save_theta_set()`, `convert_video_dtype()` | resolved absolute paths (per-machine `machine_profiles.toml`); all artifacts above land under the configured roots |

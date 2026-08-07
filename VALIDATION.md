@@ -199,8 +199,9 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
 ```
 
 **Expected**: a network checkpoint at
-`<data_bank>/Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN.pth` and a pickled
-posterior at `<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Posterior.pkl`. The
+`<data_bank>/Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Optimum_ANN.pth` and a
+version-portable estimator artifact at
+`<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Estimator.npz`. The
 training loop also writes a full-state resume file beside the checkpoint,
 `<data_bank>/Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Resurrect_State_ANN.pth`, updated
 every epoch — its presence is what lets a later `--resurrect` hot-restart (see §2.4).
@@ -462,7 +463,7 @@ done
   through the entry point; if a future code change ever drops that seed
   handling, this check catches the regression immediately.
 - **Trajectories (`.h5`), videos (`.zarr`), and inference outputs
-  (`.pth`/`.pkl`) differ across runs**, and that is expected, not a regression.
+  (`.pth`/`.npz`) differ across runs**, and that is expected, not a regression.
   The reaction-diffusion stepper draws from an internal random source that is
   not seedable, so trajectories vary; the videos inherit that variability
   through their trajectory input (even though the imaging pipeline's own noise

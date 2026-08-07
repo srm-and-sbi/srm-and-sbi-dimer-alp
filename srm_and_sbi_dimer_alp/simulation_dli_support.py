@@ -8,7 +8,8 @@ into synthetic fluorescence-microscopy videos. The pipeline:
         -> per-pixel photon-count integrals via erf
         -> emitter brightness modulated by a Markov-chain state machine
            (photo-physics: blinking, photobleaching, multiple intensity levels)
-        -> Poisson photon-counting noise + EMCCD readout (Gaussian) noise
+        -> corrected EMCCD noise chain (Poisson thinning -> stochastic Gamma EM
+           register -> gain-independent Gaussian read noise -> bias)
         -> output video frames in ADU (analog-to-digital units)
 
 Module contents:
@@ -20,8 +21,8 @@ Module contents:
 
     Detector model
         Detector                  (abstract base)
-        EMCCD                     (electron-multiplying CCD: offset, gain, variance)
-        add_noise                 (Poisson photon noise + Gaussian readout noise)
+        EMCCD                     (electron-multiplying CCD: Poisson-Gamma-Normal chain)
+        add_noise                 (Poisson thinning -> Gamma EM register -> read noise -> bias)
         generate_frames           (alias for add_noise)
 
     Intensity rendering
@@ -688,6 +689,28 @@ def _propagate_chain(states: np.ndarray,
 # Top-level orchestrator
 # =============================================================================
 
+_SCOPE_KEYS = ("gamma", "kappa_o", "kappa_b", "kappa_s", "kappa_q")
+
+
+def draw_scope_camera(seed: Optional[int] = None) -> dict:
+    """Draw one SCOPE camera vector (the marginalized camera nuisance), in physical units.
+
+    The five camera keys (`gamma`, `kappa_o`, `kappa_b`, `kappa_s`, `kappa_q`) are not
+    identifiable from the videos and are marginalized as the SCOPE camera nuisance
+    (DETECTOR_WORKFLOW.md sec. 9.3, marginalized in both workflows). Their a-priori boxes
+    are transient (no persisted artifact): one vector is drawn per simulation, uniform in
+    log10 over each key's ``PRIOR_RANGE`` then exponentiated to physical space -- mirroring
+    the detector DLI stage's SCOPE draw (``np.power(10, U(low, high))``). Returns a dict
+    keyed by SCOPE key.
+    """
+    rng = np.random.default_rng(seed)
+    camera = {}
+    for key in _SCOPE_KEYS:
+        low, high = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND[key]]["PRIOR_RANGE"]
+        camera[key] = float(10.0 ** rng.uniform(low, high))
+    return camera
+
+
 def simulate_dli(pro_tray_poses: np.ndarray,
                  theta: np.ndarray,
                  dimer_mask: Optional[np.ndarray] = None,
@@ -697,33 +720,37 @@ def simulate_dli(pro_tray_poses: np.ndarray,
     """Run the full DLI pipeline: particle poses + theta -> noisy video frames.
 
     Pipeline steps:
-        1. Read camera parameters (kappa_c, kappa_o, kappa_g, kappa_v) and
-           construct an EMCCD detector.
+        1. Draw the SCOPE camera nuisance (gamma, kappa_o, kappa_b, kappa_s,
+           kappa_q) from its transient a-priori box and construct the corrected
+           Poisson-Gamma-Normal EMCCD detector.
         2. Read PSF parameters (mu_r, sigma_r, mu_pc, sigma_pc) and sample
            per-emitter PSF widths.
         3. Build the Gaussian PSF.
         4. Read photo-physics parameters (brightness quantiles, photobleaching,
-           lambda_rate, gamma_penalty) and compute CTMC/DTMC matrices.
-        5. Sample brightness-state trajectories per emitter.
-        6. Set up pixel grid (256x256 by default; zero dark counts).
+           lambda_rate) and compute CTMC/DTMC matrices (flicker locality fixed,
+           kappa_penalty=1).
+        5. Sample brightness-state trajectories per emitter (plus an independent
+           second-label trajectory for the dimer sum model).
+        6. Set up the pixel grid and the optical-background photon floor (kappa_o).
         7. Render the noise-free per-pixel intensity from the particle poses,
-           brightness states, and PSF.
-        8. Apply Poisson photon noise + Gaussian readout noise (EMCCD).
+           brightness states, and PSF (dimers combine by the sum model).
+        8. Apply the corrected EMCCD noise chain (Poisson thinning -> stochastic
+           Gamma EM register -> gain-independent Gaussian read noise -> bias).
 
     Args:
         pro_tray_poses: Particle coordinates of shape `(n_frames, n_emitters, 3)`,
             in nanometres (the simulation's native unit). Only the (x, y)
             components are used; z is dropped. NaN for absent particles.
         theta: Learnable-parameter vector (same shape and ordering as elsewhere
-            in this package); used only for diagnostic/lookup purposes here —
-            all photo-physics and detector parameters come from
-            `PARAMETERIZATION_RAW` (they are 'Known' / 'Hyper' parameters).
+            in this package); used only for diagnostic/lookup purposes here — the
+            photo-physics parameters are read fixed from `PARAMETERIZATION_RAW`, and
+            the camera is drawn per simulation as the SCOPE nuisance (not from theta).
             Kept for signature parity with the RDS-side `theta`-passing convention.
         dimer_mask: Optional boolean mask of shape `(1, n_emitters, n_frames)`
-            flagging dimer-state particles (B or C); their brightness is
-            multiplied by `dimer_mule`.
-        dimer_mule: Merged-dimer brightness relative to a monomer (default `2.0`;
-            regime-dependent in [1, 2] -- see `compute_intensity` / PROJECT_CONTEXT.md).
+            flagging dimer-state particles (B or C); their brightness is the SUM of
+            two independent labels (see `compute_intensity`, `dimer_model="sum"`).
+        dimer_mule: Merged-dimer brightness factor for the `multiply` alternative
+            (default `2.0`; inert under the `sum` model -- see `compute_intensity`).
         seed: Optional RNG seed for all randomness in the pipeline (PSF widths,
             initial states, state trajectories, Poisson + Gaussian noise).
         verbose: If True, print intermediate diagnostic values.
@@ -736,16 +763,21 @@ def simulate_dli(pro_tray_poses: np.ndarray,
     pixel_size_nm = stem_geometry.pixel_size_nm
     root_size_px = stem_geometry.root_size_px
 
-    # --- Camera params + EMCCD detector ------------------------------------
-    kappa_c = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["kappa_c"]]["VALUE"]
-    kappa_o = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["kappa_o"]]["VALUE"]
-    kappa_g = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["kappa_g"]]["VALUE"]
-    kappa_v = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["kappa_v"]]["VALUE"]
-    camera_conversion = kappa_c
-    camera_offset = kappa_o * camera_conversion
-    camera_gain = kappa_g
-    camera_variance = (kappa_v * camera_conversion) ** 2
-    detector = EMCCD(offset=camera_offset, gain=camera_gain, variance=camera_variance)
+    # --- Camera params + EMCCD detector (SCOPE nuisance, drawn per simulation) ---
+    # The 5 camera keys are the marginalized SCOPE camera nuisance (non-identifiable;
+    # DETECTOR_WORKFLOW.md sec. 9.3): draw one vector per simulation from its transient
+    # a-priori box (no persisted artifact). gamma = g/C is the only identifiable gain
+    # quantity, so em_gain=gamma with electrons_per_adu=1.0 yields Gamma(N, gamma) exactly
+    # (mirrors render_detector_video). Seed offset +2 keeps the camera stream independent
+    # of the PSF/state draws (seed) and the dimer second-label draw (seed+1).
+    camera = draw_scope_camera(seed=(None if seed is None else seed + 2))
+    detector = EMCCD(
+        quantum_efficiency=camera["kappa_q"],
+        em_gain=camera["gamma"],
+        electrons_per_adu=1.0,
+        read_noise_adu=camera["kappa_s"],
+        bias_adu=camera["kappa_b"],
+    )
 
     # --- PSF params + per-emitter widths -----------------------------------
     mu_r = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["mu_r"]]["VALUE"]
@@ -768,7 +800,6 @@ def simulate_dli(pro_tray_poses: np.ndarray,
     prob_photo_bleach = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["prob_photo_bleach"]]["VALUE"]
     numb_photo_bleach = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["numb_photo_bleach"]]["VALUE"]
     lambda_rate = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["lambda_rate"]]["VALUE"]
-    gamma_penalty = PARAMETERIZATION_RAW[PARAMETER_RAW_FIND["gamma_penalty"]]["VALUE"]
     _Q, P = compute_matrices(
         mu_pc=mu_pc, sigma_pc=sigma_pc,
         brightness_quantile=brightness_quantile,
@@ -776,7 +807,6 @@ def simulate_dli(pro_tray_poses: np.ndarray,
         numb_photo_bleach=numb_photo_bleach,
         delta_frame=delta_frame,
         lambda_rate=lambda_rate,
-        gamma_penalty=gamma_penalty,
         verbose=verbose,
     )
 
@@ -792,11 +822,25 @@ def simulate_dli(pro_tray_poses: np.ndarray,
         seed=seed,
     )
     brightness = compute_brightness(brightness_quantile, scale=mu_pc, shape=sigma_pc, loc=0)
+    # For dimer_model="sum", each dimer's SECOND label needs its OWN independent flicker
+    # trajectory (a dimer = two labels, brightness = X1 + X2). Independent seed (seed+1) so
+    # it is not identical to the first label's; None stays non-deterministic. Mirrors
+    # render_detector_video.
+    dimer_states = generate_state_trajectories(
+        nframes=nframes, nemitters=nemitters, P=P,
+        brightness_quantile=brightness_quantile,
+        scale=mu_pc, shape=sigma_pc, loc=0,
+        seed=(None if seed is None else seed + 1),
+    )
 
-    # --- Pixel grid + dark counts ------------------------------------------
-    darkcounts = np.full(
+    # --- Pixel grid + optical background floor -----------------------------
+    # kappa_o = optical background (incident photons): ONE scalar per video (the SCOPE
+    # draw above), broadcast over all pixels/frames as the pre-PSF photon floor (added
+    # before QE, amplified by gamma*kappa_q). Distinct from dark current (zero here,
+    # handled inside EMCCD). Mirrors render_detector_video's optical_background.
+    optical_background = np.full(
         shape=(root_size_px, root_size_px),
-        fill_value=PARAMETERS.simulation.dli.darkcounts,
+        fill_value=camera["kappa_o"],
         dtype=float,
     )
     xbounds = np.linspace(0, root_size_px, root_size_px + 1)
@@ -813,16 +857,18 @@ def simulate_dli(pro_tray_poses: np.ndarray,
         tracks=tracks_pixels,
         states=states,
         brightness=brightness,
-        background_photons=darkcounts,
+        background_photons=optical_background,
         xbounds=xbounds,
         ybounds=ybounds,
         PSF=PSF,
         dimer_mask=dimer_mask,
         dimer_mule=dimer_mule,
-        # Canonical DLI path supplies no independent second-label trajectory, so it opts into
-        # the multiply model explicitly; the sum default is for the Detector path (which builds
-        # the second trajectory in render_detector_video).
-        dimer_model="multiply",
+        # Dimer brightness is the SUM of two independent labels (mean 2*E[X], lighter tail
+        # than a rigid doubling; DETECTOR_WORKFLOW.md sec. 6.4). dimer_states is the second
+        # label's independent flicker trajectory. dimer_mule (multiply model) is retained as
+        # a sensitivity alternative but is inert under sum.
+        dimer_model="sum",
+        dimer_states=dimer_states,
     )
 
     # --- Add EMCCD noise (Poisson + Gaussian readout) ----------------------

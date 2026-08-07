@@ -1,9 +1,9 @@
-"""Entry-point script: train the neural posterior estimator and save the posterior.
+"""Entry-point script: train the neural posterior estimator and save it as a version-portable artifact.
 
 Loads (video, theta) pairs from the previous RDS + DLI stages, trains a masked
 autoregressive flow (MAF) density estimator conditioned on a Complex3DCNN +
-TemporalTransformer embedding of the videos, and saves the resulting
-DirectPosterior to a pickle file for downstream sampling.
+TemporalTransformer embedding of the videos, and saves the trained estimator as a
+self-describing, version-portable artifact for downstream sampling.
 
 Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
 ``PARAMETERS.simulation.timing.label`` to namespace files by duration + fps):
@@ -14,8 +14,9 @@ Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
         -- the full training state (model + optimizer + scheduler + epoch + warm-restart
            counters), written atomically every epoch. A --resurrect requeue hot-restarts
            from this exact state; a transient resume file, not a scientific deliverable.
-    <data_bank>/<posit_subdir>/<project_alias>_{timing_label}_Posterior.pkl
-        -- the trained DirectPosterior, ready for downstream sampling.
+    <data_bank>/<posit_subdir>/<project_alias>_{timing_label}_Estimator.npz
+        -- the trained estimator as a self-describing, version-portable artifact,
+           ready for downstream sampling.
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Inference.py \\
@@ -37,11 +38,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch._dynamo
-from sbi.inference.posteriors import DirectPosterior
 from sbi.neural_nets.net_builders import build_maf
-from sbi.utils.user_input_checks import process_prior
 from torch.utils.data import DataLoader
 
+from srm_and_sbi_dimer_alp import artifacts
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.inference_network import Complex3DCNN
 from srm_and_sbi_dimer_alp.inference_support import (
@@ -49,12 +49,12 @@ from srm_and_sbi_dimer_alp.inference_support import (
     cleanup_distributed,
     init_distributed,
     resolve_topology,
-    save_posterior,
     setup_training,
     train_loop,
 )
 from srm_and_sbi_dimer_alp.parameterization import (
-    PARAMETERS, PARAMETERIZATION, PARAMETERIZATION_RAW, RunTiming, build_prior)
+    PARAMETERS, PARAMETERIZATION, PARAMETERIZATION_RAW, PARAMETER_KEYS,
+    RunTiming, role_of, theta_lower_bound, theta_upper_bound)
 from srm_and_sbi_dimer_alp.test_loss_distribution import TestLossDistribution
 from srm_and_sbi_dimer_alp.utils import console_log_context, log_memory_state
 
@@ -64,7 +64,7 @@ def main(args: argparse.Namespace) -> None:
     timing = RunTiming(
         total_time_seconds=args.total_time_seconds, frames=PARAMETERS.simulation.timing,
     )
-    data_bank_root = PARAMETERS.machine.data_bank_root          # permanent tier: checkpoint + posterior outputs
+    data_bank_root = PARAMETERS.machine.data_bank_root          # permanent tier: checkpoint + estimator outputs
     train_data_root = PARAMETERS.machine.root_for("TRAIN")      # scratch tier (split storage): training inputs live with TRAIN/TEST
     compress = True  # video and theta sets are always read from .zarr in the inference stage
 
@@ -127,7 +127,7 @@ def main(args: argparse.Namespace) -> None:
     timing_label = timing.label
     checkpoint_path = paths.checkpoint_path(data_bank_root, timing_label)
     resurrect_state_path = paths.resurrect_state_path(data_bank_root, timing_label)  # full-state hot-restart file
-    posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    estimator_path = paths.estimator_path(data_bank_root, timing_label)
     tld_path = paths.test_loss_distribution_path(data_bank_root, timing_label)
 
     print("\nOutput destinations:")
@@ -138,7 +138,7 @@ def main(args: argparse.Namespace) -> None:
           f"{paths.project_alias}_{timing_label}_Theta_Set_TASK_{{{task_range}}}.zarr")
     print(f"  writes ckpt     : {checkpoint_path}")
     print(f"  writes resume   : {resurrect_state_path}   (full-state hot restart; every epoch)")
-    print(f"  writes posterior: {posterior_path}")
+    print(f"  writes estimator: {estimator_path}   (version-portable)")
 
     # ---- Dry-run preview --------------------------------------------------
     # Validate configuration and report the resolved inputs, then exit before
@@ -191,7 +191,7 @@ def main(args: argparse.Namespace) -> None:
         return
 
     # Ensure the checkpoint output directory (Labor/) exists before train_loop
-    # writes to it; the posterior directory (Posit/) is created before its save
+    # writes to it; the estimator directory (Posit/) is created before its save
     # further below. Mirrors the per-stage dir creation in the RDS / DLI scripts.
     # Placed after the dry-run early-return so a dry-run creates no directories.
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,8 +275,10 @@ def main(args: argparse.Namespace) -> None:
         )
 
     # ---- Embedding network -----------------------------------------------
+    # Args captured so the version-portable estimator artifact can rebuild the
+    # (uncompiled) network under any torch.
     network_cfg = PARAMETERS.inference.network
-    embedding_net = Complex3DCNN(
+    embedding_args = dict(
         n_frames=timing.frame_count,
         input_channels=network_cfg.input_channels,
         n_conv_layers=network_cfg.n_conv_layers,
@@ -287,18 +289,26 @@ def main(args: argparse.Namespace) -> None:
         temporal_target_frames=network_cfg.temporal_target_frames,
         verbose=args.verbose,
     )
-    embedding_net = torch.compile(embedding_net).to(device)
+    embedding_net = torch.compile(Complex3DCNN(**embedding_args)).to(device)
 
     # ---- MAF posterior estimator -----------------------------------------
+    maf_args = dict(
+        z_score_x="structured",
+        z_score_y="structured",
+        dropout_probability=0.1,
+        use_batch_norm=True,
+    )
     posterior_estimator = build_maf(
         batch_x=theta_dummy,
         batch_y=video_dummy,
-        z_score_x="structured",
-        z_score_y="structured",
         embedding_net=embedding_net,
-        dropout_probability=0.1,
-        use_batch_norm=True,
+        **maf_args,
     ).to(device)
+
+    # Estimator-artifact metadata (version-portable save): the theta schema and the
+    # per-example video shape the rebuild spec records.
+    theta_dim = len(PARAMETERIZATION)
+    video_shape = (timing.frame_count, geom.root_size_px, geom.root_size_px)
 
     # ---- Training pipeline -----------------------------------------------
     # The per-example test-loss distribution is recorded only when a TEST set is
@@ -344,7 +354,7 @@ def main(args: argparse.Namespace) -> None:
         log_memory_state(prefix="[Pre-training]")
 
     # ---- New-best commit callback (rank 0; train_loop guards the call) ----
-    # At each new best, write the posterior + test-loss-distribution canonicals
+    # At each new best, write the estimator + test-loss-distribution canonicals
     # (the live objects downstream stages + --resurrect read; always the current
     # best). Provenance backups (Epoch_{current}) are copied here only under
     # --backup-every-best; by default the single kept backup is written once at
@@ -359,7 +369,7 @@ def main(args: argparse.Namespace) -> None:
             "theta_keys": [p["KEY"] for p in PARAMETERIZATION],  # learnable = the theta columns, in order
             "parameter_table": [   # FULL table (learnable + fixed) with roles, declaration order
                 {"key": p["KEY"],
-                 "role": "learnable" if p["PRIOR_RANGE"] is not None else "fixed",
+                 "role": role_of(p),
                  "value": p["VALUE"],
                  "prior_range": p["PRIOR_RANGE"],
                  "log_flag": p["LOG_FLAG"], "log_base": p["LOG_BASE"]}
@@ -372,12 +382,21 @@ def main(args: argparse.Namespace) -> None:
 
         def commit_new_best(best_epoch, best_test_loss, gathered):
             task, sim, loss, theta = gathered
-            prior_cpu = build_prior(device="cpu")
-            prior_cpu, _, _ = process_prior(prior_cpu)
-            posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
-            prior_device = build_prior(device=str(training_setup["device"]))
-            posterior_path.parent.mkdir(parents=True, exist_ok=True)
-            save_posterior(posterior, prior_device, posterior_path)
+            best_metadata = {
+                "timing_label": timing_label, "workflow": "canonical",
+                "best_test_loss": float(best_test_loss),
+                "train_videos": tld_manifest["train_videos"],
+                "test_videos": tld_manifest["test_videos"],
+                "epochs": args.epochs,
+            }
+            estimator_path.parent.mkdir(parents=True, exist_ok=True)
+            artifacts.save_estimator(
+                training_setup["estimator"],
+                embedding_args=embedding_args, maf_args=maf_args,
+                theta_dim=theta_dim, video_shape=video_shape,
+                parameter_keys=PARAMETER_KEYS,
+                prior_low=theta_lower_bound(), prior_high=theta_upper_bound(),
+                path=estimator_path, metadata=best_metadata)
             snap = TestLossDistribution.from_epoch(
                 best_epoch, task, sim, loss, theta,
                 manifest=tld_manifest, best_test_loss=best_test_loss)
@@ -386,7 +405,7 @@ def main(args: argparse.Namespace) -> None:
                 tv, ev = tld_manifest["train_videos"], tld_manifest["test_videos"]
                 shutil.copy2(checkpoint_path, paths.backup_checkpoint_path(
                     data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
-                shutil.copy2(posterior_path, paths.backup_posterior_path(
+                shutil.copy2(estimator_path, paths.backup_estimator_path(
                     data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
                 shutil.copy2(tld_path, paths.backup_test_loss_distribution_path(
                     data_bank_root, timing_label, tv, ev, best_epoch, best_test_loss))
@@ -438,40 +457,46 @@ def main(args: argparse.Namespace) -> None:
                           note="selection (TEST) loss at the last epoch; the "
                                "model-selection criterion.")
 
-    # ---- Build and save the posterior (rank 0 only) ----------------------
+    # ---- Save the estimator (rank 0 only) --------------------------------
     # Every rank reloaded the best-on-TEST estimator in train_loop, so rank 0's
-    # copy is the selected model; only it writes the shared posterior file.
+    # copy is the selected model; only it writes the shared estimator artifact.
     if topo.is_main:
-        prior_cpu = build_prior(device="cpu")
-        prior_cpu, _, _ = process_prior(prior_cpu)
-        posterior = DirectPosterior(training_setup["estimator"], prior_cpu)
-
-        prior_device = build_prior(device=str(device))
-        posterior_path.parent.mkdir(parents=True, exist_ok=True)
-        save_posterior(posterior, prior_device, posterior_path)
-        print(f"Posterior saved to {posterior_path}")
+        finish_metadata = {
+            "timing_label": timing_label, "workflow": "canonical",
+            "best_test_loss": float(optimum_loss_test),
+            "epochs": args.epochs,
+        }
+        estimator_path.parent.mkdir(parents=True, exist_ok=True)
+        artifacts.save_estimator(
+            training_setup["estimator"],
+            embedding_args=embedding_args, maf_args=maf_args,
+            theta_dim=theta_dim, video_shape=video_shape,
+            parameter_keys=PARAMETER_KEYS,
+            prior_low=theta_lower_bound(), prior_high=theta_upper_bound(),
+            path=estimator_path, metadata=finish_metadata)
+        print(f"Estimator saved to {estimator_path}")
 
         # ---- Auto-backup: provenance-named copies of the just-saved best ------
-        # A finished run overwrites the canonical checkpoint + posterior (the names
+        # A finished run overwrites the canonical checkpoint + estimator (the names
         # every downstream stage loads). Copy both to backups whose filename embeds
         # this run's provenance -- train/test set sizes, epochs, and the checkpoint's
-        # best TEST loss -- since the bare state_dict and posterior pickle carry no
-        # such metadata. The canonical files stay the live objects; a backup is
-        # restored later by copying it back onto the canonical name. Keyed on the
-        # TEST loss, so it is skipped for a run with no TEST set.
+        # best TEST loss -- since the bare state_dict and estimator artifact carry no
+        # such metadata in their name. The canonical files stay the live objects; a
+        # backup is restored later by copying it back onto the canonical name. Keyed on
+        # the TEST loss, so it is skipped for a run with no TEST set.
         if args.test_tasks > 0 and math.isfinite(optimum_loss_test):
             train_videos = len(training_setup["train_loader"].dataset)
             test_videos = len(training_setup["val_loader"].dataset)
             ckpt_backup = paths.backup_checkpoint_path(
                 data_bank_root, timing_label, train_videos, test_videos,
                 args.epochs, optimum_loss_test)
-            posterior_backup = paths.backup_posterior_path(
+            estimator_backup = paths.backup_estimator_path(
                 data_bank_root, timing_label, train_videos, test_videos,
                 args.epochs, optimum_loss_test)
             shutil.copy2(checkpoint_path, ckpt_backup)
-            shutil.copy2(posterior_path, posterior_backup)
+            shutil.copy2(estimator_path, estimator_backup)
             print(f"Backup checkpoint saved to {ckpt_backup}")
-            print(f"Backup posterior saved to {posterior_backup}")
+            print(f"Backup estimator saved to {estimator_backup}")
             # Finish backup of the test-loss distribution, named with the total
             # epochs run (Epoch_{total}). By default this finish backup is the single
             # kept backup; under --backup-every-best it coexists with the per-epoch
@@ -487,7 +512,7 @@ def main(args: argparse.Namespace) -> None:
     # ---- Diagnostics: confirm outputs written, figure, summary ----------
     if reporter.enabled:
         reporter.check_file("checkpoint", checkpoint_path)
-        reporter.check_file("posterior", posterior_path)
+        reporter.check_file("estimator", estimator_path)
         if reporter.dump:
             from srm_and_sbi_dimer_alp.visualization_inference import (
                 figure_loss_curves,
@@ -575,12 +600,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--test-loss-distribution", action=argparse.BooleanOptionalAction, default=True,
         help="Record the best epoch's per-example TEST-loss distribution (keyed by "
              "(task_index, sim_index)) as a self-describing .npz, committed with the "
-             "posterior/checkpoint at each new best and backed up at finish. On by "
+             "estimator/checkpoint at each new best and backed up at finish. On by "
              "default when a TEST set is present; --no-test-loss-distribution disables it.",
     )
     parser.add_argument(
         "--backup-every-best", action="store_true",
-        help="Write a provenance-named backup (checkpoint + posterior + test-loss "
+        help="Write a provenance-named backup (checkpoint + estimator + test-loss "
              "distribution, tagged with the epoch and TEST loss) at EVERY new-best "
              "epoch. Default off: only the single finish backup is kept, while the "
              "live canonical artifacts still update at each new best (crash-safe, "

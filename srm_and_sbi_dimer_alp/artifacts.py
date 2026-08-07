@@ -1,11 +1,10 @@
 """Self-describing, version-portable estimator artifact (see the nuisance and artifact design in DETECTOR_WORKFLOW.md).
 
-The canonical `save_posterior` pickles the live `DirectPosterior`; because the
-embedding is `torch.compile`d before training, that pickle bakes in
-`torch._dynamo` internals whose private layouts change between torch releases —
-the artifact is torch-version-locked. This module persists an estimator as three
-**separable** components instead, so it reconstructs under whatever torch version
-is loading it. The canonical `save_posterior`/`load_posterior` path is untouched.
+A pickled `DirectPosterior` bakes in `torch._dynamo` internals (the embedding is
+`torch.compile`d before training) whose private layouts change between torch
+releases, so it is torch-version-locked. This module persists an estimator as three
+**separable** components instead, so it reconstructs under whatever torch version is
+loading it. It is the sole persisted estimator format for both workflows.
 
 Three components (one `.npz`):
   (a) a compile-stripped `state_dict` — tensor weights only, the `_orig_mod.`
@@ -24,8 +23,8 @@ torch, replays `build_maf` on zero-cost dummy batches of the stored shapes, load
 the stripped weights (`weights_only=True`), verifies the checksum, and attaches a
 fresh device-aware prior — never deserializing any torch-internal or compiled
 code. It returns a `DirectPosterior`, the same type every canonical consumer
-accepts. This mirrors the existing Construction rebuild pattern (Complex3DCNN +
-build_maf + load_state_dict), minus its re-`torch.compile` requirement.
+accepts. The rebuild path is exactly Complex3DCNN + build_maf + load_state_dict,
+but on an uncompiled embedding — so no re-`torch.compile` is needed.
 """
 
 import hashlib

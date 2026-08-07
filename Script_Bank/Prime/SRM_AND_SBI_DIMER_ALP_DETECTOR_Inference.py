@@ -18,10 +18,10 @@ Detector-specific differences below:
      SCOPE camera nuisance rows.
   2. It persists the trained estimator via the self-describing, version-portable
      format (``artifacts.save_estimator``) — a compile-stripped state_dict +
-     rebuild spec + metadata — in place of the canonical pickled ``DirectPosterior``,
-     which bakes in ``torch.compile`` internals and is torch-version-locked. The version-portable
-     artifact is the Detector's estimator; the canonical ``save_posterior`` path is
-     left untouched (see the nuisance and artifact design in DETECTOR_WORKFLOW.md).
+     rebuild spec + metadata — instead of a pickled ``DirectPosterior``, which bakes
+     in ``torch.compile`` internals and is torch-version-locked. This version-portable
+     artifact is the sole persisted estimator format for both the Detector and the
+     canonical workflows (see the nuisance and artifact design in DETECTOR_WORKFLOW.md).
   3. All outputs are ``_DETECTOR``-namespaced (via the aliased ``project_alias``),
      so they never collide with canonical inference artifacts.
 

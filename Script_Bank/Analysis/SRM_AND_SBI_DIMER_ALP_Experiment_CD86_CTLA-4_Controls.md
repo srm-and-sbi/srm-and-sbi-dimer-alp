@@ -8,7 +8,7 @@ what it writes, and how to read the per-condition result, so the analysis can be
 and understood without reverse-engineering the code.
 
 This is a special-scope, ad-hoc reuse of a trained posterior on data from a different
-study — analogous to the Construction special-situation entry point. It is a
+study. It is a
 near-verbatim clone of the canonical MET Experiment stage that differs only in the
 dataset folder it reads, the output directory it writes, and its default `--kinds`;
 every estimation and reporting behavior is identical, so the canonical MET Experiment

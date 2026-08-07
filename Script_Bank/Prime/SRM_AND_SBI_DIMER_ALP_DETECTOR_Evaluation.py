@@ -404,10 +404,11 @@ def main(args: argparse.Namespace) -> None:
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
         # Rebuild the prior on THIS worker's device for bounded rejection sampling.
-        # The pickled posterior's _prior lives on the single-GPU save device (cuda:0);
-        # under multi-GPU sharding each rank binds its own cuda:local_rank, so reusing
-        # _prior directly would mix devices (cuda:0 vs cuda:r). Rebuilding is equivalent
-        # on the single-GPU path (raw build_prior on the same device as _prior).
+        # Under multi-GPU sharding each rank binds its own cuda:local_rank, so the prior
+        # must live on this rank's device. load_estimator already attaches a device-aware
+        # prior; rebuilding here from the current parameterization keeps it explicit and
+        # pinned to this rank's device (the schema guard ensures the artifact's bounds
+        # match the current parameterization, so the rebuilt prior is equivalent).
         posterior.prior = det.build_prior(device=str(device))
 
     # ---- This worker's task shard ----------------------------------------

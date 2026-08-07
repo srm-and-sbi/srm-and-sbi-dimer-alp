@@ -131,8 +131,16 @@ def fixed_parameters_table(parameterization_raw):
     headers = ["parameter", "label", "value", "units", "derived unit", "kind"]
     rows = []
     for para in parameterization_raw:
+        # Learnable rows appear in the prior-sampling table instead. Today every ranged
+        # row is learnable (the biology RDS target); imaging + camera are fixed, so this
+        # range test is exact. Only IF a later imaging-treatment step marginalizes the
+        # imaging or camera block would a nuisance-from-spec row (which also carries a
+        # range) exist; this would then need a value-based-role test
+        # (parameterization.role_of == 'learnable') so the nuisance rows stay in the
+        # fixed table. Kept as a range test here to preserve this module's decoupling
+        # from the machine-profile-loading parameterization module.
         if para.get("PRIOR_RANGE") is not None:
-            continue  # learnable -- shown in the prior-sampling table instead
+            continue
         value = para.get("VALUE")
         if isinstance(value, (list, tuple)):
             value_str = str(list(value))

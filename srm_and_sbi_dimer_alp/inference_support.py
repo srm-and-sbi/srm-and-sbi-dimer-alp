@@ -28,10 +28,6 @@ Module contents:
                                         present, else the best-checkpoint cold fallback.
         save_resume_state / load_resume_state -- atomic full-state resume I/O.
 
-    Posterior I/O
-        save_posterior(posterior, prior_device, path)
-        load_posterior(path)         -- returns a `DirectPosterior`.
-
 Distributed across these functions is the SBI training pipeline:
 NPE training with a masked autoregressive flow (MAF) density estimator
 conditioned on the Complex3DCNN embedding of the input video.
@@ -41,7 +37,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import copy
 import os
-import pickle
 import random
 import time
 from typing import Callable, Optional
@@ -1238,39 +1233,6 @@ def train_loop(estimator: nn.Module,
     return losses_train, losses_test, losses_replay, optimum_loss_test
 
 
-# =============================================================================
-# Posterior I/O
-# =============================================================================
-
-def save_posterior(posterior,
-                   prior_device,
-                   path: Path) -> None:
-    """Pickle a trained posterior to disk, attaching a device-aware prior.
-
-    The posterior estimator's prior is overwritten by `prior_device` before
-    pickling. This is needed because sbi's `DirectPosterior` stores the
-    prior used at training time (typically on CPU), but downstream sampling
-    requires the prior to live on the same device as the estimator.
-
-    Args:
-        posterior: A trained `DirectPosterior` (or compatible) instance.
-        prior_device: A `BoxUniform` (or other sbi prior) constructed on the
-            desired device for sampling.
-        path: Output pickle file path.
-    """
-    posterior._prior = prior_device
-    with open(path, "wb") as fh:
-        pickle.dump(posterior, fh)
-
-
-def load_posterior(path: Path):
-    """Load a pickled posterior from disk.
-
-    Args:
-        path: Path to a pickle file written by `save_posterior`.
-
-    Returns:
-        The `DirectPosterior` instance.
-    """
-    with open(path, "rb") as fh:
-        return pickle.load(fh)
+# The version-portable estimator artifact (artifacts.save_estimator /
+# load_estimator) is the persisted inference deliverable; there is no pickled
+# DirectPosterior I/O here.

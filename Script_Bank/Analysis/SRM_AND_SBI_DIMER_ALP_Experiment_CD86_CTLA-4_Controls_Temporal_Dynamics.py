@@ -7,8 +7,8 @@ study, to test whether the transferable observable (the diffusion coefficient) l
 on the independently measured values. CD86 is a constitutive monomer and CTLA-4 a
 constitutive dimer; the two bracket the mobile-diffusion scale (monomer faster, dimer
 slower). This entry point is not one of the canonical pipeline stages: it is a
-documented reuse of a completed control Experiment run, analogous to the Construction
-special-situation entry point, and stays out of the stage dispatcher.
+documented reuse of a completed control Experiment run, and stays out of the stage
+dispatcher.
 
 Regenerates, from that completed control Experiment run, the per-parameter *temporal*
 view of the MAP estimates. For each learnable parameter it collects the MAP estimate

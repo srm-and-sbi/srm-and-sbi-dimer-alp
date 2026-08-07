@@ -45,9 +45,10 @@ from srm_and_sbi_dimer_alp.evaluation import (
     posterior_summary,
     _theta_repr,
 )
-from srm_and_sbi_dimer_alp.inference_support import load_posterior, resolve_topology
+from srm_and_sbi_dimer_alp import artifacts
+from srm_and_sbi_dimer_alp.inference_support import resolve_topology
 from srm_and_sbi_dimer_alp.io import convert_video_dtype
-from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, RunTiming, build_prior
+from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, PARAMETERIZATION, PARAMETER_KEYS, RunTiming, build_prior
 from srm_and_sbi_dimer_alp.utils import console_log_context
 from srm_and_sbi_dimer_alp.visualization_inference import figure_experiment_combined
 
@@ -292,7 +293,7 @@ def main(args: argparse.Namespace) -> None:
     torch._dynamo.config.suppress_errors = True
 
     timing_label = timing.label
-    posterior_path = paths.posterior_path(data_bank_root, timing_label)
+    estimator_path = paths.estimator_path(data_bank_root, timing_label)
     experiment_dir = data_bank_root / paths.experiment_subdir
     out_dir = paths.experiment_recovery_dir(data_bank_root, timing_label)
     array_path = out_dir / (out_dir.name + ".npz")
@@ -379,7 +380,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"  verbosity            : "
           f"{'debug-dump' if args.debug_dump else ('debug' if args.debug else ('verbose' if args.verbose else 'normal'))}")
     print("\nOutput destinations:")
-    print(f"  reads posterior  : {posterior_path}")
+    print(f"  reads estimator  : {estimator_path}")
     print(f"  reads videos     : {experiment_dir}/Experiment_<KIND>_Cell_<n>_{span}S_RAW.tif")
     print(f"  writes report    : {out_dir}")
     print(f"  live progress    : {progress_path}   (tail -f to monitor)")
@@ -389,7 +390,7 @@ def main(args: argparse.Namespace) -> None:
     if args.dry_run:
         print("[DRY RUN] validating configuration and inputs:")
         checks = [
-            ("posterior", posterior_path),
+            ("estimator artifact", estimator_path),
             ("experiment dir", experiment_dir),
         ]
         missing = 0
@@ -422,12 +423,13 @@ def main(args: argparse.Namespace) -> None:
         _merge_shards(reporter, args, eval_cfg, out_dir, array_path, run_start)
         return
 
-    reporter.check_file("posterior", posterior_path)
+    reporter.check_file("estimator artifact", estimator_path)
 
     topo = resolve_topology()
     device = topo.device
     vista_device = torch.device("cpu")
-    posterior = load_posterior(posterior_path)
+    posterior = artifacts.load_estimator(estimator_path, device=str(device),
+                                          expected_parameter_keys=PARAMETER_KEYS)
     posterior.posterior_estimator.to(device)
     if device.type == "cuda":
         # Rebuild the prior on THIS worker's device for bounded rejection sampling.
