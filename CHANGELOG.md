@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.3 - 2026-08-07
+
+The two Detector real-recording stages (Experiment and the Nuisance_DLI construction) now share
+one multi-GPU shard/merge machinery, and the Nuisance_DLI construction runs data-parallel across
+GPUs like the Experiment. No science or data-schema change; the Experiment's behavior is preserved
+(re-run over the real MET recordings reproduces the pre-refactor per-condition MAP result within
+seedless noise).
+
+### Added
+
+- **`detector_experiment_support.py`** — shared machinery for the Detector real-recording stages:
+  recording discovery (`discover_cells`), per-cell chunk windowing (`read_cell_chunks`), round-robin
+  rank sharding (`shard_by_rank`), and per-worker shard I/O + merge (`shard_path`, `save_shard`,
+  `load_shards`, `merge_shard_arrays`, `assert_consistent_shard_set`). Both stages share the same
+  shape — load estimator → discover cells → window into chunks → run the estimator per chunk →
+  aggregate — so this holds exactly the pieces they share; each keeps only its own per-chunk step.
+- **Multi-GPU `Nuisance_DLI` construction.** `--emit-template` shards the `(kind, cell)` work across
+  one worker per GPU (`torchrun`), each building its partial posterior-sample pool as a shard, and a
+  no-GPU `--merge` concatenates the shards into the pool, caches it, and emits the spec — the pool is
+  a mixture, so the concatenation is exact and order-independent. New HPC wrapper
+  `Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Nuisance_DLI.sh` mirrors the Experiment wrapper.
+  Shards go in a dedicated `_Nuisance_DLI_pool_shards/` subdirectory with a stale-shard consistency
+  guard, so a crash-then-rerun-with-different-worker-count fails loudly rather than merging a
+  stale-plus-fresh mix.
+
+### Changed
+
+- **Detector Experiment** refactored to call the shared machinery in place of its inline discovery /
+  windowing / round-robin / shard-merge — behavior-preserving: a re-run over the real MET recordings
+  reproduces the pre-refactor per-condition MAP medians to within seedless noise (±0.002 log10 typical),
+  with an identical `mean_log_prob`.
+
 ## 0.4.2 - 2026-08-07
 
 The canonical ("biology") DLI forward model is brought onto the corrected imaging physics

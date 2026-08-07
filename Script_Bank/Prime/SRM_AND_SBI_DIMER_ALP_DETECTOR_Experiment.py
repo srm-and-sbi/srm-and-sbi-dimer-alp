@@ -53,7 +53,6 @@ Usage:
 
 import argparse
 import random
-import re
 import shutil
 import sys
 import time
@@ -61,11 +60,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-import tifffile
 import torch
 import torch._dynamo
 
 from srm_and_sbi_dimer_alp import artifacts
+from srm_and_sbi_dimer_alp.detector_experiment_support import (
+    discover_cells,
+    load_shards,
+    merge_shard_arrays,
+    read_cell_chunks,
+    save_shard,
+    shard_by_rank,
+)
 from srm_and_sbi_dimer_alp import detector_parameterization as det
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.evaluation import (
@@ -75,7 +81,6 @@ from srm_and_sbi_dimer_alp.evaluation import (
     _theta_repr,
 )
 from srm_and_sbi_dimer_alp.inference_support import resolve_topology
-from srm_and_sbi_dimer_alp.io import convert_video_dtype
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming
 from srm_and_sbi_dimer_alp.utils import console_log_context
 from srm_and_sbi_dimer_alp.visualization_inference import figure_experiment_combined
@@ -85,16 +90,6 @@ def _estimator_path(paths, data_bank_root, timing_label):
     """Detector estimator-artifact path (Posit, Detector-aliased)."""
     return (data_bank_root / paths.posit_subdir /
             f"{paths.project_alias}_{timing_label}_Estimator.npz")
-
-
-def _discover_cells(experiment_dir: Path, kind: str, span: int) -> list:
-    """Return sorted cell indices available on disk for a given kind."""
-    cells = []
-    for path in experiment_dir.glob(f"Experiment_{kind}_Cell_*_{span}S_RAW.tif"):
-        match = re.search(rf"Cell_(\d+)_{span}S_RAW", path.name)
-        if match:
-            cells.append(int(match.group(1)))
-    return sorted(cells)
 
 
 def _aggregate_by_kind(inferred_log10, kind_index, cell_arr, kinds, mode, n_params):
@@ -123,11 +118,6 @@ def _aggregate_by_kind(inferred_log10, kind_index, cell_arr, kinds, mode, n_para
         else:  # pooled
             out[kind] = kinf
     return out
-
-
-def _shard_array_path(out_dir: Path, rank: int, world_size: int) -> Path:
-    """Path of one worker's partial experiment arrays in a multi-GPU sharded run."""
-    return out_dir / f"_shard_{rank:02d}_of_{world_size:02d}.npz"
 
 
 def write_experiment_outputs(reporter, args, eval_cfg, array_path: Path,
@@ -234,11 +224,6 @@ def _save_shard(topo, out_dir: Path, scores, inferred_log10, kind_index, cell_of
     exists; this writes no report. A worker that drew no cells writes no shard
     (so ``--merge`` simply sees fewer files), avoiding empty-array concatenation.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if len(scores) == 0:
-        print(f"\n[rank {topo.rank}/{topo.world_size}] no cells assigned -- "
-              f"no shard written.", flush=True)
-        return
     arrays = dict(
         scores=np.asarray(scores),
         inferred_log10=np.asarray(inferred_log10),
@@ -249,8 +234,11 @@ def _save_shard(topo, out_dir: Path, scores, inferred_log10, kind_index, cell_of
     )
     if post_quantiles:
         arrays["posterior_quantiles"] = np.asarray(post_quantiles)
-    path = _shard_array_path(out_dir, topo.rank, topo.world_size)
-    np.savez_compressed(str(path), **arrays)
+    path = save_shard(out_dir, topo, arrays, count=len(scores))
+    if path is None:
+        print(f"\n[rank {topo.rank}/{topo.world_size}] no cells assigned -- "
+              f"no shard written.", flush=True)
+        return
     print(f"\n[rank {topo.rank}/{topo.world_size}] shard saved: {path} "
           f"({arrays['scores'].shape[0]} estimates) in {time.time() - run_start:.1f}s. "
           f"Run the --merge step once all shards finish.", flush=True)
@@ -265,43 +253,28 @@ def _merge_shards(reporter, args, eval_cfg, out_dir: Path,
     writes the final report + figures + combined ``.npz`` via
     :func:`write_experiment_outputs`, then removes the shard files.
     """
-    shard_paths = sorted(out_dir.glob("_shard_*_of_*.npz"))
+    shard_paths = load_shards(out_dir)
     if not shard_paths:
         raise SystemExit(
             f"--merge: no shard files (_shard_*_of_*.npz) found in {out_dir}")
     print(f"Merging {len(shard_paths)} shard file(s) from {out_dir}", flush=True)
-    scores, inferred, kidx, cell, chunk, quant = [], [], [], [], [], []
-    kinds = None
-    have_quant = True
-    n_used = 0
-    for shard_path in shard_paths:
-        with np.load(str(shard_path)) as data:
-            if data["scores"].shape[0] == 0:
-                continue   # defensive: a zero-estimate shard contributes nothing
-            n_used += 1
-            scores.append(data["scores"])
-            inferred.append(data["inferred_log10"])
-            kidx.append(data["kind_index"])
-            cell.append(data["cell"])
-            chunk.append(data["chunk"])
-            if kinds is None:
-                kinds = [str(k) for k in data["kinds"]]
-            if "posterior_quantiles" in data:
-                quant.append(data["posterior_quantiles"])
-            else:
-                have_quant = False   # a populated shard genuinely computed no View B
-    if not scores:
+    try:
+        merged, n_used = merge_shard_arrays(
+            shard_paths,
+            concat_keys=["scores", "inferred_log10", "kind_index", "cell", "chunk"],
+            first_keys=["kinds"],
+            optional_concat_keys=["posterior_quantiles"])
+    except ValueError:
         raise SystemExit(
             f"--merge: every shard in {out_dir} was empty (no estimates)")
-    scores = np.concatenate(scores, axis=0)
-    inferred = np.concatenate(inferred, axis=0)
-    kidx = np.concatenate(kidx, axis=0)
-    cell = np.concatenate(cell, axis=0)
-    chunk = np.concatenate(chunk, axis=0)
-    post_quantiles = np.concatenate(quant, axis=0) if (have_quant and quant) else np.asarray([])
-    print(f"Merged {scores.shape[0]} estimates from {n_used} shard(s).", flush=True)
+    kinds = [str(k) for k in merged["kinds"]]
+    # posterior_quantiles is present only if EVERY used shard computed View B; an
+    # empty array signals "not computed" to write_experiment_outputs (as before).
+    post_quantiles = merged.get("posterior_quantiles", np.asarray([]))
+    print(f"Merged {merged['scores'].shape[0]} estimates from {n_used} shard(s).", flush=True)
     write_experiment_outputs(reporter, args, eval_cfg, array_path,
-                             scores, inferred, kidx, cell, chunk,
+                             merged["scores"], merged["inferred_log10"],
+                             merged["kind_index"], merged["cell"], merged["chunk"],
                              post_quantiles, kinds, run_start)
     for shard_path in shard_paths:
         shard_path.unlink()
@@ -377,7 +350,7 @@ def main(args: argparse.Namespace) -> None:
     explicit_cells = ([int(c) for c in args.cells.split(",")] if args.cells else None)
     cells_by_kind = {}
     for kind in kinds:
-        cells = explicit_cells if explicit_cells is not None else _discover_cells(
+        cells = explicit_cells if explicit_cells is not None else discover_cells(
             experiment_dir, kind, span)
         if args.max_cells > 0:
             cells = cells[:args.max_cells]
@@ -433,7 +406,7 @@ def main(args: argparse.Namespace) -> None:
             missing += not ok
             print(f"  reads {role}: {path}  [{'OK' if ok else 'MISSING'}]")
         for kind in kinds:
-            discovered = _discover_cells(experiment_dir, kind, span)
+            discovered = discover_cells(experiment_dir, kind, span)
             print(f"  discovered {kind} recordings: {len(discovered)} cell(s) "
                   f"({span}S_RAW.tif)")
         if missing:
@@ -509,8 +482,7 @@ def main(args: argparse.Namespace) -> None:
     # report aggregates by kind, so per-shard results merge order-independently.
     flat_work = [(ki, cell) for ki, kind in enumerate(kinds)
                  for cell in cells_by_kind[kind]]
-    my_work = set(w for i, w in enumerate(flat_work)
-                  if i % topo.world_size == topo.rank)
+    my_work = set(shard_by_rank(flat_work, topo))
     my_estimates = len(my_work) * n_chunks
 
     # ---- MAP estimation over (kind, cell, chunk) -------------------------
@@ -534,13 +506,10 @@ def main(args: argparse.Namespace) -> None:
                     log_progress(progress_fh, f"SKIP {kind} cell {cell}: file missing "
                                               f"({tif_path.name}).")
                     continue
-                raw = tifffile.imread(str(tif_path))                # (frames, H, W) uint16
-                video8 = convert_video_dtype(raw, bits_from=16, bits_to=8)
-                starts = list(range(0, video8.shape[0] - n_frames + 1, step_frames))
-                n_cell_chunks = len(starts)
+                chunks = read_cell_chunks(tif_path, n_frames, step_frames)
+                n_cell_chunks = len(chunks)
                 cell_start = time.time()
-                for c, start in enumerate(starts):
-                    chunk = video8[start:start + n_frames]
+                for c, chunk in enumerate(chunks):
                     if show:
                         print(f"\n######## MAP estimate: {kind} cell {cell} chunk {c} ########",
                               flush=True)

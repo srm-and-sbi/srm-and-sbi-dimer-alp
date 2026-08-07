@@ -46,30 +46,24 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tifffile
 import torch
 from matplotlib.figure import Figure
 
 from srm_and_sbi_dimer_alp import artifacts
+from srm_and_sbi_dimer_alp.detector_experiment_support import (
+    assert_consistent_shard_set,
+    discover_cells,
+    load_shards,
+    merge_shard_arrays,
+    read_cell_chunks,
+    save_shard,
+    shard_by_rank,
+)
 from srm_and_sbi_dimer_alp import detector_nuisance_dli as ndli
 from srm_and_sbi_dimer_alp import detector_parameterization as det
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.inference_support import resolve_topology
-from srm_and_sbi_dimer_alp.io import convert_video_dtype
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming
-
-
-def _discover_cells(experiment_dir, kind, span):
-    """Cell indices with an ``Experiment_{kind}_Cell_{n}_{span}S_RAW.tif`` recording, sorted.
-    Mirrors the Detector Experiment stage's discovery so both see the same recordings."""
-    cells = []
-    for path in experiment_dir.glob(f"Experiment_{kind}_Cell_*_{span}S_RAW.tif"):
-        stem = path.stem
-        try:
-            cells.append(int(stem.split("_Cell_")[1].split("_")[0]))
-        except (IndexError, ValueError):
-            continue
-    return sorted(cells)
 
 
 def _resolve(total_time_seconds):
@@ -102,29 +96,40 @@ def _chunk_geometry(timing, span, chunk_step_seconds):
     return n_frames, step_frames
 
 
-def _read_all_chunks(R, kinds, span, n_frames, step_frames, max_cells):
-    """Read every real recording and cut it into model-length windows; return one flat list.
+def _read_all_chunks(R, kinds, span, n_frames, step_frames, max_cells, topo=None):
+    """Read the real recordings and cut them into model-length windows; return one flat list.
 
     Pools chunks across every (kind, cell), because the Nuisance_DLI is pooled across conditions
     (a by-kind split is only a diagnostic, never the constructed artifact). Returns
     ``(chunks, summary)`` where ``chunks`` is a list of ``(n_frames, H, W)`` uint8 arrays.
+
+    When ``topo`` is distributed the flat (kind, cell) work list is split across workers
+    round-robin by rank (via :func:`shard_by_rank`), so each worker reads only its own cells'
+    chunks. The pool is a mixture over chunks, so concatenating the per-rank partials at merge
+    time is exact and order-independent. With one worker (or ``topo is None``) every cell is
+    read, in kind- then cell-order -- byte-for-byte the original single-process behavior.
     """
-    chunks, per_kind = [], {}
+    cells_by_kind = {}
     for kind in kinds:
-        cells = _discover_cells(R["experiment_dir"], kind, span)
+        cells = discover_cells(R["experiment_dir"], kind, span)
         if max_cells > 0:
             cells = cells[:max_cells]
+        cells_by_kind[kind] = cells
+    flat_work = [(kind, cell) for kind in kinds for cell in cells_by_kind[kind]]
+    if topo is not None and topo.is_distributed:
+        flat_work = shard_by_rank(flat_work, topo)
+    my_cells = {kind: [c for k, c in flat_work if k == kind] for kind in kinds}
+    chunks, per_kind = [], {}
+    for kind in kinds:
         n_cell_chunks = 0
-        for cell in cells:
+        for cell in my_cells[kind]:
             tif_path = R["paths"].experiment_video_path(kind, cell, span, R["data_bank_root"])
             if not tif_path.exists():
                 continue
-            raw = tifffile.imread(str(tif_path))                 # (frames, H, W) uint16
-            video8 = convert_video_dtype(raw, bits_from=16, bits_to=8)
-            for start in range(0, video8.shape[0] - n_frames + 1, step_frames):
-                chunks.append(video8[start:start + n_frames])
-                n_cell_chunks += 1
-        per_kind[kind] = (len(cells), n_cell_chunks)
+            cell_chunks = read_cell_chunks(tif_path, n_frames, step_frames)
+            chunks.extend(cell_chunks)
+            n_cell_chunks += len(cell_chunks)
+        per_kind[kind] = (len(my_cells[kind]), n_cell_chunks)
     return chunks, per_kind
 
 
@@ -194,23 +199,137 @@ def _get_pool(R, args, pool_kind, pool_mode, n_frames, step_frames, n_per):
     return pool, f"computed on GPU + cached ({cache.name})"
 
 
+def _emit_pool_shard(args, R, topo, out_dir, n_frames, step_frames, n_per, eval_cfg):
+    """One sharded worker's job (multi-GPU --emit-template): build the posterior-sample pool
+    over THIS rank's (kind, cell) chunk subset and write it as a shard.
+
+    Writes no cache and no spec; the single-process --merge step concatenates every rank's
+    shard, caches the merged pool, and emits the template. A worker that draws no cells writes
+    no shard. The pool is a mixture -- a concatenation of per-chunk posterior draws -- so a
+    worker holding whole cells builds its slice independently and the merge just concatenates
+    (exact and order-independent; percentiles / fits do not depend on draw order)."""
+    posterior, device, vista_device = _load_posterior(R)
+    kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+    chunks, _ = _read_all_chunks(R, kinds, args.experiment_span_seconds, n_frames,
+                                 step_frames, args.max_cells, topo=topo)
+    if chunks:
+        partial = ndli.build_posterior_sample_pool(
+            posterior, chunks, device, vista_device, n_per_chunk=n_per,
+            theta_prex_batch_size=eval_cfg.theta_prex_batch_size, pool_mode=args.pool_mode)
+    else:
+        partial = np.empty((0, len(R["imaging_keys"])), dtype=float)
+    path = save_shard(out_dir, topo, {"pool": partial}, count=partial.shape[0])
+    if path is None:
+        print(f"[rank {topo.rank}/{topo.world_size}] no cells assigned -- no pool shard "
+              f"written.", flush=True)
+    else:
+        print(f"[rank {topo.rank}/{topo.world_size}] pool shard saved: {path} "
+              f"({partial.shape[0]} draws over {len(chunks)} chunk(s)). Run the --merge "
+              f"step once all shards finish.", flush=True)
+
+
+def _merge_pool_shards(R, args, out_dir, n_per):
+    """Combine the per-rank pool shards (multi-GPU --emit-template --merge): concatenate every
+    ``_shard_*_of_*.npz`` partial pool, cache the merged pool under its provenance (so a later
+    --build reuses it with no GPU), remove the shards, and return ``(pool, source)`` for the
+    template tail. Uses the same cache-path and provenance helpers as :func:`_get_pool`, so the
+    cache is byte-for-byte reusable by --build."""
+    cache = ndli.pool_cache_path(R["posit_dir"], R["paths"].project_alias,
+                                 R["timing_label"], "PosteriorSample")
+    prov = _pool_provenance(R, args, args.pool_mode, n_per)
+    shard_paths = load_shards(out_dir)
+    if not shard_paths:
+        raise SystemExit(f"--merge: no pool shard files (_shard_*_of_*.npz) found in {out_dir}")
+    try:
+        assert_consistent_shard_set(shard_paths)
+    except ValueError as exc:
+        raise SystemExit(f"--merge: inconsistent pool shard set in {out_dir} -- {exc} "
+                         f"Remove the stale _shard_*.npz and re-run the sharded --emit-template.")
+    print(f"Merging {len(shard_paths)} pool shard file(s) from {out_dir}", flush=True)
+    try:
+        merged, n_used = merge_shard_arrays(shard_paths, concat_keys=["pool"])
+    except ValueError:
+        raise SystemExit(f"--merge: every pool shard in {out_dir} was empty (no draws)")
+    pool = merged["pool"]
+    ndli.save_pool(cache, pool, prov)
+    for shard_path in shard_paths:
+        shard_path.unlink()
+    try:
+        out_dir.rmdir()   # drop the now-empty shard subdir
+    except OSError:
+        pass
+    print(f"Merged {pool.shape[0]} draws from {n_used} shard(s); cached to {cache.name} and "
+          f"removed {len(shard_paths)} shard file(s).", flush=True)
+    return pool, f"merged {n_used} GPU shard(s) + cached ({cache.name})"
+
+
+def _emit_template_dry_run(args, R, topo, spec, out_dir):
+    """Print the sharded --emit-template plan (single-process, per-rank shard, and --merge)
+    without loading the estimator, reading recordings, or computing anything."""
+    cache = ndli.pool_cache_path(R["posit_dir"], R["paths"].project_alias,
+                                 R["timing_label"], "PosteriorSample")
+    if args.merge:
+        n_present = len(load_shards(out_dir))
+        print("[DRY RUN] --emit-template --merge would combine the pool shards, cache the "
+              "merged pool, and emit the spec:")
+        print(f"    pool shards : {out_dir}/_shard_*_of_*.npz  ({n_present} present)")
+        print(f"    pool cache  : {cache}")
+        print(f"    spec        : {spec}")
+        return
+    kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+    cells_by_kind = {}
+    for kind in kinds:
+        cells = discover_cells(R["experiment_dir"], kind, args.experiment_span_seconds)
+        if args.max_cells > 0:
+            cells = cells[:args.max_cells]
+        cells_by_kind[kind] = cells
+    flat_work = [(kind, cell) for kind in kinds for cell in cells_by_kind[kind]]
+    print("[DRY RUN] --emit-template would read the estimator + recordings and write:")
+    print(f"    estimator   : {R['estimator_path']}  [{'OK' if R['estimator_path'].exists() else 'MISSING'}]")
+    print(f"    recordings  : {R['experiment_dir']}/Experiment_<KIND>_Cell_<n>_{args.experiment_span_seconds}S_RAW.tif")
+    print(f"    work items  : {len(flat_work)} (kind, cell) recording(s) discovered")
+    if topo.is_distributed:
+        my_work = shard_by_rank(flat_work, topo)
+        print(f"    sharding    : world_size={topo.world_size}; rank {topo.rank} would take "
+              f"{len(my_work)} of {len(flat_work)} item(s) and write a pool shard under {out_dir}")
+        print(f"    then        : --emit-template --merge (single process, no GPU) caches the pool + emits the spec")
+    else:
+        print(f"    plan        : single process builds the full pool, caches it, and emits the spec")
+        print(f"    spec        : {spec}")
+
+
 def _emit_template(args, R):
     spec = ndli.spec_path(R["posit_dir"], R["paths"].project_alias, R["timing_label"])
     n_frames, step_frames = _chunk_geometry(R["timing"], args.experiment_span_seconds,
                                              args.chunk_step_seconds)
+    topo = resolve_topology()
+    out_dir = R["posit_dir"] / "_Nuisance_DLI_pool_shards"   # dedicated shard dir, isolated from the cache/spec/estimator; --merge removes it
 
     if args.dry_run:
-        print("[DRY RUN] --emit-template would read the estimator + recordings and write:")
-        print(f"    estimator   : {R['estimator_path']}  [{'OK' if R['estimator_path'].exists() else 'MISSING'}]")
-        print(f"    recordings  : {R['experiment_dir']}/Experiment_<KIND>_Cell_<n>_{args.experiment_span_seconds}S_RAW.tif")
-        print(f"    spec        : {spec}")
+        _emit_template_dry_run(args, R, topo, spec, out_dir)
         return
 
     eval_cfg = PARAMETERS.inference.evaluation
     n_per = args.n_per_chunk or eval_cfg.posterior_samples
-    # The posterior-sample pool (drawn under --pool-mode) feeds the percentile suggestions; it is
-    # cached, so a later raw/gaussian/box --build under the same pool_mode reuses it without GPU.
-    pool, source = _get_pool(R, args, "PosteriorSample", args.pool_mode, n_frames, step_frames, n_per)
+
+    # ---- Multi-GPU sharded worker: build a partial pool -> shard, then stop -----
+    # One worker per GPU (torchrun) builds the posterior-sample pool over its own
+    # (kind, cell) subset and writes it as a shard; the single-process --merge step
+    # concatenates the shards, caches the pool, and emits the spec. It writes no cache
+    # and no spec here. Single-GPU / no-torchrun runs skip this and build the pool directly.
+    if topo.is_distributed and not args.merge:
+        _emit_pool_shard(args, R, topo, out_dir, n_frames, step_frames, n_per, eval_cfg)
+        return
+
+    # ---- Obtain the full posterior-sample pool ---------------------------------
+    # The pool (drawn under --pool-mode) feeds the percentile suggestions; it is cached, so a
+    # later raw/gaussian/box --build under the same pool_mode reuses it without GPU. --merge
+    # concatenates the per-rank shards into the same pool the single-process path computes.
+    if args.merge:
+        pool, source = _merge_pool_shards(R, args, out_dir, n_per)
+    else:
+        pool, source = _get_pool(R, args, "PosteriorSample", args.pool_mode,
+                                 n_frames, step_frames, n_per)
     p05 = np.percentile(pool, 5, axis=0)
     p95 = np.percentile(pool, 95, axis=0)
     sugg = {k: {"ci_low": float(p05[i]), "ci_high": float(p95[i])}
@@ -370,6 +489,12 @@ def parse_args(argv):
                         "sits largely outside the prior box (bounded rejection then barely accepts).")
     p.add_argument("--repool", action="store_true",
                    help="force recomputing the pool on the GPU even if a fresh cache exists.")
+    p.add_argument("--merge", action="store_true",
+                   help="emit-only combine mode: read the per-rank pool shards written by a "
+                        "multi-GPU --emit-template run (in the Posit dir), concatenate them into "
+                        "the posterior-sample pool, cache it, then emit the spec, and exit. Does no "
+                        "estimation and needs no GPU; the launcher runs it once after the sharded "
+                        "workers finish. Single-GPU emit runs never use it (they build directly).")
     p.add_argument("--dry-run", action="store_true",
                    help="resolve paths and report what would be read/written; load nothing, compute nothing.")
     return p.parse_args(argv)
