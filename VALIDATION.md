@@ -189,7 +189,10 @@ a 256×256 detector grid. Each value is a non-negative integer pixel count.
 **Requires**: the RDS smoke test must have run first with the same
 `--total-time-seconds` and `--task-simulations`. DLI reads the `.h5`
 trajectories and the theta set written by RDS; the two stages share `--tasks`
-and `--task-simulations`.
+and `--task-simulations`. It also requires the `Nuisance_DLI` artifact (built by the
+`SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI` analysis): the stage marginalizes imaging
+by drawing the photophysics from it and the camera from the SCOPE box, and fails loud
+if it is absent.
 
 ### 2.3 Inference (posterior training)
 
@@ -360,9 +363,9 @@ Submit on HPC: generation on the CPU partition (tasks packed per node, fanned ou
 with `--array` per split), training and evaluation on the GPU partition
 (multi-GPU). Partitions and node geometry are per-machine, supplied by each
 cluster's `hpc_local.env`; the submission pattern and commands are in the HPC
-runbook (`Script_Bank/HPC/README.md`). The canonical production path additionally
-awaits the canonical rework (its DLI stage is the intentionally non-running one,
-section 3.1); the detector production re-run is a separate, approval-gated step. As
+runbook (`Script_Bank/HPC/README.md`). The canonical DLI stage now runs with the
+imaging block marginalized (§3.1); a full canonical production run, like the detector
+production re-run, is a separate, approval-gated step. As
 with smokes, no production run is submitted without the project owner's explicit
 approval.
 
@@ -418,15 +421,12 @@ against any particular reference run. Equivalence rests on three pillars:
    banner (`--verbose`) prints the detector parameters, and a rendered video
    (via `--show`) shows sparse fluorescent spots on a near-zero background with
    plausible pixel-value ranges. The pipeline produces videos of the correct
-   shape, dtype, and value distribution. The **canonical** DLI stage does not
-   currently run: the shared generator takes its brightness-flicker locality as
-   derived from the brightness scale (§6.3 of `DETECTOR_WORKFLOW.md`), while the
-   canonical parameter table supplies an explicit transition penalty the
-   generator does not accept — a mismatch resolved by the canonical rework
-   (`DETECTOR_WORKFLOW.md` §9.2); the detector DLI stage runs unaffected. The
-canonical DLI smoke (section 2.2) and the long-duration DLI leg (section 3.3)
-exercise this same path, so they do not run under the current code; use the
-detector DLI stage (section 2.5) to exercise imaging generation meanwhile.
+   shape, dtype, and value distribution. The **canonical** DLI stage now runs on the
+   same corrected imaging physics, rendering through the shared, source-agnostic
+   `render_dli_video` with the imaging block marginalized — the six photophysics drawn
+   per simulation from the `Nuisance_DLI` artifact and the five camera parameters from
+   the SCOPE box, both recorded beside the reaction-diffusion labels. The canonical DLI
+   smoke (section 2.2) and the long-duration DLI leg (section 3.3) exercise this path.
 
 **Acceptance**: pillars (1)–(3) hold — theta is bit-reproducible at a fixed
 seed, the constructed reaction-diffusion system matches the declared model, and
@@ -520,9 +520,8 @@ with the frame time fixed at 0.020 s (50 frames per second). So:
   outputs.
 
 Repeat the smoke tests with the long duration (seedless). The DLI and Inference
-legs share the canonical DLI path that does not currently run (section 3.1);
-until the canonical rework lands, the duration arithmetic is confirmed through the
-RDS leg and the derived-frame-count check below:
+legs run on the canonical DLI path (section 3.1); the duration arithmetic is also
+confirmed through the RDS leg and the derived-frame-count check below:
 
 ```bash
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py \
@@ -677,10 +676,10 @@ A correctly set up and validated installation has:
   the package installed editable, and a `machine_profiles.toml` configured for
   the machine.
 - All four canonical smoke-test invocations (RDS, DLI, Inference, and Inference
-  `--resurrect`) running end-to-end on minimal inputs. (The canonical DLI stage is
-  intentionally non-running pending its rework — see the imaging-pipeline pillar in
-  section 3.1 — so its smoke and the stages that read its output are exercised only
-  once that rework lands.)
+  `--resurrect`) running end-to-end on minimal inputs. (The canonical DLI stage renders
+  through the shared `render_dli_video` with the imaging block marginalized — see the
+  imaging-pipeline pillar in section 3.1 — so it requires the `Nuisance_DLI` artifact to
+  be built first, per the DLI smoke prerequisites in section 2.2.)
 - The Detector calibration five-stage smoke test (section 2.5) running end-to-end,
   seedless, with its small overrides.
 - The three-pillar semantic-equivalence checks holding: theta bit-reproducible

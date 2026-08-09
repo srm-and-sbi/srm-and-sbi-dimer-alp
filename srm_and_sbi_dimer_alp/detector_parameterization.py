@@ -5,7 +5,7 @@ special-situation entry point that infers the diffraction-limited-imaging (DLI)
 model with the physics frozen to pure diffusion. It is deliberately DECOUPLED
 from the canonical ``parameterization.py``: the detector-calibration system is
 similar to but distinct from the production system, its parameter roles differ
-(the imaging parameters are inferred here, fixed there), and its ranges differ
+(the imaging parameters are inferred here, marginalized as a nuisance there), and its ranges differ
 by design. Code duplication with the canonical module is intentional.
 
 Value-based role scheme
@@ -75,7 +75,7 @@ Public interface
     scope_lower_bound / scope_upper_bound             -- SCOPE camera-nuisance log10 bounds
 
 Assembling the concrete argument vectors the theta-driven forward models
-(``build_system``, ``simulate_dli``) consume is finalized against those call
+(``build_system``, ``render_dli_video``) consume is finalized against those call
 sites in the Detector simulation scripts, where ``to_physical`` and
 the subset/index maps here are the building blocks.
 """
@@ -182,7 +182,7 @@ _DETECTOR_RAW_NESTED: dict[str, list[dict]] = {
         {'KEY': 'numb_photo_bleach', 'VALUE': 100, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': r'$\psi_{pb}$',
          'NOTE': 'Reference frame window normalizing prob_photo_bleach (NOT the video length): p_video = 1 - (1 - prob_photo_bleach)^(n_frames/numb_photo_bleach). Fixed = 100.'},
         {'KEY': 'dimer_mule', 'VALUE': 2.0, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': r'$m_{D}$',
-         'NOTE': 'Merged-dimer brightness relative to a monomer. Physical picture: a dimer is two labels within one PSF, so single-emitter fitting sees ONE spot whose photons combine into a brighter detection. Two combination models implement this (see DETECTOR_WORKFLOW.md sec. 6.4). THIS detector workflow uses dimer_model="sum": the merged brightness is the SUM of two INDEPENDENT monomer draws, each carrying its own flicker/bleach trajectory -> mean ~2x a monomer with a lighter upper tail than a rigid doubling; this path does NOT read dimer_mule. dimer_mule is consumed ONLY by dimer_model="multiply", the retained sensitivity alternative (both the detector and the canonical simulate_dli now render dimers by the sum model), which instead scales a SINGLE monomer draw by this factor. As that multiply factor it is regime-dependent in [1,2]: 2.0 = two PERMANENTLY-ON labels (the MET always-on ATTO 647N case, corroborated by the ~2x InlB/Fab per-spot intensity ratio); sqrt(2) ~= 1.41 when only ~one label is visible on average (photoswitching dye -> time-averaged geometric mean GM(1x,2x) of bright/dark states, or ~50% labeling). Held Fixed here for parity with the canonical table (value inert under the sum model); a per-dataset photophysical setting, not a universal law. Mirrors PARAMETERS.simulation.dli.dimer_mule.'},
+         'NOTE': 'Merged-dimer brightness relative to a monomer. Physical picture: a dimer is two labels within one PSF, so single-emitter fitting sees ONE spot whose photons combine into a brighter detection. Two combination models implement this (see DETECTOR_WORKFLOW.md sec. 6.4). THIS detector workflow uses dimer_model="sum": the merged brightness is the SUM of two INDEPENDENT monomer draws, each carrying its own flicker/bleach trajectory -> mean ~2x a monomer with a lighter upper tail than a rigid doubling; this path does NOT read dimer_mule. dimer_mule is consumed ONLY by dimer_model="multiply", the retained sensitivity alternative (both DLI stages render dimers by the sum model via the shared render_dli_video), which instead scales a SINGLE monomer draw by this factor. As that multiply factor it is regime-dependent in [1,2]: 2.0 = two PERMANENTLY-ON labels (the MET always-on ATTO 647N case, corroborated by the ~2x InlB/Fab per-spot intensity ratio); sqrt(2) ~= 1.41 when only ~one label is visible on average (photoswitching dye -> time-averaged geometric mean GM(1x,2x) of bright/dark states, or ~50% labeling). Held Fixed here for parity with the canonical table (value inert under the sum model); a per-dataset photophysical setting, not a universal law. Mirrors PARAMETERS.simulation.dli.dimer_mule.'},
         {'KEY': 'prob_photo_bleach', 'VALUE': 10**(-1.25), 'PRIOR_RANGE': (-2.0, -0.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\rho_{pb}$',
          'NOTE': 'Probability an emitter enters the absorbing bleached state over numb_photo_bleach (100) frames. Learnable photophysics target; drawn from [10^-2, 10^-0.5].'},
         {'KEY': 'lambda_rate', 'VALUE': 10**0.5, 'PRIOR_RANGE': (0.0, 1.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\lambda$',

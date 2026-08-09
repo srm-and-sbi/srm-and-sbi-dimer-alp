@@ -2,19 +2,39 @@
 
 Reads each .h5 trajectory file produced by the RDS stage, extracts particle
 poses + dimer state mask, renders the synthetic fluorescence video via the
-DLI pipeline (PSF + Poisson + EMCCD noise), and saves the resulting videos
-as a .zarr (compressed) or .npy (uncompressed) video set per task.
+shared DLI renderer (PSF + Poisson + EMCCD noise), and saves the resulting
+videos as a .zarr (compressed) or .npy (uncompressed) video set per task.
+
+The whole imaging block is marginalized as a nuisance in production (DETECTOR_WORKFLOW.md
+sec. 9.3, Phase D): the six photophysics (``mu_r``, ``sigma_r``, ``mu_pc``, ``sigma_pc``,
+``prob_photo_bleach``, ``lambda_rate``) are drawn per simulation from the persisted
+``Nuisance_DLI`` artifact (the calibrated-imaging pool minted by the Detector workflow), and
+the five SCOPE camera parameters (``gamma``, ``kappa_o``, ``kappa_b``, ``kappa_s``,
+``kappa_q``) are drawn per simulation from their a-priori box. Both are recorded, per task,
+as self-labeling ``Theta_Set`` variants beside the learnable 10-RDS ``Theta_Set``, then
+concatenated into the eleven-key imaging vector the renderer consumes. The learnable
+``Theta_Set`` (the 10 reaction-diffusion labels the estimator inverts) is READ here only for
+the sim-0 diagnostics table and is never re-written by this stage.
+
+The ``Nuisance_DLI`` artifact is a REQUIRED input built by a user-driven analysis step; it is
+resolved from the durable data tier under the Detector alias and its parameter schema is
+guarded before rendering. If absent, the stage fails loud naming the analysis to run.
 
 Outputs (the ``{timing_label}`` token, e.g. ``2S_50FPS``, is rendered from
 ``PARAMETERS.simulation.timing.label`` to namespace files by duration + fps):
 
     <data_bank>/<video_subdir>/<project_alias>_{timing_label}_Video_Set_TASK_{n}.zarr
         (or .npy if --no-compress)
+    <data_bank>/<theta_subdir>/<project_alias>_{timing_label}_Nuisance_DLI_Theta_Set_TASK_{n}_{split}.zarr
+        -- the six photophysics drawn from the Nuisance_DLI artifact (physical)
+    <data_bank>/<theta_subdir>/<project_alias>_{timing_label}_Nuisance_SCOPE_Theta_Set_TASK_{n}_{split}.zarr
+        -- the five SCOPE camera parameters drawn from their a-priori box (physical)
 
 Usage:
     MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py \\
         --total-time-seconds 2.0 --tasks 2 --task-simulations 5 \\
         --video-dtype-bits 8 --seed None
+    (add --dry-run to resolve config + inputs and print planned I/O without rendering)
 
 Diagnostics:
     --probe logs the process resource limits (RLIMIT_NPROC / RLIMIT_NOFILE) at
@@ -34,12 +54,19 @@ import numpy as np
 import readdy
 import zarr
 
+from srm_and_sbi_dimer_alp import detector_parameterization as det
+from srm_and_sbi_dimer_alp.detector_nuisance_dli import (
+    artifact_path as nuisance_dli_artifact_path,
+    require_nuisance_dli,
+)
 from srm_and_sbi_dimer_alp.diagnostics import (
     DiagnosticReporter,
     fixed_parameters_table,
     prior_sampling_table,
 )
-from srm_and_sbi_dimer_alp.io import convert_video_dtype, load_data, save_video_set
+from srm_and_sbi_dimer_alp.io import (
+    convert_video_dtype, load_data, save_theta_set, save_video_set,
+)
 from srm_and_sbi_dimer_alp.parameterization import (
     PARAMETER_RAW_FIND,
     PARAMETERIZATION,
@@ -47,7 +74,7 @@ from srm_and_sbi_dimer_alp.parameterization import (
     PARAMETERS,
     RunTiming,
 )
-from srm_and_sbi_dimer_alp.simulation_dli_support import simulate_dli
+from srm_and_sbi_dimer_alp.simulation_dli_support import render_dli_video
 from srm_and_sbi_dimer_alp.simulation_rds_support import extract_trajectory_poses
 from srm_and_sbi_dimer_alp.utils import (
     SINK, SOCK, console_log_context, log_memory_state, probe_resources,
@@ -66,6 +93,26 @@ _DLI_PARAM_GROUPS = {
         "numb_photo_bleach", "lambda_rate",
     ],
 }
+
+
+def _nuisance_dli_path(paths, task_alias, data_bank_root, timing_label, compress, split):
+    """Calibrated-imaging (photophysics) nuisance provenance file: the canonical theta-set
+    path with the object token swapped ``Theta_Set`` -> ``Nuisance_DLI_Theta_Set`` (reuses the
+    canonical path pattern; no new path code). Holds the six photophysics draws in
+    ``det.DETECTOR_PARAMETER_KEYS`` order, in the same ``Theta/`` subdir beside the learnable
+    10-RDS Theta_Set (DETECTOR_WORKFLOW.md sec. 7 / 9.3)."""
+    base = paths.theta_set_path(task_alias, data_bank_root, timing_label, compress, split)
+    return base.with_name(base.name.replace("Theta_Set", "Nuisance_DLI_Theta_Set"))
+
+
+def _nuisance_scope_path(paths, task_alias, data_bank_root, timing_label, compress, split):
+    """SCOPE camera-nuisance provenance file: the canonical theta-set path with the object
+    token swapped ``Theta_Set`` -> ``Nuisance_SCOPE_Theta_Set`` (reuses the canonical path
+    pattern; no new path code). Holds the five marginalized camera draws in
+    ``det.DETECTOR_SCOPE_KEYS`` order, beside the learnable 10-RDS Theta_Set -- the same token
+    both workflows emit for the shared camera block (DETECTOR_WORKFLOW.md sec. 9.3)."""
+    base = paths.theta_set_path(task_alias, data_bank_root, timing_label, compress, split)
+    return base.with_name(base.name.replace("Theta_Set", "Nuisance_SCOPE_Theta_Set"))
 
 
 def main(args: argparse.Namespace) -> None:
@@ -88,6 +135,23 @@ def main(args: argparse.Namespace) -> None:
     dli_cfg = PARAMETERS.simulation.dli
     paths = PARAMETERS.paths
     div = "=" * 72
+    timing_label = timing.label
+
+    # ---- Imaging marginalization (production): resolve the two nuisance sources -----
+    # The whole imaging block is drawn per simulation (DETECTOR_WORKFLOW.md sec. 9.3): the six
+    # photophysics from the persisted Nuisance_DLI artifact (recorded as Nuisance_DLI), the
+    # five SCOPE camera parameters from their a-priori box (recorded as Nuisance_SCOPE). The
+    # eleven-key imaging vector render_dli_video consumes is det.DETECTOR_IMAGING order
+    # (photophysics-6 then camera-5). The Nuisance_DLI artifact is durable (like the estimator,
+    # NOT the per-split scratch root) and carries the Detector alias in its filename.
+    dli_keys = det.DETECTOR_PARAMETER_KEYS       # 6 photophysics -> Nuisance_DLI (from the artifact)
+    scope_keys = det.DETECTOR_SCOPE_KEYS         # 5 camera       -> Nuisance_SCOPE (from the box)
+    slow = np.array(det.scope_lower_bound())
+    shigh = np.array(det.scope_upper_bound())
+    det_paths = det.detector_paths(PARAMETERS.paths)
+    posit_dir = PARAMETERS.machine.root_for("EVAL") / PARAMETERS.paths.posit_subdir
+    nuisance_artifact = nuisance_dli_artifact_path(
+        posit_dir, det_paths.project_alias, timing_label)
 
     print(div)
     print(f" {paths.project_alias} — Simulation_DLI")
@@ -146,20 +210,28 @@ def main(args: argparse.Namespace) -> None:
     print(f"  sqrt_2sigma_dist_label  : {dli_cfg.sqrt_2sigma_dist_label}            "
           f"(PSF width sampling distribution)")
 
-    timing_label = timing.label
     print("\nOutput destinations:")
-    print(f"  data_bank_root      : {data_bank_root}")
-    print(f"  reads theta sets    : <data_bank>/{paths.theta_subdir}/"
-          f"{paths.project_alias}_{timing_label}_Theta_Set_TASK_{{n}}.{output_fmt}")
-    print(f"  reads trajectories  : <data_bank>/{paths.video_subdir}/"
+    print(f"  data_bank_root       : {data_bank_root}")
+    print(f"  reads Nuisance_DLI    : {nuisance_artifact}   "
+          f"(calibrated-imaging photophysics artifact; durable tier)")
+    print(f"  reads theta sets     : <data_bank>/{paths.theta_subdir}/"
+          f"{paths.project_alias}_{timing_label}_Theta_Set_TASK_{{n}}.{output_fmt}   "
+          f"(10-RDS labels; diagnostics only, not re-written)")
+    print(f"  reads trajectories   : <data_bank>/{paths.video_subdir}/"
           f"{paths.trajectory_repo}/{paths.project_alias}_{timing_label}_TASK_{{n}}/"
           f"{paths.project_alias}_{timing_label}_TASK_{{n}}_SIM_{{m}}.h5")
-    print(f"  writes video sets   : <data_bank>/{paths.video_subdir}/"
+    print(f"  writes Nuisance_DLI   : <data_bank>/{paths.theta_subdir}/"
+          f"{paths.project_alias}_{timing_label}_Nuisance_DLI_Theta_Set_TASK_{{n}}.{output_fmt}   "
+          f"(photophysics drawn from the artifact)")
+    print(f"  writes Nuisance_SCOPE : <data_bank>/{paths.theta_subdir}/"
+          f"{paths.project_alias}_{timing_label}_Nuisance_SCOPE_Theta_Set_TASK_{{n}}.{output_fmt}   "
+          f"(marginalized camera)")
+    print(f"  writes video sets    : <data_bank>/{paths.video_subdir}/"
           f"{paths.project_alias}_{timing_label}_Video_Set_TASK_{{n}}.{output_fmt}   "
           f"(dtype: {target_dtype_name})")
 
     if args.verbose:
-        print("\nKnown DLI parameters:")
+        print("\nImaging parameters (marginalized per simulation):")
         for group_label, keys in _DLI_PARAM_GROUPS.items():
             print(f"  --- {group_label} ---")
             for key in keys:
@@ -167,10 +239,16 @@ def main(args: argparse.Namespace) -> None:
                 val = para["VALUE"]
                 unit = para["UNIT"]
                 unit_str = f"        units: {unit}" if unit else ""
-                if isinstance(val, str):   # role sentinel (e.g. NUISANCE): show the drawn box, not the marker
-                    lo, hi = para["PRIOR_RANGE"]
-                    box = f"10^[{lo}, {hi}]" if para.get("LOG_FLAG") else f"[{lo}, {hi}]"
-                    print(f"  {key:<24}  : {val} (drawn per sim; {box}){unit_str}")
+                if isinstance(val, str):   # role sentinel (NUISANCE): a marginalized draw, not a fixed value
+                    if para["PRIOR_RANGE"] is None:
+                        # nuisance_object (the six photophysics): drawn per sim from the persisted
+                        # Nuisance_DLI artifact -- no a-priori box to print (PRIOR_RANGE is None).
+                        print(f"  {key:<24}  : {val} (drawn per sim from the Nuisance_DLI artifact){unit_str}")
+                    else:
+                        # nuisance_spec (the SCOPE camera): drawn per sim from its a-priori box.
+                        lo, hi = para["PRIOR_RANGE"]
+                        box = f"10^[{lo}, {hi}]" if para.get("LOG_FLAG") else f"[{lo}, {hi}]"
+                        print(f"  {key:<24}  : {val} (drawn per sim; {box}){unit_str}")
                 else:
                     print(f"  {key:<24}  : {val}{unit_str}")
 
@@ -182,11 +260,25 @@ def main(args: argparse.Namespace) -> None:
     # reading that task's RDS trajectories + theta set; otherwise all of --tasks.
     task_indices = [args.task_id] if args.task_id is not None else list(range(args.tasks))
 
+    # ---- Draw the SCOPE camera nuisance for every task up front, in log10 space then mapped
+    # to physical by 10**. Sized (n_rows, sims, 5) and indexed per task, so a given task index
+    # draws the SAME camera vectors whether the run covers all tasks or a single --task-id (HPC
+    # array fan-out): the row index is stable. PLAIN default_rng(seed) (default None ->
+    # non-deterministic), exactly as the detector DLI stage draws its SCOPE block. The six
+    # photophysics are drawn per task inside the loop from the Nuisance_DLI artifact (its
+    # unseeded sampler is the recorded provenance; the seedless-production convention).
+    rng = np.random.default_rng(args.seed)
+    n_rows = max(task_indices) + 1
+    scope_sets = np.power(10, rng.uniform(
+        low=slow, high=shigh,
+        size=(n_rows, args.task_simulations, len(slow))))      # (.., 5) physical SCOPE nuisance
+
     # ---- Dry run: resolve the planned workload + input/output destinations and
     # exit before the render loop and any directory creation -- so it computes
     # nothing and writes nothing. Reuses the script's own already-resolved timing /
-    # task-index / path expressions; only calls .exists() to probe the RDS inputs
-    # (theta sets + trajectories) this stage would read.
+    # task-index / path expressions; calls .exists() to probe the RDS inputs (theta sets +
+    # trajectories) and the required Nuisance_DLI artifact this stage would read, and prints a
+    # sim-0 physical sample of each marginalized block plus the planned Nuisance_* outputs.
     if args.dry_run:
         n_tasks = len(task_indices)
         planned = n_tasks * args.task_simulations
@@ -195,7 +287,22 @@ def main(args: argparse.Namespace) -> None:
         print(f"[DRY RUN] plans {n_tasks} task(s) (index {task_span}) x "
               f"{args.task_simulations} sim(s) = {planned} video(s), "
               f"split _{split}.")
-        missing = 0
+        # The imaging block is marginalized: photophysics from the persisted Nuisance_DLI
+        # artifact (a required input, like the estimator), camera from the SCOPE box.
+        dli_ok = nuisance_artifact.exists()
+        dli_sample = None
+        if dli_ok:
+            nuisance_dli = require_nuisance_dli(posit_dir, det_paths.project_alias, timing_label)
+            if list(nuisance_dli.parameter_keys) != dli_keys:
+                raise ValueError(
+                    f"Nuisance_DLI schema mismatch: artifact parameter_keys "
+                    f"{list(nuisance_dli.parameter_keys)} != expected {dli_keys}.")
+            dli_sample = np.power(10, nuisance_dli.sample(1))[0]
+        print(f"  reads Nuisance_DLI   : {nuisance_artifact}  "
+              f"[{'OK' if dli_ok else 'MISSING'}]")
+        print(f"[DRY RUN] imaging draw: photophysics from Nuisance_DLI (6) "
+              f"+ SCOPE box {scope_sets.shape} (5).")
+        missing = 0 if dli_ok else 1
         for task in task_indices:
             theta_set_path = paths.theta_set_path(
                 task, data_bank_root, timing_label, compress, split)
@@ -212,17 +319,39 @@ def main(args: argparse.Namespace) -> None:
                     missing += 1
             video_set_path = paths.video_set_path(
                 task, data_bank_root, timing_label, compress, split)
-            print(f"  reads theta set     (task {task}): {theta_set_path}  "
-                  f"[{'OK' if theta_ok else 'MISSING'}]")
-            print(f"  reads trajectories  (task {task}): "
+            dli_set_path = _nuisance_dli_path(
+                paths, task, data_bank_root, timing_label, compress, split)
+            scope_set_path = _nuisance_scope_path(
+                paths, task, data_bank_root, timing_label, compress, split)
+            print(f"  reads theta set      (task {task}): {theta_set_path}  "
+                  f"[{'OK' if theta_ok else 'MISSING'}]   (10-RDS labels; diagnostics only, not re-written)")
+            print(f"  reads trajectories   (task {task}): "
                   f"{traj_present}/{args.task_simulations} present")
-            print(f"  writes video set    (task {task}): {video_set_path}")
+            print(f"  writes Nuisance_DLI   (task {task}): {dli_set_path}")
+            if dli_sample is not None:
+                print(f"    Nuisance_DLI[sim 0] (physical): "
+                      f"{dict(zip(dli_keys, np.round(dli_sample, 4).tolist()))}")
+            print(f"  writes Nuisance_SCOPE (task {task}): {scope_set_path}")
+            print(f"    Nuisance_SCOPE[sim 0] (physical): "
+                  f"{dict(zip(scope_keys, np.round(scope_sets[task, 0], 4).tolist()))}")
+            print(f"  writes video set     (task {task}): {video_set_path}")
         if missing:
             print(f"\n[DRY RUN] configuration validated; {missing} input(s) MISSING.")
         else:
             print("\n[DRY RUN] configuration validated; all inputs present.")
         print("[DRY RUN] no videos rendered.")
         return
+
+    # ---- Load + schema-guard the required Nuisance_DLI artifact once (fails loud naming the
+    # analysis if absent; never rebuilds). The guard mirrors the estimator schema guard: the
+    # artifact's parameter_keys must be the six photophysics in DETECTOR_PARAMETER_KEYS order,
+    # the column order the eleven-key imaging vector is assembled to.
+    nuisance_dli = require_nuisance_dli(posit_dir, det_paths.project_alias, timing_label)
+    if list(nuisance_dli.parameter_keys) != dli_keys:
+        raise ValueError(
+            f"Nuisance_DLI schema mismatch: artifact parameter_keys "
+            f"{list(nuisance_dli.parameter_keys)} != expected {dli_keys} "
+            f"(the six photophysics in DETECTOR_PARAMETER_KEYS order).")
 
     for loop_i, task in enumerate(task_indices):
         task_alias = task
@@ -231,11 +360,45 @@ def main(args: argparse.Namespace) -> None:
         if args.verbose:
             log_memory_state()
 
-        # ---- Load the theta set written by the RDS stage --------------
+        # ---- Read the learnable 10-RDS theta set (the estimator's labels) for the sim-0
+        # diagnostics table only. This stage does not re-write it; the RDS stage owns it.
         theta_set_path = PARAMETERS.paths.theta_set_path(
             task_alias, data_bank_root, timing_label, compress, split)
-        print(f"  Reading theta set:  {theta_set_path}")
+        print(f"  Reading theta set (10-RDS labels):  {theta_set_path}")
         theta_set = load_data(theta_set_path)
+
+        # ---- Draw + persist this task's imaging nuisance: the six photophysics from the
+        # Nuisance_DLI artifact (recorded as Nuisance_DLI) and the five SCOPE camera from the
+        # shared box (recorded as Nuisance_SCOPE), both physical, both in the same Theta/ subdir
+        # beside the learnable Theta_Set. Rendered together per sim (photophysics ++ camera).
+        dli_data = np.power(10, nuisance_dli.sample(args.task_simulations))   # (sims, 6) physical, DETECTOR_PARAMETER_KEYS order
+        scope_data = scope_sets[task_alias]                                   # (sims, 5) physical, DETECTOR_SCOPE_KEYS order
+        dli_set_path = _nuisance_dli_path(
+            paths, task_alias, data_bank_root, timing_label, compress, split)
+        scope_set_path = _nuisance_scope_path(
+            paths, task_alias, data_bank_root, timing_label, compress, split)
+        dli_set_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  Writing Nuisance_DLI:   {dli_set_path}")
+        print(f"  Writing Nuisance_SCOPE: {scope_set_path}")
+        if compress:
+            theta_compressor = numcodecs.Blosc(
+                cname="zstd", clevel=9, shuffle=numcodecs.Blosc.BITSHUFFLE,
+            )
+            dli_store = zarr.open(
+                store=str(dli_set_path), mode="w", shape=dli_data.shape,
+                chunks=(1, dli_data.shape[1]), dtype=np.float64,
+                compressor=theta_compressor,
+            )
+            dli_store[:, :] = dli_data
+            scope_store = zarr.open(
+                store=str(scope_set_path), mode="w", shape=scope_data.shape,
+                chunks=(1, scope_data.shape[1]), dtype=np.float64,
+                compressor=theta_compressor,
+            )
+            scope_store[:, :] = scope_data
+        else:
+            save_theta_set(dli_set_path, dli_data, compress=False)
+            save_theta_set(scope_set_path, scope_data, compress=False)
 
         # ---- Create the video-set store/buffer ------------------------
         video_set_path = PARAMETERS.paths.video_set_path(
@@ -308,12 +471,15 @@ def main(args: argparse.Namespace) -> None:
                 )
                 pro_tray_poses = np.nanmax(a=tray_poses, axis=3)
 
+            # Assemble the full eleven-key imaging vector (det.DETECTOR_IMAGING order): the six
+            # photophysics (Nuisance_DLI) followed by the five SCOPE camera (Nuisance_SCOPE).
+            # theta (the 10-RDS labels) is read for the sim-0 diagnostics table only.
             theta = theta_set[sim, :]
-            frames = simulate_dli(
+            imaging_physical = np.concatenate([dli_data[sim], scope_data[sim]])
+            frames = render_dli_video(
                 pro_tray_poses=pro_tray_poses,
-                theta=theta,
+                imaging_physical=imaging_physical,
                 dimer_mask=dimer_mask,
-                dimer_mule=PARAMETERS.simulation.dli.dimer_mule,
                 seed=args.seed,   # default None -> non-deterministic
                 verbose=args.verbose,
             )

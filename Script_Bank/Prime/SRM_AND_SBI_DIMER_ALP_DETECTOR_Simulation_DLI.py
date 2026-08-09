@@ -6,12 +6,15 @@ committed submission machinery.
 
 Mirrors the canonical ``SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py``, with one
 governing difference: the imaging parameters are the Detector's inference target,
-so this stage draws them per simulation from the Detector imaging prior (the 10
-learnable imaging parameters) rather than reading them from the fixed table, and
-renders each video with ``render_detector_video`` (``detector_simulation_dli_support``) — which reuses the canonical DLI building blocks but sources the imaging
-parameters from theta. The canonical ``simulate_dli`` orchestrator is not called
-or modified. The drawn imaging theta is persisted as the Theta_Set — it is the
-training label the estimator learns to invert.
+so this stage draws them per simulation from the Detector imaging prior (the 6
+learnable imaging parameters) as the inference target — whereas the canonical stage
+marginalizes them as a nuisance — and
+renders each video with ``render_detector_video`` (re-exported by
+``detector_simulation_dli_support`` from the shared, source-agnostic renderer
+``render_dli_video`` that both DLI stages call) — which reuses the canonical DLI building
+blocks but sources the imaging parameters from the assembled imaging vector. The drawn
+imaging theta is persisted as the Theta_Set — it is the training label the estimator learns
+to invert.
 
 The trajectories consumed here are the diffusion-only trajectories produced by
 the Detector RDS stage. Detector data namespaces separately from canonical

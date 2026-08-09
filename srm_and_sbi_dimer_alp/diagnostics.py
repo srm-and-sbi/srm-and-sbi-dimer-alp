@@ -131,17 +131,19 @@ def fixed_parameters_table(parameterization_raw):
     headers = ["parameter", "label", "value", "units", "derived unit", "kind"]
     rows = []
     for para in parameterization_raw:
-        # Learnable rows appear in the prior-sampling table instead. Today every ranged
-        # row is learnable (the biology RDS target); imaging + camera are fixed, so this
-        # range test is exact. Only IF a later imaging-treatment step marginalizes the
-        # imaging or camera block would a nuisance-from-spec row (which also carries a
-        # range) exist; this would then need a value-based-role test
-        # (parameterization.role_of == 'learnable') so the nuisance rows stay in the
-        # fixed table. Kept as a range test here to preserve this module's decoupling
-        # from the machine-profile-loading parameterization module.
-        if para.get("PRIOR_RANGE") is not None:
-            continue
+        # Keep only truly fixed rows: a concrete VALUE with no PRIOR_RANGE. Learnable rows
+        # (concrete VALUE + range) appear in the prior-sampling table; the marginalized rows
+        # -- the SCOPE camera nuisance-from-spec (VALUE sentinel + range) and the
+        # calibrated-imaging nuisance-from-object (VALUE sentinel + no range) -- are drawn
+        # per simulation, not held fixed, so they belong in neither table. The value-based
+        # 'fixed' rule (parameterization.role_of) is replicated inline rather than imported
+        # to preserve this module's decoupling from the machine-profile-loading
+        # parameterization module; the sentinel strings mirror its NUISANCE_SENTINEL /
+        # POSTERIOR_SENTINEL. A ranged row, or a sentinel VALUE, is therefore not fixed.
         value = para.get("VALUE")
+        is_sentinel = isinstance(value, str) and value in ("NUISANCE", "POSTERIOR")
+        if is_sentinel or para.get("PRIOR_RANGE") is not None:
+            continue
         if isinstance(value, (list, tuple)):
             value_str = str(list(value))
         elif isinstance(value, float):

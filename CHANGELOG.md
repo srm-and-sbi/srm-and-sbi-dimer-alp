@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.4 - 2026-08-09
+
+The canonical ("biology") DLI stage now marginalizes the imaging block in production. Rather than
+holding the photophysics fixed at the detector's prior center (0.4.2), each simulation draws its six
+photophysics from the pooled `Nuisance_DLI` artifact and its five SCOPE camera parameters from the
+a-priori box, records both, and renders through one shared, source-agnostic renderer that the
+detector stage also uses. This realizes the production imaging marginalization the 0.4.2 "fixed
+imaging operating point" stood in for; it changes how DLI draws imaging — both nuisance sets are now
+recorded beside the learnable theta — without changing the ten-parameter reaction-diffusion inference
+target. Seedless throughout; the detector workflow's output is unchanged.
+
+### Changed
+
+- **Production imaging marginalization (canonical DLI).** The six photophysics (`mu_r`, `sigma_r`,
+  `mu_pc`, `sigma_pc`, `prob_photo_bleach`, `lambda_rate`) are marginalized as a `nuisance_object`,
+  drawn per simulation from the pooled `Nuisance_DLI` artifact — resolved under the detector alias
+  from the durable tier via `require_nuisance_dli`, schema-guarded to the six photophysics in
+  `DETECTOR_PARAMETER_KEYS` order. The five SCOPE camera parameters remain a `nuisance_spec` drawn
+  per simulation from the a-priori box. Both draws are recorded per task, physical — as
+  `Nuisance_DLI_Theta_Set` and `Nuisance_SCOPE_Theta_Set`, beside the learnable ten-RDS `Theta_Set` —
+  and assembled into the eleven-key imaging vector (six photophysics ++ five camera) for rendering.
+  Replaces the 0.4.2 fixed imaging operating point.
+- **Shared source-agnostic renderer.** `render_dli_video` (`simulation_dli_support.py`) is the single
+  renderer both workflows call: it reads the fixed imaging hyperparameters from the canonical
+  parameterization table and renders from an explicit eleven-key imaging vector, independent of where
+  that vector came from — the artifact-plus-box draw for the canonical stage, the SCOPE draw for the
+  detector. The detector's `render_detector_video` is now a thin re-export alias of it, byte-identical
+  in output (`array_equal` holds for both the `sum` and `multiply` dimer models).
+- **Value-based role flip.** The six photophysics rows move from a fixed `VALUE` (0.4.2) to
+  `VALUE = NUISANCE_SENTINEL` with `PRIOR_RANGE = None`, marking them a `nuisance_object` (drawn from a
+  persisted artifact) as distinct from the SCOPE `nuisance_spec` (drawn from a box). The learnable
+  subset is unchanged — exactly the ten reaction-diffusion parameters.
+
+### Added
+
+- **`dimer_mule` fixed row** in the canonical parameterization table (the merged-dimer brightness
+  multiplicity relative to a monomer), so the shared renderer reads it from one place in both
+  workflows. Inert under the default `sum` dimer model; consumed only by the retained `multiply`
+  sensitivity alternative.
+
+### Removed
+
+- **`simulate_dli` and `draw_scope_camera`** (`simulation_dli_support.py`) — superseded by
+  `render_dli_video` (the shared renderer) plus the artifact-and-box imaging draw now owned by the
+  canonical Simulation_DLI stage. No caller remains.
+
 ## 0.4.3 - 2026-08-07
 
 The two Detector real-recording stages (Experiment and the Nuisance_DLI construction) now share
