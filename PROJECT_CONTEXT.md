@@ -110,9 +110,9 @@ brightness flicker — with the physics frozen so the imaging model is
 identifiable.
 
 **Output:** A posterior over `β` and a versioned, provenanced imaging-parameter
-artifact. This calibration is a complete workflow parallel to the canonical
+artifact. This calibration is a complete workflow parallel to the biology
 pipeline, run in this repository with its own committed submission machinery,
-separate from — never wired into — the canonical `Submit.sh` dispatcher and its
+separate from — never wired into — the biology `Submit.sh` dispatcher and its
 stage wrappers.
 The calibrated values are the basis for the detector parameters Stage 2 applies;
 the mechanism that seeds them into production is developed alongside this
@@ -201,7 +201,7 @@ Fab and the dimer-rich InlB condition (a lower bound, given the analysis
 intensity-range clip; see `DETECTOR_WORKFLOW.md` §6.4–§6.5).
 
 The retained alternative, `dimer_model="multiply"` (a non-default mode of the shared
-renderer `render_dli_video`, which reads `dimer_mule` from the canonical parameter table),
+renderer `render_dli_video`, which reads `dimer_mule` from the biology parameter table),
 rigidly scales a single monomer draw by `dimer_mule` — a
 per-dataset photophysical constant in `[1, 2]`: **`2`** for two permanently-on,
 both-present labels (the MET ATTO 647N default); **`√2 ≈ 1.41`** when only ~one label
@@ -437,6 +437,22 @@ scratch.
 The support code is organized into a flat Python package of focused modules
 rather than a single monolithic support file. The modules and their roles:
 
+- **`workflow.py`** — the shared-engine control layer. It defines the frozen
+  `WorkflowConfig` and the two factories `biology_workflow()` and
+  `detector_workflow()` that build it. The config carries the genuine
+  per-workflow differences — the parameterization module, the alias-qualified
+  paths, the workflow tag, and the DLI imaging source (the `Nuisance_DLI`
+  artifact for biology, the imaging prior box for detector) — so one engine serves
+  both the biology workflow (infers the ten reaction-diffusion parameters and
+  marginalizes the imaging block) and the detector workflow (infers the six
+  imaging parameters and marginalizes the reaction-diffusion domain and the
+  camera).
+- **`simulation_rds_runner.py`, `simulation_dli_runner.py`,
+  `inference_runner.py`, `evaluation_runner.py`, `experiment_runner.py`** — one
+  shared runner per stage, each exposing `run_<stage>(cfg, args)`. This is the
+  single orchestration engine both workflows execute for that stage, so neither
+  can silently drift; the per-workflow differences are localized in a
+  `_<stage>_spec(cfg)` resolver rather than duplicated across entry points.
 - **`parameterization.py`** — the single source of truth for configuration. It
   loads the per-machine profile, holds the sibling-wide defaults as frozen
   dataclasses (path conventions, simulation geometry and timing, RDS/DLI
@@ -450,6 +466,10 @@ rather than a single monolithic support file. The modules and their roles:
 - **`simulation_dli_support.py`** — the imaging pipeline: Gaussian PSF, EMCCD
   detector, intensity accumulation, the brightness state machine, the transition
   matrices (including photobleaching), and the top-level imaging orchestrator.
+- **`experiment_support.py`** — the workflow-agnostic real-recording machinery:
+  loading, windowing, and preparing experimental microscopy videos. It is shared
+  by both the Experiment stage and the `Nuisance_DLI` analysis, so it carries no
+  workflow-specific assumptions.
 - **`inference_network.py`** — the network architecture (§6): positional
   encoding, attention block, temporal transformer, and the 3D-CNN video encoder.
 - **`inference_support.py`** — the training pipeline: the video dataset (with
@@ -470,10 +490,14 @@ rather than a single monolithic support file. The modules and their roles:
 - **`utils.py`** — small cross-cutting helpers (terminal separators, memory-state
   logging, and the resource-probe helpers).
 
-Each entry-point script is a thin wrapper: it parses CLI arguments, loads the
-configuration, calls package functions, and writes outputs to the
-configuration-defined paths. The package is installed editable, so script edits
-to the package take effect without reinstallation.
+Each Prime entry point is a thin shim: it parses CLI arguments, builds a
+`workflow.WorkflowConfig` (via `biology_workflow()` or `detector_workflow()`),
+and calls the stage's shared `run_<stage>(cfg, args)` runner, which loads the
+configuration, calls the package functions, and writes outputs to the
+configuration-defined paths. Each stage has two such shims over one shared
+runner — the unqualified biology entry point and its `_DETECTOR`-qualified
+detector counterpart. The package is installed editable, so edits to the package
+take effect without reinstallation.
 
 `Script_Bank/Analysis/` collects post-hoc analyses that run on completed outputs
 rather than producing pipeline artifacts:
@@ -530,8 +554,8 @@ committed record.
 ## §5. Implementation Map (Science → Code)
 
 Each scientific concept and pipeline stage maps to a specific module and
-function in the package, driven by a thin entry-point script, and produces a
-defined on-disk artifact. Module paths are relative to the package
+function in the package, driven by a thin entry-point shim over the stage's
+shared runner, and produces a defined on-disk artifact. Module paths are relative to the package
 `srm_and_sbi_dimer_alp/`; entry-point scripts live under `Script_Bank/Prime/`.
 
 | Scientific concept / stage | Code (module → function/class) | On-disk artifact |
@@ -549,12 +573,15 @@ defined on-disk artifact. Module paths are relative to the package
 | Real-data application (no ground truth) | same `evaluation.py` estimator (`map_estimate()`, `experiment_table()`); driven by entry point `SRM_AND_SBI_DIMER_ALP_Experiment.py` | per-condition inferred-parameter report under the validation output directory |
 | Configuration, paths, storage routing, and file I/O | `parameterization.py` → `Paths`, `MachineProfile` / `load_machine_profile()`, `FrameConfig`, `RunTiming`; `io.py` → `load_data()`, `save_video_set()`, `save_theta_set()`, `convert_video_dtype()` | resolved absolute paths (per-machine `machine_profiles.toml`); all artifacts above land under the configured roots |
 
-The five pipeline stages are RDS, DLI, Inference, Evaluation, and Experiment;
-their entry-point scripts (`SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py`,
+The five pipeline stages are RDS, DLI, Inference, Evaluation, and Experiment.
+Each stage has one shared runner (`<stage>_runner.py` → `run_<stage>()`) and two
+thin Prime entry-point shims over it: the unqualified biology entry point
+(`SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py`,
 `SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py`, `SRM_AND_SBI_DIMER_ALP_Inference.py`,
-`SRM_AND_SBI_DIMER_ALP_Evaluation.py`, `SRM_AND_SBI_DIMER_ALP_Experiment.py`)
-are each thin wrappers that parse arguments, load the configuration, call the
-package functions above, and write outputs to the configuration-defined paths.
+`SRM_AND_SBI_DIMER_ALP_Evaluation.py`, `SRM_AND_SBI_DIMER_ALP_Experiment.py`) and
+its `_DETECTOR`-qualified detector counterpart. Each shim parses arguments,
+builds a `WorkflowConfig`, and calls the shared runner, which drives the package
+functions above and writes outputs to the configuration-defined paths.
 `SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py` orchestrates the generation pair
 (RDS → DLI) across all three splits in one command.
 

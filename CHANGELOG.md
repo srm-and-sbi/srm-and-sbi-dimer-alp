@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.5 - 2026-08-09
+
+The two mirrored workflows -- **biology** (infers the reaction-diffusion parameters;
+marginalizes imaging) and **detector** (infers the imaging parameters; marginalizes
+reaction-diffusion + camera) -- now run on ONE shared engine per stage. Each stage's
+orchestration was extracted from its two near-duplicate ~500-700-line entry-point scripts
+into a single `run_<stage>(cfg, args)`, and the ten Prime entry points collapse to thin
+(~40-line) shims that build a `WorkflowConfig` and call the shared runner. The workflows now
+mirror each other by construction -- a change to a stage's engine lands in both, so neither
+can silently drift (the drift this consolidation removes was real: the biology Inference had
+fallen behind its detector twin). Behavior-preserving: each stage's old-vs-new dry-run is
+byte-identical for both workflows, modulo the documented intended changes below. The
+"canonical" workflow name is retired in favor of "biology" throughout.
+
+### Added
+
+- **`workflow.py`** — the `WorkflowConfig` dataclass (the workflow identity: `tag`, alias-qualified
+  `paths`, `param_module`, `console_log_paths`) + the `biology_workflow()` / `detector_workflow()`
+  factories. This is the single object threaded through every shared stage runner; the genuine
+  per-workflow differences live here, not in duplicated `main()` bodies.
+- **Five shared stage-runner modules** — `simulation_rds_runner.py`, `simulation_dli_runner.py`,
+  `inference_runner.py`, `evaluation_runner.py`, `experiment_runner.py`, each holding the stage's
+  full orchestration as `run_<stage>(cfg, args)` + a `build_<stage>_parser()`, with the one genuine
+  per-workflow fork localized in a `_<stage>_spec(cfg)` resolver (e.g. RDS's reactive-vs-diffusion-only
+  builder; DLI's imaging source — the `Nuisance_DLI` artifact for biology vs the imaging prior box
+  for detector).
+
+### Changed
+
+- **Ten Prime entry points → thin shims.** `SRM_AND_SBI_DIMER_ALP_{Simulation_RDS, Simulation_DLI,
+  Inference, Evaluation, Experiment}.py` and their `_DETECTOR` twins are now ~40-line shims: parse
+  args, build the workflow config, call the shared runner.
+- **`detector_experiment_support.py` → `experiment_support.py`.** The shared real-recording machinery
+  (discovery / windowing / rank-sharding / shard I/O) is workflow-agnostic, so the `detector_` prefix
+  is dropped; the biology Experiment stage now routes through it too (previously it carried its own
+  inline copy — the 0.4.3 refactor had moved only the detector side onto the shared module).
+- **Estimator / test-loss-distribution metadata `workflow` tag `"canonical"` → `"biology"`** (matches
+  the retired workflow name).
+- **Inference drift-gap folds (now in both workflows via the shared engine).** The biology Inference
+  gains the `--num-workers` / `num_workers_override` DataLoader-budget knob, the theta-width guard on
+  the loaded labels, and the complete finish-time estimator metadata (`train_videos` / `test_videos` +
+  a non-finite `best_test_loss` → `None` guard) that had previously existed only in the detector twin.
+- **Detector DLI `--debug` sim-0 diagnostics fix.** The detector DLI's `--debug` "Parameters of this
+  video" table referenced an undefined `theta` against the wrong (10-RDS) table — a latent `NameError`
+  on the debug path; the shared engine builds that table from each workflow's target spec (the
+  six-imaging table + the imaging draw for the detector), so it is correct in both.
+- **Detector Inference / Evaluation / Experiment estimator-path resolution** uses the shared
+  `paths.estimator_path` method instead of a redundant local `_estimator_path` helper (identical path).
+- Minor, benign banner normalizations where the two workflows' pre-run banners had drifted apart in
+  cosmetic spacing/wording (e.g. the detector `data_bank_root` padding and the `reads estimator` label
+  now match biology's); output content is unchanged.
+
 ## 0.4.4 - 2026-08-09
 
 The canonical ("biology") DLI stage now marginalizes the imaging block in production. Rather than

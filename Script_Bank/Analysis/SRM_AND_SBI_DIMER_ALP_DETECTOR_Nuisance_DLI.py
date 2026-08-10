@@ -50,7 +50,7 @@ import torch
 from matplotlib.figure import Figure
 
 from srm_and_sbi_dimer_alp import artifacts
-from srm_and_sbi_dimer_alp.detector_experiment_support import (
+from srm_and_sbi_dimer_alp.experiment_support import (
     assert_consistent_shard_set,
     discover_cells,
     load_shards,

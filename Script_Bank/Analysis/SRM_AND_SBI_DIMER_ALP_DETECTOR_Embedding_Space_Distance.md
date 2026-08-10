@@ -165,7 +165,7 @@ Written to the Detector-namespaced `Posit/` subdirectory under the data bank (`<
 - **Few recordings weaken significance.** With few cells there are few permutation blocks and few
   cross-validation folds, so the tests are conservative; the point statistics remain informative.
 - **The interpretation is the detector question only.** A distance here is imaging realism; the
-  analogous distance under the canonical workflow (imaging marginalized, biology represented) is a
+  analogous distance under the biology workflow (imaging marginalized) is a
   biological question and a separate companion analysis.
 
 ## Reference
@@ -175,4 +175,4 @@ Maximum Mean Discrepancy: Gretton, Borgwardt, Rasch, Schölkopf, Smola, "A Kerne
 "Revisiting Classifier Two-Sample Tests," *ICLR*, 2017. Cell-grouped cross-validation controls the
 within-recording correlation of the video windows. Experimental recordings: MET single-particle-tracking
 data, BioImage Archive accession S-BSST712. The embedding, the imaging prior box, and the
-detector-versus-canonical framing are in `DETECTOR_WORKFLOW.md`.
+detector-versus-biology framing are in `DETECTOR_WORKFLOW.md`.

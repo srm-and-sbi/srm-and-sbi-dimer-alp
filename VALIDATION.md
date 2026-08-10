@@ -133,7 +133,7 @@ pointing to the misconfiguration. There is no silent fallback.
 These are quick checks that each entry point runs end-to-end with minimal inputs.
 The point is to surface obvious problems (missing imports, wrong shapes, path
 misconfiguration) before any longer run. The same structure applies to **both**
-workflows in this repository — the canonical reaction-diffusion pipeline
+workflows in this repository — the biology reaction-diffusion pipeline
 (sections 2.1–2.4) and the Detector imaging-calibration pipeline (section 2.5,
 `DETECTOR_WORKFLOW.md`) — which share the stage sequence generate → infer →
 evaluate → (experiment). Every smoke passes `--total-time-seconds` (always
@@ -304,7 +304,7 @@ writes a per-condition report for the ALP and BET cells.
 
 ### 2.6 Running smokes on HPC
 
-The same smoke runs on a cluster through the committed wrappers — the canonical
+The same smoke runs on a cluster through the committed wrappers — the biology
 `SRM_AND_SBI_DIMER_ALP_HPC_*` set and the Detector `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*`
 set — which exercise the paths a single workstation cannot: **multi-CPU
 generation** (many tasks packed per node, fanned out with a Slurm `--array`) and
@@ -349,10 +349,10 @@ The epoch budget and the batch size are both flexible; the batch column is a
 recommendation that scales down with duration to fit GPU memory — adjust it to the
 available hardware. The epoch budget is per invocation. Splitting it across
 `--resurrect` rounds (for example, **25 epochs run twice**) is the crash-safe path for
-wall-time-limited queues and now costs nothing: each round hot-restarts from the full
+wall-time-limited queues and costs nothing extra: each round hot-restarts from the full
 resume file, so the two rounds continue one uninterrupted optimizer + learning-rate
 schedule — equivalent to a single **50-epoch** run, without the re-convergence a cold
-restart used to spend at each requeue. The in-run LR warm restart (see `train_loop`) is
+restart spends at each requeue. The in-run LR warm restart (see `train_loop`) is
 a within-run plateau-escape at the LR floor, and its state persists across requeues too,
 so the sawtooth is continuous across rounds.
 
@@ -363,8 +363,8 @@ Submit on HPC: generation on the CPU partition (tasks packed per node, fanned ou
 with `--array` per split), training and evaluation on the GPU partition
 (multi-GPU). Partitions and node geometry are per-machine, supplied by each
 cluster's `hpc_local.env`; the submission pattern and commands are in the HPC
-runbook (`Script_Bank/HPC/README.md`). The canonical DLI stage now runs with the
-imaging block marginalized (§3.1); a full canonical production run, like the detector
+runbook (`Script_Bank/HPC/README.md`). The biology DLI stage runs with the
+imaging block marginalized (§3.1); a full biology production run, like the detector
 production re-run, is a separate, approval-gated step. As
 with smokes, no production run is submitted without the project owner's explicit
 approval.
@@ -421,11 +421,11 @@ against any particular reference run. Equivalence rests on three pillars:
    banner (`--verbose`) prints the detector parameters, and a rendered video
    (via `--show`) shows sparse fluorescent spots on a near-zero background with
    plausible pixel-value ranges. The pipeline produces videos of the correct
-   shape, dtype, and value distribution. The **canonical** DLI stage now runs on the
-   same corrected imaging physics, rendering through the shared, source-agnostic
+   shape, dtype, and value distribution. The **biology** DLI stage renders through
+   the shared, source-agnostic
    `render_dli_video` with the imaging block marginalized — the six photophysics drawn
    per simulation from the `Nuisance_DLI` artifact and the five camera parameters from
-   the SCOPE box, both recorded beside the reaction-diffusion labels. The canonical DLI
+   the SCOPE box, both recorded beside the reaction-diffusion labels. The biology DLI
    smoke (section 2.2) and the long-duration DLI leg (section 3.3) exercise this path.
 
 **Acceptance**: pillars (1)–(3) hold — theta is bit-reproducible at a fixed
@@ -496,7 +496,7 @@ It builds path strings and samples small in-memory arrays only — it never read
 writes the data bank and needs no GPU. It writes no files: it prints one
 `[PASS]`/`[FAIL]` line per check and a final `RESULT`, exiting nonzero on any
 failure so it can gate a generation launch from a script. This check is a
-standalone reproducibility diagnostic, not one of the canonical pipeline stages,
+standalone reproducibility diagnostic, not one of the biology pipeline stages,
 and is kept out of the stage dispatcher. See the companion note
 `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Seeding_Validation.md` for what each
 check covers, how to read a failure, and the precise scope of what it does and does
@@ -520,7 +520,7 @@ with the frame time fixed at 0.020 s (50 frames per second). So:
   outputs.
 
 Repeat the smoke tests with the long duration (seedless). The DLI and Inference
-legs run on the canonical DLI path (section 3.1); the duration arithmetic is also
+legs run on the biology DLI path (section 3.1); the duration arithmetic is also
 confirmed through the RDS leg and the derived-frame-count check below:
 
 ```bash
@@ -675,8 +675,8 @@ A correctly set up and validated installation has:
 - A working `SRM_AND_SBI_ENVY_V0` environment (or a reused compatible one) with
   the package installed editable, and a `machine_profiles.toml` configured for
   the machine.
-- All four canonical smoke-test invocations (RDS, DLI, Inference, and Inference
-  `--resurrect`) running end-to-end on minimal inputs. (The canonical DLI stage renders
+- All four biology smoke-test invocations (RDS, DLI, Inference, and Inference
+  `--resurrect`) running end-to-end on minimal inputs. (The biology DLI stage renders
   through the shared `render_dli_video` with the imaging block marginalized — see the
   imaging-pipeline pillar in section 3.1 — so it requires the `Nuisance_DLI` artifact to
   be built first, per the DLI smoke prerequisites in section 2.2.)

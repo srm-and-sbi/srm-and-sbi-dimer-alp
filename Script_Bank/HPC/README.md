@@ -484,15 +484,15 @@ a backed-up location.
 ## 8. Detector calibration workflow (own submission machinery)
 
 The **Detector calibration workflow** is a complete workflow parallel to the
-canonical pipeline: it runs the same four-step process (simulate → infer →
+biology pipeline: it runs the same four-step process (simulate → infer →
 evaluate → experiment) but infers the imaging (diffraction-limited-imaging)
 parameters with the physics frozen to pure diffusion, so those parameters are
 calibrated for production rather than hand-tuned. It has its **own committed
 submission machinery**, filename-namespaced (`SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*`)
-and coexisting with the canonical wrappers in this directory — the same
+and coexisting with the biology wrappers in this directory — the same
 filename-alias scheme as the `_DETECTOR` data and entry scripts. It is a separate,
-parallel workflow: it is **never wired into the canonical `Submit.sh` dispatcher
-or the four canonical stage wrappers**, and they are never wired into it.
+parallel workflow: it is **never wired into the biology `Submit.sh` dispatcher
+or the four biology stage wrappers**, and they are never wired into it.
 
 | Detector script | Role | Compute |
 |---|---|---|
@@ -506,7 +506,7 @@ or the four canonical stage wrappers**, and they are never wired into it.
 built.)
 
 **Dispatcher.** `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Submit.sh` mirrors the
-canonical `Submit.sh` — dry-run first (`DRYRUN=1` prints the exact `sbatch` line;
+biology `Submit.sh` — dry-run first (`DRYRUN=1` prints the exact `sbatch` line;
 `DRYRUN=0` submits) — for the Detector stages, and renders the `_DETECTOR`
 job-name `SRM_AND_SBI_DIMER_ALP_DETECTOR_<timing_label>_<Stage>[_<SPLIT>]`.
 
