@@ -23,6 +23,14 @@ The pool is the GPU cost and is cached (keyed on the build inputs + the estimato
 --emit-template computes it once and --build reuses it; raw/gaussian/box share the posterior-sample
 pool, map_estimate_pool uses a MAP pool, box_user needs none. --repool forces a recompute.
 
+The cached pool is SELF-DESCRIBING: beside the ``(N, D)`` matrix and its provenance it stores, per
+row, ``kind_index`` (into ``kinds``), ``cell``, and ``chunk`` (the sliding-window index) — the
+condition and time-window position of every row — plus a ``pool_format_version`` (see
+``detector_nuisance_dli.save_pool``). A consumer can therefore filter the pool by condition or
+acquisition from the file alone, without re-deriving the positional build order. A legacy pool built
+before this scheme carries no labels; ``--migrate-pool-labels`` (CPU) adds them to an existing pool by
+borrowing the aligned labels from the Detector Experiment MAP output, after verifying the ordering.
+
 The five choices and their meaning are documented in the spec template and in the companion note
 SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.md; the artifact machinery is in detector_nuisance_dli.py.
 
@@ -42,6 +50,8 @@ Usage:
     (add --dry-run to resolve paths/inputs without loading the estimator or computing)
 """
 import argparse
+import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -101,13 +111,17 @@ def _read_all_chunks(R, kinds, span, n_frames, step_frames, max_cells, topo=None
 
     Pools chunks across every (kind, cell), because the Nuisance_DLI is pooled across conditions
     (a by-kind split is only a diagnostic, never the constructed artifact). Returns
-    ``(chunks, summary)`` where ``chunks`` is a list of ``(n_frames, H, W)`` uint8 arrays.
+    ``(chunks, chunk_labels, summary)`` where ``chunks`` is a list of ``(n_frames, H, W)`` uint8
+    arrays and ``chunk_labels`` is the aligned list of ``(kind_index, cell, chunk)`` identities
+    -- the condition (index into ``kinds``) and the time-window position (cell, sliding-window
+    index) of each chunk -- so the pool built from these chunks can be persisted self-describing.
 
     When ``topo`` is distributed the flat (kind, cell) work list is split across workers
     round-robin by rank (via :func:`shard_by_rank`), so each worker reads only its own cells'
     chunks. The pool is a mixture over chunks, so concatenating the per-rank partials at merge
-    time is exact and order-independent. With one worker (or ``topo is None``) every cell is
-    read, in kind- then cell-order -- byte-for-byte the original single-process behavior.
+    time is exact and order-independent -- and because each chunk carries its own label, the
+    labels stay row-aligned through the round-robin shard/merge. With one worker (or ``topo is
+    None``) every cell is read, in kind- then cell-order -- byte-for-byte the original behavior.
     """
     cells_by_kind = {}
     for kind in kinds:
@@ -119,8 +133,8 @@ def _read_all_chunks(R, kinds, span, n_frames, step_frames, max_cells, topo=None
     if topo is not None and topo.is_distributed:
         flat_work = shard_by_rank(flat_work, topo)
     my_cells = {kind: [c for k, c in flat_work if k == kind] for kind in kinds}
-    chunks, per_kind = [], {}
-    for kind in kinds:
+    chunks, chunk_labels, per_kind = [], [], {}
+    for kind_index, kind in enumerate(kinds):
         n_cell_chunks = 0
         for cell in my_cells[kind]:
             tif_path = R["paths"].experiment_video_path(kind, cell, span, R["data_bank_root"])
@@ -128,9 +142,10 @@ def _read_all_chunks(R, kinds, span, n_frames, step_frames, max_cells, topo=None
                 continue
             cell_chunks = read_cell_chunks(tif_path, n_frames, step_frames)
             chunks.extend(cell_chunks)
+            chunk_labels.extend((kind_index, int(cell), h) for h in range(len(cell_chunks)))
             n_cell_chunks += len(cell_chunks)
         per_kind[kind] = (len(my_cells[kind]), n_cell_chunks)
-    return chunks, per_kind
+    return chunks, chunk_labels, per_kind
 
 
 def _load_posterior(R):
@@ -181,21 +196,24 @@ def _get_pool(R, args, pool_kind, pool_mode, n_frames, step_frames, n_per):
             return cached, f"cache ({cache.name})"
     posterior, device, vista_device = _load_posterior(R)
     kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
-    chunks, _ = _read_all_chunks(R, kinds, args.experiment_span_seconds, n_frames, step_frames,
-                                 args.max_cells)
+    chunks, chunk_labels, _ = _read_all_chunks(R, kinds, args.experiment_span_seconds, n_frames,
+                                               step_frames, args.max_cells)
     if not chunks:
         raise FileNotFoundError(
             f"No experimental recordings found under {R['experiment_dir']} for kinds {kinds} "
             f"at span {args.experiment_span_seconds}s. Stage the real recordings first.")
     eval_cfg = PARAMETERS.inference.evaluation
     if pool_kind == "MapEstimate":
-        pool = ndli.build_map_estimate_pool(posterior, chunks, device, vista_device, eval_cfg,
-                                            pool_mode=pool_mode)
+        pool, labels = ndli.build_map_estimate_pool(posterior, chunks, device, vista_device,
+                                                    eval_cfg, pool_mode=pool_mode,
+                                                    chunk_labels=chunk_labels)
     else:
-        pool = ndli.build_posterior_sample_pool(
+        pool, labels = ndli.build_posterior_sample_pool(
             posterior, chunks, device, vista_device, n_per_chunk=n_per,
-            theta_prex_batch_size=eval_cfg.theta_prex_batch_size, pool_mode=pool_mode)
-    ndli.save_pool(cache, pool, prov)
+            theta_prex_batch_size=eval_cfg.theta_prex_batch_size, pool_mode=pool_mode,
+            chunk_labels=chunk_labels)
+    labels["kinds"] = kinds                         # the shared name array kind_index indexes into
+    ndli.save_pool(cache, pool, prov, labels=labels)
     return pool, f"computed on GPU + cached ({cache.name})"
 
 
@@ -210,15 +228,20 @@ def _emit_pool_shard(args, R, topo, out_dir, n_frames, step_frames, n_per, eval_
     (exact and order-independent; percentiles / fits do not depend on draw order)."""
     posterior, device, vista_device = _load_posterior(R)
     kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
-    chunks, _ = _read_all_chunks(R, kinds, args.experiment_span_seconds, n_frames,
-                                 step_frames, args.max_cells, topo=topo)
+    chunks, chunk_labels, _ = _read_all_chunks(R, kinds, args.experiment_span_seconds, n_frames,
+                                               step_frames, args.max_cells, topo=topo)
     if chunks:
-        partial = ndli.build_posterior_sample_pool(
+        partial, labels = ndli.build_posterior_sample_pool(
             posterior, chunks, device, vista_device, n_per_chunk=n_per,
-            theta_prex_batch_size=eval_cfg.theta_prex_batch_size, pool_mode=args.pool_mode)
+            theta_prex_batch_size=eval_cfg.theta_prex_batch_size, pool_mode=args.pool_mode,
+            chunk_labels=chunk_labels)
+        shard_arrays = {"pool": partial, "kind_index": labels["kind_index"],
+                        "cell": labels["cell"], "chunk": labels["chunk"]}
     else:
         partial = np.empty((0, len(R["imaging_keys"])), dtype=float)
-    path = save_shard(out_dir, topo, {"pool": partial}, count=partial.shape[0])
+        shard_arrays = {"pool": partial, "kind_index": np.empty(0, np.int64),
+                        "cell": np.empty(0, np.int64), "chunk": np.empty(0, np.int64)}
+    path = save_shard(out_dir, topo, shard_arrays, count=partial.shape[0])
     if path is None:
         print(f"[rank {topo.rank}/{topo.world_size}] no cells assigned -- no pool shard "
               f"written.", flush=True)
@@ -247,11 +270,15 @@ def _merge_pool_shards(R, args, out_dir, n_per):
                          f"Remove the stale _shard_*.npz and re-run the sharded --emit-template.")
     print(f"Merging {len(shard_paths)} pool shard file(s) from {out_dir}", flush=True)
     try:
-        merged, n_used = merge_shard_arrays(shard_paths, concat_keys=["pool"])
+        merged, n_used = merge_shard_arrays(
+            shard_paths, concat_keys=["pool", "kind_index", "cell", "chunk"])
     except ValueError:
         raise SystemExit(f"--merge: every pool shard in {out_dir} was empty (no draws)")
     pool = merged["pool"]
-    ndli.save_pool(cache, pool, prov)
+    kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+    labels = {"kind_index": merged["kind_index"], "cell": merged["cell"],
+              "chunk": merged["chunk"], "kinds": kinds}    # labels travel with their rows through the merge
+    ndli.save_pool(cache, pool, prov, labels=labels)
     for shard_path in shard_paths:
         shard_path.unlink()
     try:
@@ -455,8 +482,104 @@ def _write_nuisance_report(nu, R, art, n_draws=10000):
     return report_dir
 
 
+def _migrate_pool_labels(args, R):
+    """CPU-only maintenance: add per-row kind_index/cell/chunk labels to an EXISTING (legacy)
+    PosteriorSample pool by borrowing the aligned labels from the Detector Experiment MAP output,
+    after verifying the two share a window ordering. Backs up the original first; a pool that is
+    already labeled is left unchanged. Preserves the pool's provenance verbatim, so its cache
+    freshness (and therefore the no-GPU reuse by --build) is unaffected."""
+    from scipy.spatial.distance import pdist, squareform
+
+    alias = R["paths"].project_alias
+    pool_path = ndli.pool_cache_path(R["posit_dir"], alias, R["timing_label"], "PosteriorSample")
+    stem = R["paths"].experiment_recovery_pattern.format(project_alias=alias,
+                                                         timing_label=R["timing_label"])
+    map_path = R["posit_dir"] / stem / f"{stem}.npz"
+
+    if args.dry_run:
+        labeled = pool_path.exists() and ndli.load_pool_labels(pool_path) is not None
+        print("[DRY RUN] --migrate-pool-labels would add per-row kind_index/cell/chunk to the pool:")
+        print(f"    pool        : {pool_path}  [{'OK' if pool_path.exists() else 'MISSING'}"
+              f"{'; ALREADY LABELED (no-op)' if labeled else ''}]")
+        print(f"    MAP labels  : {map_path}  [{'OK' if map_path.exists() else 'MISSING'}]")
+        print(f"    checks      : rows == n_windows*n_per_chunk; index alignment beats a random shuffle (>= 4x)")
+        print(f"    writes      : back up -> {pool_path.name}.bak, then re-save the labeled pool")
+        return
+
+    if not pool_path.exists():
+        raise FileNotFoundError(f"PosteriorSample pool not found:\n    {pool_path}")
+    if ndli.load_pool_labels(pool_path) is not None:
+        print(f"Pool already carries labels (pool_format_version present); nothing to migrate:\n"
+              f"    {pool_path}")
+        return
+    if not map_path.exists():
+        raise FileNotFoundError(
+            f"Detector Experiment MAP output not found (the label source):\n    {map_path}\n"
+            f"Run the Detector Experiment stage first, or regenerate the pool with the labeled build.")
+
+    with np.load(str(pool_path), allow_pickle=False) as d:
+        pool = np.asarray(d["pool"], dtype=float)
+        prov = json.loads(str(d["provenance"]))          # preserved verbatim (freshness-critical)
+    with np.load(str(map_path), allow_pickle=False) as d:
+        inferred = np.asarray(d["inferred_log10"], dtype=float)
+        kind_index_w = np.asarray(d["kind_index"], dtype=np.int64)
+        cell_w = np.asarray(d["cell"], dtype=np.int64)
+        chunk_w = np.asarray(d["chunk"], dtype=np.int64)
+        kinds = np.asarray(d["kinds"])
+
+    n_per = int(prov["n_per_chunk"]); n_win = inferred.shape[0]; dim = pool.shape[1]
+    if pool.shape[0] != n_win * n_per:
+        raise SystemExit(
+            f"--migrate-pool-labels: pool rows {pool.shape[0]} != n_windows*n_per_chunk "
+            f"({n_win}*{n_per}={n_win * n_per}); the pool and the MAP output are not from the same "
+            f"run. Regenerate the pool with the labeled build instead.")
+
+    # Verify the pool is index-aligned with the MAP output before borrowing labels. Each window's
+    # medoid (the per-window SGM of its draws) is a NOISY stand-in for that window's optimized MAP --
+    # they diverge for broad posteriors -- so a tight per-window match is the wrong test. Instead we
+    # require the index alignment to strongly beat a random shuffle: a genuine window-for-window
+    # correspondence does so by a wide margin (its distances stay far below the shuffle's), while a
+    # wrong ordering cannot. In prior-range-normalized absolute space.
+    lo = np.array(det.theta_lower_bound()); hi = np.array(det.theta_upper_bound())
+    range_abs = 10.0 ** hi - 10.0 ** lo
+    pool_win = pool.reshape(n_win, n_per, dim)
+    med = np.empty((n_win, dim))
+    for w in range(n_win):
+        m = (10.0 ** pool_win[w]) / range_abs
+        med[w] = pool_win[w][int(np.argmin(squareform(pdist(m)).sum(0)))]
+    med_n = (10.0 ** med) / range_abs
+    inf_n = (10.0 ** inferred) / range_abs
+    d_index = np.linalg.norm(med_n - inf_n, axis=1)
+    shuffle_rng = np.random.default_rng(0)
+    shuffle = np.concatenate([np.linalg.norm(med_n - inf_n[shuffle_rng.permutation(n_win)], axis=1)
+                              for _ in range(50)])
+    ratio = float(np.median(d_index) / np.median(shuffle))
+    align_max = 0.25                                        # require a >=4x separation from chance
+    if ratio > align_max:
+        raise SystemExit(
+            f"--migrate-pool-labels: alignment check FAILED -- index-aligned median distance "
+            f"{np.median(d_index):.4f} is not far below the random-shuffle median "
+            f"{np.median(shuffle):.4f} (ratio {ratio:.3f} > {align_max}); the pool and the MAP "
+            f"output do not share a window ordering. Regenerate the pool with the labeled build.")
+
+    labels = {"kind_index": np.repeat(kind_index_w, n_per), "cell": np.repeat(cell_w, n_per),
+              "chunk": np.repeat(chunk_w, n_per), "kinds": kinds}
+    backup = pool_path.with_suffix(pool_path.suffix + ".bak")
+    shutil.copy2(str(pool_path), str(backup))
+    ndli.save_pool(pool_path, pool, prov, labels=labels)   # provenance unchanged -> cache still fresh
+    kinds_list = list(kinds)
+    n_alp = int((labels["kind_index"] == kinds_list.index("ALP")).sum()) if "ALP" in kinds_list else 0
+    print(f"Migrated pool labels. Alignment: index-median {np.median(d_index):.4f} vs shuffle-median "
+          f"{np.median(shuffle):.4f} (ratio {ratio:.3f}). Backup: {backup.name}")
+    print(f"    labeled pool: {pool_path}")
+    print(f"    rows: {pool.shape[0]}  windows: {n_win}  n_per_chunk: {n_per}  ALP rows: {n_alp}")
+
+
 def main(args):
     R = _resolve(args.total_time_seconds)
+    if args.migrate_pool_labels:
+        _migrate_pool_labels(args, R)
+        return
     (_build if args.build else _emit_template)(args, R)
 
 
@@ -497,6 +620,12 @@ def parse_args(argv):
                         "workers finish. Single-GPU emit runs never use it (they build directly).")
     p.add_argument("--dry-run", action="store_true",
                    help="resolve paths and report what would be read/written; load nothing, compute nothing.")
+    p.add_argument("--migrate-pool-labels", action="store_true",
+                   help="CPU-only maintenance: add per-row kind_index/cell/chunk labels to an existing "
+                        "(legacy) PosteriorSample pool by borrowing them from the Detector Experiment "
+                        "MAP output, after verifying the two share a window ordering. Backs up the "
+                        "original; an already-labeled pool is left unchanged. No GPU or estimator; "
+                        "independent of --emit-template/--build.")
     return p.parse_args(argv)
 
 

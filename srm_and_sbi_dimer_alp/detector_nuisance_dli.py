@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 SPEC_SUFFIX = "_Nuisance_DLI_Spec.toml"      # the user-authored spec (analysis-emitted)
 ARTIFACT_SUFFIX = "_Nuisance_DLI.npz"        # the built, samplable Nuisance_DLI artifact
 ARTIFACT_FORMAT_VERSION = 2                  # v2: posterior_sample_pool_choice scheme
+POOL_FORMAT_VERSION = 1                      # v1: pool cache carries per-row kind_index/cell/chunk labels
 
 POOL_CHOICES = ("raw", "map_estimate_pool", "gaussian", "box", "box_user")
 POOL_MODES = ("bounded", "unrestricted")
@@ -231,7 +232,8 @@ class NuisanceDLI:
 # Pool construction (analysis --build; needs the estimator + GPU)
 # =============================================================================
 def build_posterior_sample_pool(posterior, chunks, device, vista_device, *,
-                                 n_per_chunk, theta_prex_batch_size, pool_mode):
+                                 n_per_chunk, theta_prex_batch_size, pool_mode,
+                                 chunk_labels=None):
     """Draw ``n_per_chunk`` posterior samples per chunk and pool them, shape ``(N, D)``.
 
     Uses the Evaluation/Experiment candidate sampler (`collect_theta_prex`) conditioned on
@@ -239,31 +241,50 @@ def build_posterior_sample_pool(posterior, chunks, device, vista_device, *,
     and concatenates the draws over every chunk of every recording. The result is a mixture
     over the real acquisitions — the empirical calibrated-imaging distribution. Each draw is
     a whole parameter vector, so the joint correlation structure is retained in the pool.
-    """
+
+    Returns ``(pool, labels)``. ``labels`` is ``None`` unless ``chunk_labels`` (one
+    ``(kind_index, cell, chunk)`` tuple per chunk, aligned to ``chunks``) is given, in which
+    case it is the per-row ``{"kind_index", "cell", "chunk"}`` dict expanded to each chunk's
+    ACTUAL draw count — so it stays row-aligned even if bounded rejection yields a variable
+    number of accepted draws per chunk."""
     import torch
     from .evaluation import collect_theta_prex
     from .inference_support import normalize_video
 
-    pieces = []
-    for chunk in chunks:
+    pieces, ki, ce, ch = [], [], [], []
+    for i, chunk in enumerate(chunks):
         omega = torch.tensor(normalize_video(chunk), dtype=torch.float32, device=device)
         cond = omega.unsqueeze(0)
         posterior.set_default_x(cond)
         flow = posterior.posterior_estimator
         drawn = collect_theta_prex(posterior, flow, vista_device, cond,
                                    n_per_chunk, theta_prex_batch_size, pool_mode)
-        pieces.append(drawn.detach().cpu().numpy())
+        arr = drawn.detach().cpu().numpy()
+        pieces.append(arr)
+        if chunk_labels is not None:
+            k, c, h = chunk_labels[i]
+            ki.append(np.full(arr.shape[0], k, dtype=np.int64))
+            ce.append(np.full(arr.shape[0], c, dtype=np.int64))
+            ch.append(np.full(arr.shape[0], h, dtype=np.int64))
     if not pieces:
         raise ValueError("no experimental chunks were provided; the posterior_sample_pool "
                          "is empty (check the experimental recordings and windowing).")
-    return np.concatenate(pieces, axis=0)
+    pool = np.concatenate(pieces, axis=0)
+    labels = (None if chunk_labels is None
+              else {"kind_index": np.concatenate(ki), "cell": np.concatenate(ce),
+                    "chunk": np.concatenate(ch)})
+    return pool, labels
 
 
 def build_map_estimate_pool(posterior, chunks, device, vista_device, eval_cfg, *,
-                            pool_mode, log_fn=None):
+                            pool_mode, log_fn=None, chunk_labels=None):
     """MAP-estimate each chunk (seed-then-optimize) and pool the per-chunk MAP vectors,
     shape ``(n_chunks, D)``. Uses `evaluation.map_estimate` with the shared Evaluation
-    hyperparameters, so the point estimates match the Detector Experiment stage."""
+    hyperparameters, so the point estimates match the Detector Experiment stage.
+
+    Returns ``(pool, labels)`` -- one MAP vector per chunk; ``labels`` (when ``chunk_labels``,
+    one ``(kind_index, cell, chunk)`` per chunk, is given) is the per-window
+    ``{"kind_index", "cell", "chunk"}`` dict, row-aligned to the ``(n_chunks, D)`` pool."""
     from .evaluation import map_estimate
 
     lr = (eval_cfg.learning_rate if eval_cfg.learning_rate
@@ -284,7 +305,12 @@ def build_map_estimate_pool(posterior, chunks, device, vista_device, eval_cfg, *
     if not pieces:
         raise ValueError("no experimental chunks were provided; the map_estimate_pool is "
                          "empty (check the experimental recordings and windowing).")
-    return np.stack(pieces, axis=0)
+    pool = np.stack(pieces, axis=0)
+    labels = (None if chunk_labels is None
+              else {"kind_index": np.asarray([lbl[0] for lbl in chunk_labels], dtype=np.int64),
+                    "cell": np.asarray([lbl[1] for lbl in chunk_labels], dtype=np.int64),
+                    "chunk": np.asarray([lbl[2] for lbl in chunk_labels], dtype=np.int64)})
+    return pool, labels
 
 
 # =============================================================================
@@ -356,17 +382,37 @@ def pool_provenance(*, pool_mode, n_per_chunk, span_seconds, chunk_step_seconds,
     }
 
 
-def save_pool(path, pool, provenance):
-    """Persist a pool matrix + its provenance to ``path`` (compressed ``.npz``)."""
+def save_pool(path, pool, provenance, *, labels=None):
+    """Persist a pool matrix + its provenance to ``path`` (compressed ``.npz``).
+
+    When ``labels`` is given -- a ``{"kind_index", "cell", "chunk", "kinds"}`` dict of the
+    per-row condition and time-window (cell, sliding-window chunk) fields row-aligned to
+    ``pool`` (``kinds`` is the shared name array ``kind_index`` indexes into) -- the pool
+    becomes self-describing and is stamped with ``pool_format_version``. Omitting ``labels``
+    writes the legacy label-less layout, so an un-upgraded caller is unaffected."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(str(path), pool=np.asarray(pool, dtype=float),
-                        provenance=np.asarray(json.dumps(provenance, sort_keys=True)))
+    arrays = {"pool": np.asarray(pool, dtype=float),
+              "provenance": np.asarray(json.dumps(provenance, sort_keys=True))}
+    if labels is not None:
+        n = arrays["pool"].shape[0]
+        for key in ("kind_index", "cell", "chunk"):
+            col = np.asarray(labels[key])
+            if col.shape[0] != n:
+                raise ValueError(
+                    f"save_pool: labels['{key}'] length {col.shape[0]} != pool rows {n}.")
+            arrays[key] = col.astype(np.int64)
+        arrays["kinds"] = np.asarray(labels["kinds"])
+        arrays["pool_format_version"] = np.asarray(POOL_FORMAT_VERSION)
+    np.savez_compressed(str(path), **arrays)
 
 
 def load_pool_if_fresh(path, provenance):
     """Return the cached pool iff ``path`` exists and its stored provenance matches
-    ``provenance`` exactly; otherwise ``None`` (missing or stale -> caller recomputes)."""
+    ``provenance`` exactly; otherwise ``None`` (missing or stale -> caller recomputes).
+
+    Returns the pool matrix only; per-row labels (when present) are read separately via
+    :func:`load_pool_labels`, since a representation fit does not need them."""
     path = Path(path)
     if not path.exists():
         return None
@@ -375,6 +421,21 @@ def load_pool_if_fresh(path, provenance):
         if stored == provenance:
             return data["pool"]
     return None
+
+
+def load_pool_labels(path):
+    """Return the pool cache's per-row labels dict (``kind_index``, ``cell``, ``chunk``,
+    ``kinds``, ``pool_format_version``) for a self-describing (labeled) pool, else ``None``
+    for a legacy label-less pool. Reads only the small label arrays, not the pool matrix."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    with np.load(str(path), allow_pickle=False) as data:
+        if "pool_format_version" not in data.files:
+            return None
+        return {"kind_index": data["kind_index"], "cell": data["cell"],
+                "chunk": data["chunk"], "kinds": data["kinds"],
+                "pool_format_version": int(data["pool_format_version"])}
 
 
 # =============================================================================

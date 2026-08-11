@@ -5,6 +5,53 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.6 - 2026-08-11
+
+The Detector's calibrated-imaging pool is now **self-describing**, and the Sample Geometric Median
+analysis tool reads that structure. The posterior-sample / MAP pool cache previously stored only a
+flat `(N, D)` matrix and a global provenance dict, so its window→condition mapping was purely
+positional -- an unstored artifact of the build's `(kind, cell)` enumeration and round-robin sharding
+-- and could not be filtered from the file alone. The pool now persists, per row, the condition
+(`kind_index` into `kinds`) and the time-window position (`cell`, `chunk`), stamped with a
+`pool_format_version`, so a consumer can restrict it by condition or acquisition directly. The SGM tool
+consumes those labels, sources the real optimized MAP estimates rather than a silent stand-in, and
+offers the per-window SGM of the draws as an explicit named option.
+
+### Added
+
+- **`SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI_Sample_Geometric_Median.py`** (+ companion `.md`) — a
+  post-hoc, CPU-only analysis that reduces the calibrated imaging pool to its **Sample Geometric Median**
+  (the correlation-preserving median *vector* -- an actual pool member -- Ramirez Sierra & Sokolowski,
+  *Mach. Learn.: Sci. Technol.* 2025), computed in absolute space normalized by the absolute prior range,
+  and contrasts it with the per-dimension vector of medians for the full pool and the in-box subcollection,
+  with the out-of-prior mass, the joint correlation matrix, and deterministic figures.
+- **Self-describing pool cache.** `detector_nuisance_dli.save_pool(..., labels=)` persists per-row
+  `kind_index` / `cell` / `chunk` + the `kinds` name array + `pool_format_version` (1);
+  `load_pool_labels()` reads them back (or `None` for a legacy pool). `build_posterior_sample_pool` /
+  `build_map_estimate_pool` now return `(pool, labels)`, and the Nuisance_DLI build threads each
+  chunk's `(kind, cell, chunk)` identity from `_read_all_chunks` through both the single-process and
+  the sharded paths (the labels travel with their rows through the round-robin shard/merge).
+- **`--migrate-pool-labels`** — a CPU-only maintenance mode on the Nuisance_DLI analysis script that
+  adds the per-row labels to an existing (legacy) posterior-sample pool by borrowing the aligned labels
+  from the Detector Experiment MAP output, after verifying the two share a window ordering (the
+  index-aligned distance must strongly beat a random shuffle). Backs up the original; preserves the
+  pool provenance verbatim so its cache freshness (and no-GPU reuse by `--build`) is unaffected; idempotent.
+- **SGM tool `--condition {pooled, ALP, BET}`** — restrict the collection to one experimental condition
+  (ALP = MET-FAB monomer control, BET = MET-INLB dimer) via the pool's own per-row labels before the
+  summary; a real condition on an unlabeled collection is a loud error, not a silent full-pool summary.
+  **`--map-source {experiment, window-sgm}`** — for `--collection map`, choose the real optimized MAPs
+  (a MapEstimate pool cache, else the Detector Experiment MAP output) or the per-window Sample Geometric
+  Median of the posterior draws.
+
+### Changed
+
+- **SGM tool `--collection` now defaults to `map`** (was `posterior`).
+- **The `map` collection no longer silently falls back to a proxy.** The former per-window medoid
+  "proxy" is the per-window Sample Geometric Median; it is now the explicit `--map-source window-sgm`
+  choice, and `--map-source experiment` errors loudly when neither real-MAP source exists rather than
+  substituting a stand-in. The report records the condition and the resolved MAP source, and drops the
+  between-condition (Simpson's paradox) correlation caveat when a single condition is selected.
+
 ## 0.4.5 - 2026-08-09
 
 The two mirrored workflows -- **biology** (infers the reaction-diffusion parameters;
