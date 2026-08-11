@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.11 - 2026-08-11
+
+Design note for a planned matched-imaging embedding validation, and a stale cross-reference fix.
+
+### Added
+
+- **`PROJECT_CONTEXT.md` §7 — matched-imaging embedding validation (planned).** Documents the future
+  read-only analysis that renders synthetic videos at the inferred imaging with receptor counts and
+  diffusion pinned to the experimental data — counts from the localization density corrected for the
+  emitter on-fraction, diffusion from tracked trajectories by mean-squared displacement — then reuses
+  the embedding-distance two-sample machinery (MMD / C2ST) against the experimental recordings,
+  isolating imaging realism at the calibrated operating point rather than the prior-averaged realism
+  the prior-spanning reference reports.
+
+### Fixed
+
+- **`PROJECT_CONTEXT.md` §7 — cross-reference.** Corrected "real-versus-synthetic" to
+  "experimental-versus-synthetic", matching the `DETECTOR_WORKFLOW.md` §8 heading and the standard
+  terminology. Prose only.
+
+## 0.4.10 - 2026-08-11
+
+Documentation consistency fix in the Detector workflow reference.
+
+### Fixed
+
+- **`DETECTOR_WORKFLOW.md` §6.3 — `gamma` prior corrected.** The prose stated the `gamma` prior as
+  `(1.59, 1.64)`; corrected to `(1.62, 1.625)` to match the authoritative §6.2 camera table (log10
+  `(1.62, 1.625)` → 41.7–42.2 ADU/e⁻) and `detector_parameterization.py`. Prose only — `gamma` is a
+  marginalized camera nuisance, so no calibration result changes.
+
 ## 0.4.9 - 2026-08-11
 
 The Posterior-Predictive Video **viewer notebook** now shares one color limit across the experimental

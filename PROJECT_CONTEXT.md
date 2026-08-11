@@ -757,8 +757,8 @@ periodic/post-hoc rather than per-epoch.
 **Scope.** All of the above measure **in-distribution** generalization — to new
 draws from the same prior-predictive. Out-of-distribution / real-data
 generalization is a different question, answered by coverage under model
-misspecification, the embedding-space real-versus-synthetic distance (MMD / C2ST,
-in `DETECTOR_WORKFLOW.md`, "Quantitative real-versus-synthetic distance"), and
+misspecification, the embedding-space experimental-versus-synthetic distance (MMD / C2ST,
+in `DETECTOR_WORKFLOW.md`, "Quantitative experimental-versus-synthetic distance"), and
 posterior-predictive checks; misspecification-robust simulation-based inference
 (Ward et al. 2022; Kelly et al. 2023 — pending independent verification) is the
 relevant literature.
@@ -776,6 +776,54 @@ Posterior Estimators (TARP)*, ICML; Linhart et al. (2023), *L-C2ST*, NeurIPS (on
 the classifier two-sample test of Lopez-Paz & Oquab 2017); and, pending
 independent verification, Ward et al. (2022) and Kelly et al. (2023) on
 misspecification-robust neural posterior estimation.
+
+### Matched-imaging embedding validation (planned)
+
+The embedding-space experimental-versus-synthetic distance introduced above
+(detailed in `DETECTOR_WORKFLOW.md`) compares the experimental recordings against
+the held-out EVAL set, which spans the entire imaging prior. Because the
+experimental recordings sit at a single imaging setting while the synthetic
+reference is broad, the experimental embeddings form a tight cluster nested inside
+the diffuse synthetic cloud, and a two-sample classifier separates the two by
+concentration alone — even where their supports overlap. That separation is a
+breadth artifact of a prior-spanning reference, not evidence that the experimental
+recordings lie off the synthetic manifold. Isolating imaging realism at the
+calibrated operating point requires a synthetic reference generated at the
+inferred imaging, not across the prior.
+
+A planned analysis supplies it: render synthetic videos with the imaging fixed to
+the inferred values and the receptor counts and diffusion pinned to the
+experimental data, then measure the same embedding distance against the
+experimental recordings. The obstacle is that the Detector marginalizes the
+reaction-diffusion block — particle counts and diffusion coefficients — so it
+never estimates them for any single recording; they are learned only implicitly. A
+matched render must therefore obtain them from outside the Detector.
+
+Until the RDS estimator exists, that external source is the single-molecule
+localization data (accession S-BSST712). Per-condition receptor counts come from
+the localization density, corrected upward for the emitter on-fraction: the
+localizations per frame undercount the receptors, both because dim or overlapping
+emitters are missed and because a fraction of emitters are dark or bleached at any
+instant. The bleached fraction follows from the calibrated photobleaching
+probability through the fixed hundred-frame survival law; the blinking rate enters
+only to second order, since the dimmest non-dark brightness state lies above the
+localizer's photon-acceptance floor and flicker therefore does not manufacture
+apparent darkness. Diffusion coefficients come from the tracked trajectories by
+mean-squared displacement (`MSD(τ) = 4·D·τ` for two-dimensional free diffusion,
+reported in µm²/s). Once the RDS estimator is trained it supplies the counts and
+diffusion directly, closing the loop without the localization step.
+
+The analysis reuses the existing machinery end to end — the reaction-diffusion
+simulation at the pinned counts and diffusion, the imaging renderer driven by one
+fixed inferred-imaging vector, and the embedding together with the
+maximum-mean-discrepancy and classifier two-sample statistics of the
+embedding-distance analysis — replacing only the synthetic reference, from
+prior-spanning to a single operating point. The interpretation shifts accordingly:
+a residual distance then measures model-versus-data mismatch at the calibrated
+imaging, rather than the prior-averaged realism the broad reference reports. Like
+the flicker-rate derivation drawn from the same localization data, it is a
+read-only post-hoc utility rather than a pipeline stage, and gains its own
+companion note when it ships.
 
 ### Observability and diagnostics
 
