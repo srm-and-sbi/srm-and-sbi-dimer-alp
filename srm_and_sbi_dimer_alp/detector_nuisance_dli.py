@@ -62,17 +62,22 @@ ARTIFACT_SUFFIX = "_Nuisance_DLI.npz"        # the built, samplable Nuisance_DLI
 ARTIFACT_FORMAT_VERSION = 2                  # v2: posterior_sample_pool_choice scheme
 POOL_FORMAT_VERSION = 1                      # v1: pool cache carries per-row kind_index/cell/chunk labels
 
-POOL_CHOICES = ("raw", "map_estimate_pool", "gaussian", "box", "box_user")
+POOL_CHOICES = ("raw", "map_estimate_pool", "gaussian", "box", "box_user", "sgm_percentiles")
 POOL_MODES = ("bounded", "unrestricted")
 DEFAULT_BOX_QUANTILES = (0.05, 0.95)
-_EMPIRICAL = ("raw", "map_estimate_pool")    # stored as a sample matrix, resampled per-vector
+_EMPIRICAL = ("raw", "map_estimate_pool", "sgm_percentiles")  # stored as a sample matrix, resampled per-vector
 _BOX = ("box", "box_user")                   # stored as low/high, drawn as a per-param uniform
 
+# The sgm_percentiles selection (whole vectors at signed distance-to-SGM percentiles; p50 = the SGM).
+SGM_DEFAULT_PERCENTILES = [50.0]             # one percentile 50 -> the SGM alone (a frozen vector)
+SGM_SELECTION_SOURCES = ("experiment", "window-sgm")
+SGM_CONDITIONS = ("pooled", "ALP", "BET")
+
 # Which cached pool each choice draws on. raw/gaussian/box share the posterior-sample pool;
-# map_estimate_pool uses the MAP pool; box_user needs none. Caching keyed on this so switching
-# among raw/gaussian/box never recomputes, and each pool's GPU cost is paid at most once.
+# map_estimate_pool uses the MAP pool; box_user and sgm_percentiles need none (sgm_percentiles REUSES
+# already-computed data -- the Experiment MAP output, or the labeled posterior pool -- with no GPU).
 POOL_KINDS = {"raw": "PosteriorSample", "gaussian": "PosteriorSample", "box": "PosteriorSample",
-              "map_estimate_pool": "MapEstimate", "box_user": None}
+              "map_estimate_pool": "MapEstimate", "box_user": None, "sgm_percentiles": None}
 
 _ANALYSIS = "Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py"
 
@@ -354,6 +359,155 @@ def quantile_box(pool, quantiles, prior_low, prior_high):
 
 
 # =============================================================================
+# Sample Geometric Median + signed-percentile selection (shared: analysis tool + build)
+# =============================================================================
+_SGM_EXACT_MEDOID_CAPACITY = 20000   # above this, Weiszfeld's iteration + snap, not the exact medoid
+_SGM_WEISZFELD_ITERS = 2000
+
+
+def sample_geometric_median(vecs_abs, range_abs):
+    """Index (and method) of the collection member closest to the geometric median, in prior-range-
+    normalized absolute space -- the correlation-preserving median VECTOR (an actual member, so its
+    joint correlations are intact). Exact medoid when tractable, else Weiszfeld's iteration snapped
+    to the nearest member. (Ramirez Sierra & Sokolowski 2025; see DETECTOR_WORKFLOW.md.)"""
+    from scipy.spatial.distance import pdist, squareform     # lazy: keep the sampling path numpy-only
+    m = np.asarray(vecs_abs, dtype=float) / range_abs
+    if m.shape[0] <= _SGM_EXACT_MEDOID_CAPACITY:
+        return int(np.argmin(squareform(pdist(m)).sum(0))), "exact_medoid"
+    y = m.mean(0)
+    for _ in range(_SGM_WEISZFELD_ITERS):
+        dist = np.maximum(np.linalg.norm(m - y, axis=1), 1e-12)
+        weight = 1.0 / dist
+        y_next = (weight[:, None] * m).sum(0) / weight.sum()
+        if np.linalg.norm(y_next - y) < 1e-10:
+            y = y_next
+            break
+        y = y_next
+    return int(np.argmin(np.linalg.norm(m - y, axis=1))), "weiszfeld_snap"
+
+
+def _per_window_sgm_labeled(flat_log, labels, range_abs):
+    """Per-window Sample Geometric Median (medoid of each window's draws) from a labeled pool,
+    grouping the window-major flat pool into windows by its (kind_index, cell, chunk) labels.
+    Returns (vectors_log (n_win, D), kind_index (n_win,), kinds list)."""
+    keys = np.stack([np.asarray(labels["kind_index"]), np.asarray(labels["cell"]),
+                     np.asarray(labels["chunk"])], axis=1)
+    bounds = np.concatenate([[0], np.where(np.any(keys[1:] != keys[:-1], axis=1))[0] + 1,
+                             [keys.shape[0]]])
+    n_win = bounds.shape[0] - 1
+    out = np.empty((n_win, flat_log.shape[1]))
+    ki = np.empty(n_win, np.int64)
+    for w in range(n_win):
+        rows = flat_log[bounds[w]:bounds[w + 1]]
+        idx, _ = sample_geometric_median(10.0 ** rows, range_abs)
+        out[w] = rows[idx]
+        ki[w] = keys[bounds[w]][0]
+    return out, ki, list(labels["kinds"])
+
+
+def select_signed_percentile_vectors(vecs_log, percentiles, prior_low, prior_high, *,
+                                     brightness_index=2):
+    """Select whole vectors at the given percentiles along the SIGNED distance-to-SGM coordinate.
+
+    Construction (documented in DETECTOR_WORKFLOW.md and the Nuisance_DLI note): in prior-range-
+    normalized absolute space, the magnitude is the distance to the Sample Geometric Median ``g``
+    (the correlation-preserving median vector), and the sign is the side of ``g`` along the cloud's
+    main axis of variation (PC1 of the ``g``-centered points, oriented toward increasing brightness
+    ``mu_pc`` -- dim/narrow -> bright/wide). So ``p50`` is exactly ``g``; ``p < 50`` walks the negative
+    (dim/narrow) side to the extreme at ``p=0``; ``p > 50`` walks the positive (bright/wide) side to
+    the extreme at ``p=100``. Every returned vector is a real, whole member (correlations intact);
+    repeated percentiles (or a percentile on an empty side, which falls back to ``g``) collapse.
+    Returns ``(members_log (M, D), provenance)``."""
+    vecs_log = np.asarray(vecs_log, dtype=float)
+    lo, hi = np.asarray(prior_low, float), np.asarray(prior_high, float)
+    range_abs = 10.0 ** hi - 10.0 ** lo
+    x = (10.0 ** vecs_log) / range_abs                        # normalized absolute space
+    g_idx, method = sample_geometric_median(10.0 ** vecs_log, range_abs)
+    d = x - x[g_idx]
+    if x.shape[0] > 1:                                         # main axis: PC1 of the SGM-centered cloud
+        evals, evecs = np.linalg.eigh(np.atleast_2d(np.cov(d, rowvar=False)))
+        u = evecs[:, int(np.argmax(evals))]
+        if u[brightness_index] < 0:                           # orient toward increasing brightness
+            u = -u
+    else:
+        u = np.zeros(x.shape[1])
+    s = np.sign(d @ u) * np.linalg.norm(d, axis=1)            # signed distance-to-SGM (g -> 0)
+    neg_idx = np.where(s < 0)[0][np.argsort(s[s < 0])]        # most-negative -> nearest-below
+    pos_idx = np.where(s > 0)[0][np.argsort(s[s > 0])]        # nearest-above -> most-positive
+    picks, seen, notes = [], set(), []
+    for p in percentiles:
+        p = float(p)
+        if abs(p - 50.0) < 1e-9:
+            j = g_idx
+        elif p < 50.0:
+            if neg_idx.size == 0:
+                j = g_idx; notes.append(f"p{p:g}: no vectors below the SGM -> SGM")
+            else:
+                j = int(neg_idx[int(round((p / 50.0) * (neg_idx.size - 1)))])
+        else:
+            if pos_idx.size == 0:
+                j = g_idx; notes.append(f"p{p:g}: no vectors above the SGM -> SGM")
+            else:
+                j = int(pos_idx[int(round(((p - 50.0) / 50.0) * (pos_idx.size - 1)))])
+        if j not in seen:
+            seen.add(j)
+            picks.append((p, j))
+    members = np.stack([vecs_log[j] for _, j in picks], axis=0)
+    provenance = {
+        "selection": "sgm_percentiles",
+        "percentiles": [float(p) for p in percentiles],
+        "percentile_of_member": [float(p) for p, _ in picks],
+        "member_rows": [int(j) for _, j in picks],
+        "sgm_row": int(g_idx), "sgm_method": method,
+        "axis": f"PC1 oriented toward increasing parameter index {brightness_index} (mu_pc)",
+        "n_source": int(x.shape[0]), "notes": notes,
+    }
+    return members, provenance
+
+
+def load_map_vectors(experiment_map_path, posterior_pool_path, *, source, condition,
+                     prior_low, prior_high):
+    """Load condition-labeled per-window MAP vectors for the selection, REUSING already-computed
+    data (no GPU). ``source='experiment'`` reuses the Detector Experiment MAP output
+    (``inferred_log10`` + ``kind_index``/``kinds``); ``source='window-sgm'`` computes the per-window
+    Sample Geometric Median from the labeled posterior-sample pool. Then restricts to ``condition``
+    (``pooled``/``ALP``/``BET``) via the labels. Returns ``(vectors_log (n_win, D), source_label)``."""
+    range_abs = 10.0 ** np.asarray(prior_high, float) - 10.0 ** np.asarray(prior_low, float)
+    if source == "experiment":
+        p = Path(experiment_map_path)
+        if not p.exists():
+            raise FileNotFoundError(
+                f"sgm_percentiles selection_source='experiment' needs the Detector Experiment MAP "
+                f"output:\n    {p}\nRun the Detector Experiment stage first (it is the reused source).")
+        with np.load(str(p), allow_pickle=False) as d:
+            vecs = np.asarray(d["inferred_log10"], dtype=float)
+            kind_index = np.asarray(d["kind_index"])
+            kinds = list(np.asarray(d["kinds"]))
+        label = f"Experiment MAP ({p.name})"
+    elif source == "window-sgm":
+        p = Path(posterior_pool_path)
+        labels = load_pool_labels(p)
+        if labels is None:
+            raise FileNotFoundError(
+                f"sgm_percentiles selection_source='window-sgm' needs the labeled posterior-sample "
+                f"pool:\n    {p}\nBuild it (--emit-template) or migrate it (--migrate-pool-labels).")
+        flat = np.asarray(np.load(str(p), allow_pickle=False)["pool"], dtype=float)
+        vecs, kind_index, kinds = _per_window_sgm_labeled(flat, labels, range_abs)
+        label = f"window-SGM of the posterior pool ({p.name})"
+    else:
+        raise ValueError(f"unknown selection_source {source!r} (use 'experiment' or 'window-sgm').")
+    if condition != "pooled":
+        if condition not in kinds:
+            raise ValueError(f"condition {condition!r} is not among the source kinds {kinds}.")
+        mask = kind_index == kinds.index(condition)
+        if not mask.any():
+            raise ValueError(f"condition {condition!r}: the source has no MAP vectors for it.")
+        vecs = vecs[mask]
+        label += f", condition {condition}"
+    return vecs, label
+
+
+# =============================================================================
 # Pool cache — separate the expensive GPU pool from the cheap per-choice representation
 # =============================================================================
 # A pool is expensive (embedding + sampling, or 1 MAP optimization per chunk); the choice
@@ -468,15 +622,30 @@ def emit_spec_template(path, imaging_keys, suggestions, *, pool_mode="bounded", 
         "#   gaussian          -> full-covariance Gaussian fit to the pool (linear correlations).",
         "#   box               -> per-parameter uniform over `box_quantiles` of the pool, clamped.",
         "#   box_user          -> per-parameter uniform over the [imaging.<KEY>] ranges below, clamped.",
+        "#   sgm_percentiles   -> whole real vectors at SIGNED distance-to-SGM percentiles. REUSES the",
+        "#                        Detector Experiment MAPs (or the labeled posterior pool); NO GPU. In",
+        "#                        prior-range-normalized absolute space: magnitude = distance to the",
+        "#                        Sample Geometric Median g (the median vector); sign = side of g along",
+        "#                        the cloud's main variation axis (PC1, toward brighter mu_pc). p50 = g",
+        "#                        EXACTLY (a frozen vector); p<50 walks the dim/narrow side to p=0, p>50",
+        "#                        the bright/wide side to p=100. Several percentiles -> a small,",
+        "#                        correlation-preserving marginalization pool. Set `percentiles`,",
+        "#                        `condition`, `selection_source` below.",
         "#",
         "# pool_mode matches Evaluation/Experiment: bounded (rejection within the prior) | unrestricted.",
         "# raw / map_estimate_pool / gaussian are NOT clipped; box / box_user clamp to the prior box.",
+        "# sgm_percentiles reuses already-computed data and ignores pool_mode.",
         f"# provenance (auto-filled, do not edit): {json.dumps(provenance or {}, sort_keys=True)}",
         "",
         "[block]",
-        'posterior_sample_pool_choice = "raw"   # raw | map_estimate_pool | gaussian | box | box_user',
+        'posterior_sample_pool_choice = "raw"   # raw|map_estimate_pool|gaussian|box|box_user|sgm_percentiles',
         f'pool_mode = "{pool_mode}"                  # bounded | unrestricted',
         f"box_quantiles = [{ql}, {qh}]                # used only by \"box\"",
+        "",
+        '# Read ONLY by "sgm_percentiles":',
+        'percentiles = [50]                       # 50 = the SGM (a single frozen vector); e.g. [5,25,50,75,95] = a 5-vector pool',
+        'condition = "pooled"                     # pooled | ALP (MET-FAB, monomer) | BET (MET-INLB, dimer)',
+        'selection_source = "experiment"          # experiment (reuse the Experiment MAPs) | window-sgm (posterior pool)',
         "",
         "# Per-parameter ranges are read ONLY by \"box_user\"; pre-filled with the pool's",
         f"# {int(ql * 100)}th/{int(qh * 100)}th percentiles as suggestions. Ignored by every other choice.",
@@ -542,6 +711,19 @@ def load_spec(path, imaging_keys, prior_low, prior_high):
                 raise ValueError(
                     f"{path}: [imaging.{k}] range [{lo}, {hi}] exceeds the imaging prior box "
                     f"[{bl[k]}, {bh[k]}] (log10); a Nuisance_DLI range must lie within it.")
+    if choice == "sgm_percentiles":
+        pct = block.get("percentiles", list(SGM_DEFAULT_PERCENTILES))
+        if (not isinstance(pct, (list, tuple)) or len(pct) == 0
+                or not all(isinstance(v, (int, float)) and 0.0 <= float(v) <= 100.0 for v in pct)):
+            raise ValueError(f"{path}: [block].percentiles must be a non-empty list of numbers in "
+                             f"[0, 100]; got {pct!r}.")
+        cond = block.get("condition", "pooled")
+        if cond not in SGM_CONDITIONS:
+            raise ValueError(f"{path}: [block].condition={cond!r} must be one of {SGM_CONDITIONS}.")
+        src = block.get("selection_source", "experiment")
+        if src not in SGM_SELECTION_SOURCES:
+            raise ValueError(f"{path}: [block].selection_source={src!r} must be one of "
+                             f"{SGM_SELECTION_SOURCES}.")
     return spec
 
 
@@ -572,7 +754,9 @@ def build_nuisance_dli(spec, imaging_keys, prior_low, prior_high, *, pool=None):
         raise ValueError(f"choice {choice!r} needs its pool (pass pool=...); only 'box_user' "
                          "builds without one.")
 
-    if choice in ("raw", "map_estimate_pool"):
+    if choice in ("raw", "map_estimate_pool", "sgm_percentiles"):
+        # sgm_percentiles: `pool` is the already-selected whole vectors (the SGM at p50, plus any
+        # signed-distance percentile members) -- the caller ran the selection; here it is just stored.
         return NuisanceDLI.from_samples(imaging_keys, pool, choice=choice, pool_mode=pool_mode,
                                         prior_low=prior_low, prior_high=prior_high)
     if choice == "gaussian":

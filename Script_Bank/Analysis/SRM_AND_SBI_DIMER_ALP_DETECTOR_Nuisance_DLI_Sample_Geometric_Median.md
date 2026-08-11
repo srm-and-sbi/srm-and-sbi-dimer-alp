@@ -1,16 +1,26 @@
 # Sample Geometric Median of a Nuisance_DLI pool — usage and interpretation
 
 Companion to `SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI_Sample_Geometric_Median.py`. The Detector calibrates
-the imaging model against experimental recordings and the calibration is stored as the `Nuisance_DLI`
-artifact — a cloud of imaging parameter vectors (the six photophysics parameters). This analysis reduces
-that cloud to a single representative vector while keeping its joint structure intact, and contrasts
-that vector with the naive per-dimension summary. This note explains what it computes, how to run it,
-and how to read the result, so it can be used and understood without reading the code.
+the imaging model against experimental recordings, producing a cloud of imaging parameter vectors (the six
+photophysics parameters) — realized as the posterior-sample pool, one MAP estimate per acquisition, or the
+built `Nuisance_DLI` artifact. This analysis reduces that cloud to a single representative vector while
+keeping its joint structure intact, and contrasts that vector with the naive per-dimension summary. This
+note explains what it computes, how to run it, and how to read the result, so it can be used and understood
+without reading the code.
 
-This is a post-hoc, user-driven analysis, not one of the canonical pipeline stages. It lives in
-`Script_Bank/Analysis`, is never wired into the stage dispatcher, and is complementary to the
-`Nuisance_DLI` construction step, which produces the artifact this consumes. It reads the built artifact
-only, so it needs neither the estimator nor a GPU — it runs on any machine. The design of the nuisance
+**This is a diagnostic, not the artifact-minting step.** It is a post-hoc, user-driven analysis, never
+wired into the stage dispatcher; it *reports* the Sample Geometric Median (against the per-dimension
+vector of medians) so a person can see where the calibrated imaging concentrates. It does **not**
+produce the `Nuisance_DLI` the biology production consumes. The **authoritative** step is the companion
+`SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py` (`--build`): that is where the imaging artifact is minted
+and enforced by a load gate, and its `sgm_percentiles` choice *mints* an artifact from this same Sample
+Geometric Median — a frozen vector at `[50]`, or a signed distance-to-SGM percentile pool. The two share
+one `sample_geometric_median` implementation, so the vector this analysis reports and the vector that
+choice freezes are identical: use this note to decide, and that build to commit.
+
+It reads only already-computed data — the built `Nuisance_DLI` artifact, the posterior-sample pool
+beside it, or the Detector Experiment MAP output, depending on the `--collection`/`--map-source` chosen
+below — so it needs neither the estimator nor a GPU and runs on any machine. The design of the nuisance
 it summarizes is in `DETECTOR_WORKFLOW.md`, section "Nuisance and artifact design"; the construction of
 the artifact is in the companion `SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.md` beside this note.
 
@@ -112,8 +122,9 @@ Arguments:
   itself is deterministic.
 - `--dry-run` — resolve paths and report what would be read and written; load nothing, compute nothing.
 
-If the artifact is absent the run stops with a message naming the `Nuisance_DLI` construction step to
-run first, rather than fabricating a summary.
+If the chosen source is absent — the artifact, the posterior-sample pool cache, or the Detector Experiment
+MAP output for the selected `--collection`/`--map-source` — the run stops with a located error naming what
+to run first, rather than fabricating a summary.
 
 ## Reading the result
 
@@ -131,7 +142,8 @@ value is its realizability rather than a density advantage; when they diverge, t
 names the joint structure the marginal summary broke. Pooled correlations can be inflated by a shift
 between subpopulations (Simpson's paradox), so a strong pooled correlation that weakens within a
 subpopulation is a sign the pool mixes distinct regimes — read the correlation matrix together with the
-out-of-prior mass, which flags whether the calibration is pressing against a prior bound.
+out-of-prior mass, which flags whether the calibration is pressing against a prior bound, and re-run with
+`--condition` to summarize within one regime and confirm.
 
 ## Visualization
 
@@ -154,8 +166,9 @@ Written to the Detector-namespaced `Posit/` subdirectory under the data bank (`<
 
 - `report.md` — the checks, the out-of-prior mass table, the SGM-versus-vector-of-medians table per
   variant (physical and log10), the typicality table, the joint correlation matrix, and the run
-  provenance (the artifact path, the representation choice and pool mode, the pool size and in-box
-  count, and the space convention).
+  provenance (the artifact path, the collection and — for a MAP collection — its `--map-source`, the
+  `--condition`, the representation choice and pool mode, the pool size and in-box count, and the space
+  convention).
 - `figures/` — the figures above.
 
 ## Caveats
@@ -168,12 +181,13 @@ Written to the Detector-namespaced `Posit/` subdirectory under the data bank (`<
   transform-invariant, the SGM computed here differs from one computed in log10 space; the physical
   space is chosen because the renderer consumes physical values. The vector of medians is unaffected by
   the choice, so a divergence between the two spaces is a property of the SGM alone.
-- **This summarizes the pool as delivered; it does not attribute the spread.** When a pool mixes
-  distinct acquisition regimes (for example a monomer condition and a dimer condition, which shift the
-  apparent width and brightness), a single representative vector averages across them. Splitting the pool by
-  regime requires the artifact's construction order and condition labels, which this general summary does
-  not reconstruct; the out-of-prior mass and the correlation matrix are the signals that such mixing is
-  present.
+- **A pooled summary averages across acquisition regimes; use `--condition` to separate them.** The pool
+  mixes a monomer condition and a dimer condition, which shift the apparent width and brightness, so a
+  single representative vector over the whole pool averages across them. The tool splits by regime
+  directly — `--condition ALP`/`BET` reads the collection's own per-row condition labels and summarizes
+  one condition alone — so the pooled out-of-prior mass and correlation matrix flag the mixing, and
+  `--condition` resolves it (the biology imaging is calibrated per condition; the monomer control, ALP,
+  is the reference).
 - **The tractability path does not change the answer's meaning.** For a large pool the geometric median
   is found by Weiszfeld's iteration and snapped to the nearest actual member rather than by an exhaustive
   pairwise search; both return a real pool member, and the report records which path was taken.

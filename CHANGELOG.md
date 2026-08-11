@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.7 - 2026-08-11
+
+The Nuisance_DLI build gains an **`sgm_percentiles`** choice that *mints* the imaging artifact from a
+central selection — a single **frozen** vector (the Sample Geometric Median), or a small,
+correlation-preserving **marginalization pool** — moving the selection out of the report-only analysis
+tool into the build itself. It **reuses the already-computed Detector Experiment MAPs** (or the labeled
+posterior pool via its per-window SGM), so it runs on the **CPU** with no GPU rebuild.
+
+### Added
+
+- **`sgm_percentiles` `posterior_sample_pool_choice`.** Selects whole real MAP vectors at percentiles
+  along a **signed distance-to-SGM** coordinate: the magnitude is the distance to the Sample Geometric
+  Median `g` (the correlation-preserving median vector); the sign is the side of `g` along the cloud's
+  main variation axis (PC1 of the `g`-centered points, oriented toward brighter `mu_pc`). So `p50` is
+  `g` exactly, `p<50` walks the dim/narrow side (to `p=0`), `p>50` the bright/wide side (to `p=100`).
+  `percentiles = [50]` freezes the imaging to the SGM; a list such as `[5,25,50,75,95]` gives a small
+  marginalization pool of real acquisitions with correlations intact. Spec fields: `percentiles`,
+  `condition` (`pooled`/`ALP`/`BET`), `selection_source` (`experiment` | `window-sgm`). CPU-only.
+- **Shared helpers in `detector_nuisance_dli`** — `sample_geometric_median` (now shared with the SGM
+  analysis tool), `select_signed_percentile_vectors`, `load_map_vectors`, `_per_window_sgm_labeled`.
+
+### Changed
+
+- **The SGM analysis tool uses the shared `ndli.sample_geometric_median`** (deduplicated; behavior
+  unchanged — it still reproduces the same values).
+- **Docs.** `DETECTOR_WORKFLOW.md` §7 (the six-choice table + the signed-percentile construction) and
+  the `Nuisance_DLI` / `Sample_Geometric_Median` companion notes document `sgm_percentiles`.
+
 ## 0.4.6 - 2026-08-11
 
 The Detector's calibrated-imaging pool is now **self-describing**, and the Sample Geometric Median

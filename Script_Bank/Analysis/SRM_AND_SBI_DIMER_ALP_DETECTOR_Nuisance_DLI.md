@@ -37,6 +37,7 @@ One user choice, `posterior_sample_pool_choice`, decides how that pool becomes t
 | **`gaussian`** | a full-covariance multivariate Gaussian fit to the pool | linear only (via the covariance) |
 | **`box`** | a per-parameter uniform over quantiles of the pool | none (independent per dimension) |
 | **`box_user`** | a per-parameter uniform over user-set ranges | none |
+| **`sgm_percentiles`** | whole real vectors at signed distance-to-SGM percentiles (a frozen SGM, or a small pool) | **preserved exactly** (whole vectors) |
 
 **Why `raw` is the faithful default.** Each entry in the pool is a complete parameter vector whose
 components were drawn jointly, so resampling *whole vectors* preserves the joint structure exactly —
@@ -61,19 +62,46 @@ for the boxes, hard bounds.
 **`pool_mode`** (`bounded` by default, or `unrestricted`) is identical to the convention used by the
 Detector Evaluation and Experiment stages: `bounded` rejection-samples the pool within the imaging
 prior box; `unrestricted` takes the raw normalizing-flow draws, whose mass may lie outside it. It
-governs how the pool is drawn, so it shapes `raw`, `gaussian`, and `box` (and the MAP pool). The
-calibration-faithful forms (`raw`, `map_estimate_pool`, `gaussian`) are then **not clipped** — under
-`unrestricted` they can legitimately place mass outside the prior box, matching Evaluation and
-Experiment. Only `box`/`box_user` are constrained to the prior box, clamped at build.
+governs how the pool is drawn, so it shapes `raw`, `gaussian`, and `box` (and the MAP pool);
+`sgm_percentiles` ignores it (it reuses already-computed data). The calibration-faithful forms
+(`raw`, `map_estimate_pool`, `gaussian`, and the real-vector `sgm_percentiles`) are **not clipped** —
+under `unrestricted` the pool forms can legitimately place mass outside the prior box, matching
+Evaluation and Experiment, and `sgm_percentiles` returns real acquisitions as-is. Only `box`/`box_user`
+are constrained to the prior box, clamped at build.
 
-**The range rule.** A user supplies per-parameter ranges only for `box_user`. `box` derives its ranges
-from pool quantiles (the 5th/95th percentiles by default) clamped to the prior box, and
-`raw`/`map_estimate_pool`/`gaussian` take no range at all. So the spec asks for per-parameter ranges if
-and only if the choice is `box_user`.
+**The range rule.** A user supplies per-parameter `[imaging.<KEY>]` ranges only for `box_user`. `box`
+derives its ranges from pool quantiles (the 5th/95th percentiles by default) clamped to the prior box;
+`raw`/`map_estimate_pool`/`gaussian` take no range at all; and `sgm_percentiles` reads no per-parameter
+range either — instead `percentiles`, `condition`, and `selection_source` (below). So the spec asks for
+`[imaging.<KEY>]` ranges if and only if the choice is `box_user`.
+
+**`sgm_percentiles` — freeze the imaging, or build a small correlation-preserving pool.** Unlike the
+choices built from the on-the-fly GPU pool, `sgm_percentiles` does not build that pool; it selects a
+few *whole* real MAP vectors and REUSES already-computed data — the Detector Experiment MAP output
+(`selection_source = "experiment"`, the default), or the labeled posterior pool via its per-window SGM
+(`"window-sgm"`) — so it runs on the **CPU**. Running it therefore presupposes the Detector Experiment
+stage has run. Three fields govern it: `percentiles` (a list; default `[50]`), `condition`
+(`pooled`/`ALP` = MET-FAB/`BET` = MET-INLB), and `selection_source`. The construction is a **signed
+distance-to-SGM** coordinate, computed in prior-range-normalized absolute space (where the renderer
+consumes the values):
+
+- the **magnitude** is the distance to the Sample Geometric Median `g` — the correlation-preserving
+  median *vector* (the actual member minimizing the summed normalized distance; the same object this
+  note's companion `…_Sample_Geometric_Median` analysis reports);
+- the **sign** is which side of `g` a vector lies on along the cloud's main axis of variation (the
+  largest-variance direction, PC1, of the `g`-centered points, oriented toward increasing brightness
+  `mu_pc`).
+
+So **`p50` is `g` exactly**; `p < 50` walks the dim/narrow side to the extreme at `p = 0`, and `p > 50`
+the bright/wide side to the extreme at `p = 100`. Hence `percentiles = [50]` **freezes** the imaging to
+the SGM (one fixed vector — the Nuisance_DLI then renders every video with it), while a list such as
+`[5, 25, 50, 75, 95]` yields a small marginalization pool whose members are all real acquisitions with
+their correlations intact. A percentile is snapped to the actual member nearest that signed rank;
+duplicates (or a percentile on an empty side) collapse, and the empty-side fallback to `g` is logged.
 
 ## How to run it
 
-Preview either mode first with `--dry-run`, which resolves the input and output paths and reports what
+Preview any mode first with `--dry-run`, which resolves the input and output paths and reports what
 would be read or written without loading the estimator or computing.
 
     MACHINE_PROFILE=<profile> python \
@@ -86,6 +114,10 @@ would be read or written without loading the estimator or computing.
     MACHINE_PROFILE=<profile> python \
       Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py \
       --total-time-seconds 2.0 --experiment-span-seconds 20 --build [--dry-run]
+
+    MACHINE_PROFILE=<profile> python \
+      Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py \
+      --total-time-seconds 2.0 --migrate-pool-labels [--dry-run]     # CPU maintenance; see Caching
 
 Arguments:
 
@@ -108,6 +140,11 @@ Arguments:
   `posterior_samples`).
 - `--repool` — force recomputing the pool on the GPU even when a fresh cache exists (see Caching).
 - `--max-cells` — cap the cells per kind (0 = all).
+- `--migrate-pool-labels` — CPU-only maintenance (a mode of its own, independent of `--emit-template`/
+  `--build`, needing no estimator or GPU): add the per-row condition/window labels (see Caching) to an
+  existing *legacy* posterior-sample pool by borrowing them from the Detector Experiment MAP output, after
+  verifying the two share a window ordering. It backs up the original and preserves the pool's cache key
+  (so `--build` still reuses it without a GPU). A pool that already carries labels is left unchanged.
 - `--dry-run` — resolve the paths and report what would be read and written; load nothing, compute
   nothing.
 
@@ -119,6 +156,14 @@ choices is cheap. `--emit-template` computes the pool once and caches it as
 the chosen representation. The cache is keyed on the build inputs (kinds, span, step, draws per chunk,
 `pool_mode`, cell cap) and the estimator's weight checksum, so it is reused only when those are unchanged
 and recomputed automatically when a different estimator is swapped in.
+
+The cached pool is **self-describing**: beside the sample matrix it stores, per row, the condition
+(`kind_index` into `kinds`) and the time-window position (`cell`, sliding-window `chunk`), stamped with a
+`pool_format_version`. So the pool can be filtered by condition or acquisition from the file alone — this
+is what `--condition`, the `sgm_percentiles` selection, and the companion Sample-Geometric-Median analysis
+read; without it the window→condition mapping would be only positional (an unstored artifact of the build
+order). A fresh build writes these labels (threaded through both the single-process and the multi-GPU
+sharded paths); a legacy pool built before the scheme carries none, and `--migrate-pool-labels` adds them.
 
 `raw`, `gaussian`, and `box` all draw from the one posterior-sample pool, so switching among them costs
 nothing beyond re-applying the representation; `map_estimate_pool` uses a separate MAP pool (its own GPU

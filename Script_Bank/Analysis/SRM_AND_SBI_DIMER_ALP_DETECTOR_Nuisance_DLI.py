@@ -374,7 +374,47 @@ def _emit_template(args, R):
                     "pool_mode": args.pool_mode, "pool_source": source})
     print(f"\nEmitted value-based spec (pre-filled with the percentiles above):\n    {spec}")
     print("\nNEXT: edit the spec — set posterior_sample_pool_choice (default 'raw') and pool_mode; "
-          "for 'box_user' also set the [imaging.<KEY>] ranges — then run --build.")
+          "for 'box_user' set the [imaging.<KEY>] ranges; for 'sgm_percentiles' set percentiles / "
+          "condition / selection_source — then run --build.")
+
+
+def _build_sgm_percentiles(args, R, block, spec_dict, art):
+    """CPU-only sgm_percentiles build: select whole vectors at SIGNED distance-to-SGM percentiles from
+    ALREADY-COMPUTED data (the Detector Experiment MAPs, or the labeled posterior pool via the per-
+    window SGM), and mint them as the Nuisance_DLI. p50 = the SGM (a single frozen vector); several
+    percentiles = a small, correlation-preserving marginalization pool. No GPU, no re-inference."""
+    percentiles = block.get("percentiles", list(ndli.SGM_DEFAULT_PERCENTILES))
+    condition = block.get("condition", "pooled")
+    source = block.get("selection_source", "experiment")
+    exp_stem = R["paths"].experiment_recovery_pattern.format(
+        project_alias=R["paths"].project_alias, timing_label=R["timing_label"])
+    exp_map = R["posit_dir"] / exp_stem / f"{exp_stem}.npz"
+    pool_cache = ndli.pool_cache_path(R["posit_dir"], R["paths"].project_alias,
+                                      R["timing_label"], "PosteriorSample")
+
+    if args.dry_run:
+        src = exp_map if source == "experiment" else pool_cache
+        print(f"[DRY RUN] --build sgm_percentiles (CPU, reuses existing data): "
+              f"percentiles={percentiles}, condition={condition}, selection_source={source}.")
+        print(f"    source     : {src}  [{'OK' if src.exists() else 'MISSING'}]")
+        print(f"    would write:\n    {art}  (+ report + 1-D marginals plot)")
+        return
+
+    vecs, src_label = ndli.load_map_vectors(
+        exp_map, pool_cache, source=source, condition=condition,
+        prior_low=R["plo"], prior_high=R["phi"])
+    b_idx = R["imaging_keys"].index("mu_pc") if "mu_pc" in R["imaging_keys"] else 2
+    members, prov = ndli.select_signed_percentile_vectors(
+        vecs, percentiles, R["plo"], R["phi"], brightness_index=b_idx)
+    print(f"sgm_percentiles: {src_label}; {members.shape[0]} member(s) at percentiles "
+          f"{[round(p, 1) for p in prov['percentile_of_member']]} (SGM = source row {prov['sgm_row']}).")
+    for note in prov["notes"]:
+        print(f"    note: {note}")
+    nu = ndli.build_nuisance_dli(spec_dict, R["imaging_keys"], R["plo"], R["phi"], pool=members)
+    nu.flush(str(art))
+    report_dir = _write_nuisance_report(nu, R, art)
+    print(f"Built Nuisance_DLI (sgm_percentiles, {members.shape[0]} member(s)) and saved to:\n"
+          f"    {art}\nAnalysis (report + 1-D marginals plot):\n    {report_dir}")
 
 
 def _build(args, R):
@@ -394,8 +434,12 @@ def _build(args, R):
     block = spec_dict["block"]
     choice = block["posterior_sample_pool_choice"]
     pool_mode = block.get("pool_mode", "bounded")
-    pool_kind = ndli.POOL_KINDS[choice]                 # None for box_user
+    pool_kind = ndli.POOL_KINDS[choice]                 # None for box_user / sgm_percentiles
     n_per = args.n_per_chunk or PARAMETERS.inference.evaluation.posterior_samples
+
+    if choice == "sgm_percentiles":
+        _build_sgm_percentiles(args, R, block, spec_dict, art)
+        return
 
     if args.dry_run:
         print(f"[DRY RUN] spec valid; posterior_sample_pool_choice={choice}, pool_mode={pool_mode}.")

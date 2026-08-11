@@ -55,7 +55,6 @@ import sys
 from datetime import datetime, timezone
 
 import numpy as np
-from scipy.spatial.distance import pdist, squareform
 from matplotlib.figure import Figure
 
 from srm_and_sbi_dimer_alp import detector_nuisance_dli as ndli
@@ -64,10 +63,8 @@ from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming
 
 # Tractability / rendering knobs (not scientific parameters).
-_EXACT_MEDOID_CAPACITY = 20000   # above this the geometric median switches to Weiszfeld + snap-to-sample
 _KDE_SUBSAMPLE = 50000           # cap on points used to estimate local density for the typicality read
 _FIGURE_SUBSAMPLE = 5000         # cap on scatter points drawn per figure
-_WEISZFELD_ITERS = 2000
 
 # Internal condition keys map to publication display names.
 CONDITION_DISPLAY = {"ALP": "MET-FAB", "BET": "MET-INLB"}
@@ -139,24 +136,8 @@ def _resolve(total_time_seconds):
 # prior range, because the renderer consumes physical values and the geometric median is not invariant
 # to the log-to-linear transform, so centrality is defined where the vector is used.
 
-def _sample_geometric_median(vecs_abs, range_abs):
-    """Return (index, method): the pool member closest to the geometric median in prior-range-
-    normalized absolute space. Exact medoid when tractable, else Weiszfeld's iteration + snap."""
-    m = vecs_abs / range_abs
-    n = m.shape[0]
-    if n <= _EXACT_MEDOID_CAPACITY:
-        summed = squareform(pdist(m)).sum(0)
-        return int(np.argmin(summed)), "exact_medoid"
-    y = m.mean(0)
-    for _ in range(_WEISZFELD_ITERS):
-        dist = np.maximum(np.linalg.norm(m - y, axis=1), 1e-12)
-        weight = 1.0 / dist
-        y_next = (weight[:, None] * m).sum(0) / weight.sum()
-        if np.linalg.norm(y_next - y) < 1e-10:
-            y = y_next
-            break
-        y = y_next
-    return int(np.argmin(np.linalg.norm(m - y, axis=1))), "weiszfeld_snap"
+# The Sample Geometric Median itself is `ndli.sample_geometric_median` (in detector_nuisance_dli),
+# shared with the Nuisance_DLI build's sgm_percentiles selection so both use one implementation.
 
 
 def _typicality(vecs_abs, range_abs, point_abs, rng):
@@ -195,7 +176,7 @@ def _per_window_sgm(flat_log, labels, cache_path, range_abs):
                "chunk": np.empty(n_win, np.int64), "kinds": labels["kinds"]}
         for w in range(n_win):
             rows = flat_log[bounds[w]:bounds[w + 1]]
-            idx, _ = _sample_geometric_median(10.0 ** rows, range_abs)
+            idx, _ = ndli.sample_geometric_median(10.0 ** rows, range_abs)
             out[w] = rows[idx]
             win["kind_index"][w], win["cell"][w], win["chunk"][w] = keys[bounds[w]]
         return out, win
@@ -205,7 +186,7 @@ def _per_window_sgm(flat_log, labels, cache_path, range_abs):
     blocks = flat_log[:n_win * n_per].reshape(n_win, n_per, dim)
     out = np.empty((n_win, dim))
     for w in range(n_win):
-        idx, _ = _sample_geometric_median(10.0 ** blocks[w], range_abs)
+        idx, _ = ndli.sample_geometric_median(10.0 ** blocks[w], range_abs)
         out[w] = blocks[w][idx]
     return out, None
 
@@ -317,7 +298,7 @@ def _summary_vectors(pool_log, low, high, rng):
             out.append(dict(variant=name, n=0))
             continue
         subset_abs = 10.0 ** subset_log
-        idx, method = _sample_geometric_median(subset_abs, a_range)
+        idx, method = ndli.sample_geometric_median(subset_abs, a_range)
         sgm_abs = subset_abs[idx]
         vom_abs = np.median(subset_abs, axis=0)
         maha_s, dens_s = _typicality(subset_abs, a_range, sgm_abs, rng)
@@ -532,8 +513,8 @@ def _run(args, R):
             print(f"    labels     : the condition filter needs per-row labels (a labeled pool, or the "
                   f"experiment MAP)")
         print(f"    prior box  : log10 low {low.tolist()}  high {high.tolist()}")
-        print(f"    method     : Sample Geometric Median in absolute space (medoid <= "
-              f"{_EXACT_MEDOID_CAPACITY}, else Weiszfeld + snap); full pool and in-box subcollection")
+        print(f"    method     : Sample Geometric Median in absolute space (exact medoid when small, "
+              f"else Weiszfeld + snap); full pool and in-box subcollection")
         print(f"    writes     : {R['posit_dir']}/{R['alias']}_{R['timing_label']}_"
               f"Nuisance_DLI_Sample_Geometric_Median/")
         print("[DRY RUN] no compute performed.")
