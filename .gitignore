@@ -37,9 +37,10 @@ srm-and-sbi-dimer-alp/
 *.pkl
 *.pth
 
-# Jupyter runtime artifacts (autosave checkpoints, JupyterLab virtual docs)
+# Jupyter runtime artifacts (autosave checkpoints, JupyterLab virtual docs, stray "Untitled" scratch)
 .ipynb_checkpoints/
 .virtual_documents/
+Untitled*.ipynb
 
 # Logs
 *.log

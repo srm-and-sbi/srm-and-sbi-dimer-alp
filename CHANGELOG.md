@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.9 - 2026-08-11
+
+The Posterior-Predictive Video **viewer notebook** now shares one color limit across the experimental
+and synthetic panels in every mode, matching the 0.4.8 engine fix, so the scrubber and player render a
+frame identically to the static figure.
+
+### Changed
+
+- **PPV notebook (`clim`) shares the limit in all modes.** The scrubber and player put both panels on
+  ONE window per frame — `full` the shared full-range `[min, max]`, `percentile` the shared
+  `[min, p99.99]`, `autoscale` the two displayed frames' shared min/max (was per-panel). The cells and
+  the intro/playback prose were updated to state the guarantee.
+- **`.gitignore`:** ignore stray `Untitled*.ipynb` scratch notebooks.
+
 ## 0.4.8 - 2026-08-11
 
 The Posterior-Predictive Video comparison figure now gives the experimental and synthetic image
