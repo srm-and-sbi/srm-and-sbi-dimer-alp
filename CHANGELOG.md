@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.8 - 2026-08-11
+
+The Posterior-Predictive Video comparison figure now gives the experimental and synthetic image
+panels ONE shared color limit in **every** `--display-norm` mode, so identical intensities always map
+to identical colors and the side-by-side comparison is fair regardless of mode.
+
+### Changed
+
+- **`--display-norm` — shared image-panel limit in all modes.** Previously only `full` (the default)
+  put the experimental and synthetic panels on one shared limit; `percentile` and `autoscale` scaled
+  each panel to its own data. Now all three share: the max-projection row shares the full `[min, max]`,
+  and the mid-frame row shares a mode-selected window — `full` the whole-clip `[min, max]`, `percentile`
+  the whole-clip `[min, p99.99]`, `autoscale` the two displayed frames' combined min/max (so `autoscale`
+  changes meaning from per-panel to shared). The function docstring and `--help` state the guarantee.
+  Figure-only; the persisted pixels are untouched.
+
 ## 0.4.7 - 2026-08-11
 
 The Nuisance_DLI build gains an **`sgm_percentiles`** choice that *mints* the imaging artifact from a

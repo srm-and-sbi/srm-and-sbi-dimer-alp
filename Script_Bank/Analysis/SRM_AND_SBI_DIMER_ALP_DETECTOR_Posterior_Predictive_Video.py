@@ -252,13 +252,13 @@ def _save_comparison_png(path, experimental, synth, kind, cell, sel_desc, displa
 
     Both panels and the histogram use the STORED synthetic (``synth_u16``, clipped to the
     non-negative uint16 range), so the comparison is like-with-like against the experimental frames and
-    matches the persisted clip -- not the pre-clip float. ``display_norm`` sets the frame
-    color scaling: ``full`` (default) uses a SHARED full-range ``[min, max]`` window over both the
-    experimental and synthetic pixels, so identical intensities map to identical colors and nothing
-    is clipped; ``autoscale`` stretches magma to each displayed frame's own min/max (the same
-    per-frame convention the notebook scrub and player use, so a given frame renders identically
-    in all views); ``percentile`` uses a whole-clip window ``[min, p99.99]``. The
-    max-projection panels share the full range in ``full`` mode and autoscale otherwise, and the
+    matches the persisted clip -- not the pre-clip float. The experimental and synthetic image panels
+    ALWAYS share ONE color limit, in every ``display_norm`` mode -- the max-projection row shares the
+    full ``[min, max]`` range, and the mid-frame row shares a window the mode selects -- so identical
+    intensities map to identical colors and the exp-vs-synth comparison is fair; the mode only sets WHAT
+    the shared mid-frame window is. ``full`` (default): the full whole-clip ``[min, max]`` (nothing
+    clipped). ``percentile``: the whole-clip ``[min, p99.99]``, dropping the top-0.01% hot-pixel sliver
+    for contrast. ``autoscale``: the two displayed frames' shared min/max, the most contrast. The
     histogram is in ADU in every mode."""
     import matplotlib
     matplotlib.use("Agg")
@@ -290,21 +290,22 @@ def _save_comparison_png(path, experimental, synth, kind, cell, sel_desc, displa
                  vmin=clim[0], vmax=clim[1])
         a.set_title(title, fontsize=9); a.set_xticks([]); a.set_yticks([])
 
-    # Frame display window. 'full' (default): a SHARED full-range [min, max] window over BOTH exp
-    # and synth, so identical intensities map to identical colors and nothing is clipped.
-    # 'percentile': whole-clip [min, p99.99]. 'autoscale': each frame's own min/max.
-    if display_norm == "full":
+    # The experimental and synthetic image panels ALWAYS share ONE color limit, in EVERY mode, so
+    # identical intensities map to identical colors and the comparison is fair: the mid-frame row
+    # shares `frame_clim` and the max-projection row shares `proj_clim`. `display_norm` only sets WHAT
+    # the shared mid-frame window is; the max projection always shares the full [min, max] range.
+    emp, smp = experimental.max(0), synth.max(0)
+    proj_clim = (float(min(emp.min(), smp.min())), float(max(emp.max(), smp.max())))
+    if display_norm == "full":                    # full whole-clip [min, max]; nothing clipped
         frame_clim = (float(min(eq[0], sq[0])), float(max(eq[-1], sq[-1])))
-        emp, smp = experimental.max(0), synth.max(0)
-        proj_clim = (float(min(emp.min(), smp.min())), float(max(emp.max(), smp.max())))
-        exp_clim = syn_clim = frame_clim
-        exp_proj_clim = syn_proj_clim = proj_clim
-    elif display_norm == "percentile":
-        exp_clim = (float(exp_r.min()), float(np.percentile(exp_r, 99.99)))
-        syn_clim = (float(syn_r.min()), float(np.percentile(syn_r, 99.99)))
-        exp_proj_clim = syn_proj_clim = (None, None)
-    else:                                                                  # autoscale
-        exp_clim = syn_clim = exp_proj_clim = syn_proj_clim = (None, None)
+    elif display_norm == "percentile":            # whole-clip [min, p99.99]; drops the hot-pixel sliver
+        frame_clim = (float(min(exp_r.min(), syn_r.min())),
+                      float(max(np.percentile(exp_r, 99.99), np.percentile(syn_r, 99.99))))
+    else:                                         # autoscale: the two displayed frames' shared min/max
+        frame_clim = (float(min(experimental[mid].min(), synth[mid].min())),
+                      float(max(experimental[mid].max(), synth[mid].max())))
+    exp_clim = syn_clim = frame_clim
+    exp_proj_clim = syn_proj_clim = proj_clim
 
     # col 0 = EXPERIMENTAL (frame over max projection), col 1 = SYNTH (same); col 2 = histograms;
     # col 3 = the syn/exp ratio-per-quantile match plot over the quantile table + provenance.
@@ -613,11 +614,13 @@ def parse_args(argv):
                    help="recording length in seconds, used only to locate the .tif (default 20); "
                         "the render length is read from the .tif's actual frame count.")
     p.add_argument("--display-norm", choices=("full", "autoscale", "percentile"), default="full",
-                   help="color scaling for the Comparison.png frame panels: 'full' (default) uses "
-                        "a SHARED full-range [min, max] window over BOTH experimental and synthetic, "
-                        "so identical intensities map to identical colors and nothing is clipped; "
-                        "'autoscale' stretches each frame to its own min/max; 'percentile' uses "
-                        "a whole-clip [min, p99.99] window. Figure-only; does not touch the persisted pixels.")
+                   help="color scaling for the Comparison.png image panels. The experimental and "
+                        "synthetic panels ALWAYS share ONE limit (identical intensities map to identical "
+                        "colors); the mode only sets the shared mid-frame window: 'full' (default) the "
+                        "whole-clip [min, max] (nothing clipped); 'percentile' the whole-clip [min, "
+                        "p99.99] (drops the hot-pixel sliver for contrast); 'autoscale' the two displayed "
+                        "frames' shared range. The max-projection panels always share the full range. "
+                        "Figure-only; does not touch the persisted pixels.")
     p.add_argument("--seed", type=int, default=None,
                    help="RNG seed for the RDS sim + render; default None (fresh draw). Fix it "
                         "for a reproducible trajectory across re-runs.")
