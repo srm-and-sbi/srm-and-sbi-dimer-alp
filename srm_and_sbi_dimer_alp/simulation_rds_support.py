@@ -215,6 +215,7 @@ def build_simulation(stem: "readdy.ReactionDiffusionSystem",
                      theta: np.ndarray,
                      particle_species_names: Optional[Tuple[str, ...]] = None,
                      seed: Optional[int] = None,
+                     skin_factor: Optional[float] = None,
                      verbose: bool = False) -> "readdy.Simulation":
     """Wrap the ReactionDiffusionSystem in a Simulation, register observables,
     and place initial particles uniformly in the box.
@@ -231,6 +232,14 @@ def build_simulation(stem: "readdy.ReactionDiffusionSystem",
             RNG for particle positions; ReaDDy's internal RNG (used for
             reaction events and diffusion steps during `simulation.run`)
             has its own seeding mechanism.
+        skin_factor: ReaDDy neighbor-list (Verlet) skin as a MULTIPLE of the
+            particle diameter (skin = skin_factor * particle_diameter_nm, in nm).
+            A PURE PERFORMANCE knob -- it coarsens the cell-linked-list grid in the
+            large, dilute imaging box without changing the physics (reactions still
+            fire only at the true reaction radius; the skin only widens which
+            particles are considered as candidates). If None (default), the
+            configured `PARAMETERS.simulation.rds.neighbor_list_skin_factor` is used.
+            See that field for the full rationale and the U-shaped cost curve.
         verbose: If True, print the per-species and total initial particle counts.
 
     Returns:
@@ -256,6 +265,24 @@ def build_simulation(stem: "readdy.ReactionDiffusionSystem",
     theta_counts = np.round(theta[[parameter_find(k) for k in count_keys]]).astype(np.int32)
 
     smut = stem.simulation(kernel="CPU")
+
+    # Neighbor-list (Verlet) skin, as a MULTIPLE of the particle diameter. Pure
+    # performance knob: it enlarges ReaDDy's cell-linked-list cells (cell edge =
+    # reaction_radius + skin) so the huge, dilute imaging box is not partitioned into
+    # ~16 million mostly-empty cells whose per-step management dominates the runtime.
+    # It never changes the physics -- reactions still fire only at the true reaction
+    # radius; the skin only widens which particles are considered as CANDIDATES. See
+    # PARAMETERS.simulation.rds.neighbor_list_skin_factor for the rationale and the
+    # U-shaped cost curve. None -> the configured default.
+    if skin_factor is None:
+        skin_factor = PARAMETERS.simulation.rds.neighbor_list_skin_factor
+    if skin_factor < 0:
+        raise ValueError(
+            f"skin_factor must be non-negative (got {skin_factor}); it is a multiple "
+            f"of the particle diameter and sets the neighbor-list skin distance.")
+    smut.skin = (skin_factor * PARAMETERS.simulation.stem.particle_diameter_nm
+                 * readdy.units.nanometer)
+
     smut.observe.particles(stride=PARAMETERS.simulation.timing.steps_per_frame)
     smut.observe.reaction_counts(stride=1)
 

@@ -12,7 +12,10 @@
 #     tid = TASK_OFFSET + SLURM_ARRAY_TASK_ID * SLURM_NTASKS_PER_NODE + k
 #
 # Knobs (--export / CLI): SPLIT, TASK_SIMS, TOTAL_TIME, TASK_OFFSET, TASK_COUNT
-# (tasks this submission generates; default = --ntasks-per-node); pack size and
+# (tasks this submission generates; default = --ntasks-per-node), SKIN_FACTOR
+# (ReaDDy neighbor-list skin as a MULTIPLE of the particle diameter -- an RDS-only
+# PERFORMANCE knob, not physics; unset = the code default 10x = 100 nm; see
+# SimulationRDS.neighbor_list_skin_factor); pack size and
 # core share are set by --ntasks-per-node / --cpus-per-task. Debug knobs
 # (default off, production-identical when unset): PROBE=1 logs per-sim resource
 # use (threads/open-fds/RSS); VERBOSE=1 adds per-sim detail (reaction counts, shapes);
@@ -105,6 +108,13 @@ SIM_FLAGS=""
 [ "${DEBUG_DUMP:-0}" = 1 ] && SIM_FLAGS="$SIM_FLAGS --debug-dump"
 [ -n "${SEED:-}" ]         && SIM_FLAGS="$SIM_FLAGS --seed ${SEED}"
 
+# SKIN_FACTOR (RDS-only): ReaDDy neighbor-list (Verlet) skin as a MULTIPLE of the
+# particle diameter -- a performance knob (coarsens the cell-linked-list grid; does
+# NOT change the physics). Passed ONLY to the RDS entry point (DLI has no such flag).
+# Unset -> the code default (SimulationRDS.neighbor_list_skin_factor = 10x = 100 nm).
+RDS_ONLY_FLAGS=""
+[ -n "${SKIN_FACTOR:-}" ]  && RDS_ONLY_FLAGS="$RDS_ONLY_FLAGS --skin-factor ${SKIN_FACTOR}"
+
 # SIM_STAGE selects which stage(s) run per task: both (default) | rds | dli. SIM_STAGE=dli is
 # a DLI-only re-run that reuses the existing trajectories (e.g. to re-render videos
 # after a DLI-side fix without repeating the expensive RDS).
@@ -122,7 +132,7 @@ for (( tid=start; tid < start + PER_NODE && tid < end; tid++ )); do
       if [ "$SIM_STAGE" != dli ]; then
         python -u "$PRIME/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py" \
             --task-id "$tid" --task-simulations "$TASK_SIMS" \
-            --total-time-seconds "$TOTAL_TIME" --split "$SPLIT" $SIM_FLAGS || rc=1
+            --total-time-seconds "$TOTAL_TIME" --split "$SPLIT" $SIM_FLAGS $RDS_ONLY_FLAGS || rc=1
       fi
       if [ "$rc" = 0 ] && [ "$SIM_STAGE" != rds ]; then
         python -u "$PRIME/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py" \

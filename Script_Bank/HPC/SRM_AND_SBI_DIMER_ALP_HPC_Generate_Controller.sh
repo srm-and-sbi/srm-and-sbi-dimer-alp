@@ -24,7 +24,10 @@
 # plain shell var, not part of the inherited environment.
 # Override points: PART (CPU partition), ACCT (Slurm account), MON_OUT (batch-log
 # output dir), USER_ME (queue-owner username for polling), SIM (per-task launcher
-# path), CASES (which dataset(s): 5s|2s|both), DRYRUN (1 = print only, 0 = submit).
+# path), CASES (which dataset(s): 5s|2s|both), DRYRUN (1 = print only, 0 = submit),
+# SKIN_FACTOR (ReaDDy neighbor-list skin as a MULTIPLE of the particle diameter --
+# an RDS-only performance knob, not physics; forwarded to every submitted array when
+# set; unset = the code default 10x = 100 nm; see SimulationRDS.neighbor_list_skin_factor).
 #     DRY RUN (default -- prints the exact sbatch lines, submits nothing):
 #         bash SRM_AND_SBI_DIMER_ALP_HPC_Generate_Controller.sh
 #     LIVE:
@@ -99,6 +102,9 @@ submit(){   # $1 = entry; echoes job id on stdout, logs to stderr
   # --export=ALL alone would NOT carry it to the spooled child (which runs from
   # /var/spool and cannot resolve the repo from its own path).
   local export="ALL,REPO=$REPO,SPLIT=$split,TASK_OFFSET=0,TASK_COUNT=$count,TASK_SIMS=$sims,TOTAL_TIME=$ttime"
+  # SKIN_FACTOR is optional (RDS-only performance knob); forward it only when set so
+  # an unset value leaves the code default (SimulationRDS.neighbor_list_skin_factor).
+  [ -n "${SKIN_FACTOR:-}" ] && export="${export},SKIN_FACTOR=${SKIN_FACTOR}"
   # Job name follows the data-file naming convention:
   # SRM_AND_SBI_DIMER_ALP_<timing_label>_Simulation_<SPLIT>, with timing_label
   # rendered exactly as PARAMETERS.simulation.timing.label does ("{duration}S_50FPS",

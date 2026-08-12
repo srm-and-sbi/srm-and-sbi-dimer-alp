@@ -68,15 +68,20 @@ def nuisance_theta_to_canonical(nuisance_physical: np.ndarray) -> np.ndarray:
 
 
 def build_detector_rds_simulation(nuisance_physical: np.ndarray,
-                                  seed=None, verbose: bool = False):
+                                  seed=None, skin_factor=None, verbose: bool = False):
     """Build the diffusion-only Detector RDS simulation for one nuisance draw.
 
     Assembles the canonical θ from the nuisance draw, then reuses the canonical
     `build_system(pure_diffusion=True)` and `build_simulation` unchanged. Returns
     the `readdy.Simulation` (ready for the entry script to configure an output
     file and run) together with the assembled θ (for provenance).
+
+    ``skin_factor`` (the ReaDDy neighbor-list skin as a multiple of the particle
+    diameter -- a performance-only knob; see
+    ``SimulationRDS.neighbor_list_skin_factor``) is forwarded to
+    ``build_simulation`` unchanged; ``None`` uses the configured default.
     """
     theta = nuisance_theta_to_canonical(nuisance_physical)
     stem = build_system(theta, pure_diffusion=True, verbose=verbose)
-    smut = build_simulation(stem, theta, seed=seed, verbose=verbose)
+    smut = build_simulation(stem, theta, seed=seed, skin_factor=skin_factor, verbose=verbose)
     return smut, theta

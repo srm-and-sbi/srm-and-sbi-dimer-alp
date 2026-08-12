@@ -61,7 +61,7 @@ class _RdsSpec:
     fixed_spec: list         # the fixed-parameter table (*_RAW)
     lower: np.ndarray        # log10 lower prior bounds
     upper: np.ndarray        # log10 upper prior bounds
-    build_sim: Callable      # (theta, seed, verbose) -> ReaDDy Simulation (smut)
+    build_sim: Callable      # (theta, seed, skin_factor, verbose) -> ReaDDy Simulation (smut)
     set_path: Callable       # (paths, task, data_bank_root, timing_label, compress, split) -> Path
     spec_title: str          # verbose prior-dump title
     draw_noun: str           # "theta" | "RDS nuisance" ("Sampled <draw_noun>")
@@ -69,22 +69,23 @@ class _RdsSpec:
     set_token: str           # "Theta_Set" | "Nuisance_RDS_Theta_Set" (banner path pattern)
 
 
-def _biology_build_sim(theta, seed, verbose):
+def _biology_build_sim(theta, seed, skin_factor, verbose):
     """Reactive builder: register the four reaction channels (biology workflow)."""
     from srm_and_sbi_dimer_alp.simulation_rds_support import build_simulation, build_system
     stem = build_system(theta, verbose=verbose)
     # `stem` is reachable only through the returned Simulation; deleting the
     # Simulation (+ gc) in the engine loop releases the ReaDDy kernel and the system.
-    return build_simulation(stem, theta, seed=seed, verbose=verbose)
+    return build_simulation(stem, theta, seed=seed, skin_factor=skin_factor, verbose=verbose)
 
 
-def _detector_build_sim(theta, seed, verbose):
+def _detector_build_sim(theta, seed, skin_factor, verbose):
     """Diffusion-only builder: no reaction channels; assembles canonical theta from
     the RDS-nuisance draw (detector workflow)."""
     from srm_and_sbi_dimer_alp.detector_simulation_rds_support import (
         build_detector_rds_simulation,
     )
-    smut, _theta = build_detector_rds_simulation(theta, seed=seed, verbose=verbose)
+    smut, _theta = build_detector_rds_simulation(
+        theta, seed=seed, skin_factor=skin_factor, verbose=verbose)
     return smut
 
 
@@ -172,6 +173,12 @@ def run_rds(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
     print(f"  --task-simulations   : {args.task_simulations}")
     print(f"  --split              : {args.split}   (namespace suffix: _{split})")
     print(f"  --seed               : {args.seed}")
+    _skin_factor = (args.skin_factor if args.skin_factor is not None
+                    else PARAMETERS.simulation.rds.neighbor_list_skin_factor)
+    _skin_nm = _skin_factor * PARAMETERS.simulation.stem.particle_diameter_nm
+    print(f"  --skin-factor        : {args.skin_factor}   "
+          f"(effective neighbor-list skin {_skin_factor:g}x diameter = {_skin_nm:g} nm; "
+          f"performance only, no physics change)")
     print(f"  --no-compress        : {args.no_compress}  (output format: .{output_fmt})")
     print(f"  --verbose            : {args.verbose}")
     print(f"  --show               : {args.show}")
@@ -332,7 +339,7 @@ def run_rds(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
             # unseeded, so identical-posterior reproducibility is unreachable
             # regardless; the sampled set is persisted per task and the global
             # task index is the provenance handle.
-            smut = spec.build_sim(theta, args.seed, args.verbose)
+            smut = spec.build_sim(theta, args.seed, args.skin_factor, args.verbose)
 
             traj_path = paths.trajectory_path(
                 task_alias, sim, data_bank_root, timing_label, split)
@@ -505,6 +512,17 @@ def build_rds_parser() -> argparse.ArgumentParser:
         default=None,
         help="RNG seed for theta sampling and initial particle placement. "
              "Default: None (non-deterministic).",
+    )
+    parser.add_argument(
+        "--skin-factor", type=float, default=None,
+        help="ReaDDy neighbor-list (Verlet) skin as a MULTIPLE of the particle "
+             "diameter (skin = skin-factor x particle_diameter_nm). PERFORMANCE-ONLY "
+             "knob: it coarsens the cell-linked-list grid in the large, dilute box; it "
+             "does NOT change the physics (reactions still fire at the true reaction "
+             "radius, so the output is statistically identical). Default: None -> the "
+             "configured PARAMETERS.simulation.rds.neighbor_list_skin_factor (10x = "
+             "100 nm), which sits on the fast plateau. See that field for the U-shaped "
+             "cost rationale.",
     )
     parser.add_argument(
         "--no-compress", action="store_true",

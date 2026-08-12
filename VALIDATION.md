@@ -134,10 +134,25 @@ These are quick checks that each entry point runs end-to-end with minimal inputs
 The point is to surface obvious problems (missing imports, wrong shapes, path
 misconfiguration) before any longer run. The same structure applies to **both**
 workflows in this repository — the biology reaction-diffusion pipeline
-(sections 2.1–2.4) and the Detector imaging-calibration pipeline (section 2.5,
+(sections 2.1–2.4b) and the Detector imaging-calibration pipeline (section 2.5,
 `DETECTOR_WORKFLOW.md`) — which share the stage sequence generate → infer →
 evaluate → (experiment). Every smoke passes `--total-time-seconds` (always
-required) and keeps the task and simulation counts tiny.
+required), runs seedless (`--seed None`), and keeps the task and simulation counts
+small. The **Detector calibration smoke (section 2.5) is the reference
+configuration** the whole repository follows: one shared duration and the
+three-split sizing `--tasks 25 / 5 / 2 --task-simulations 10` (TRAIN / TEST / EVAL
+→ 250 / 50 / 20 videos). The biology sections below replicate that same sizing with
+the biology entry points.
+
+**Run order (both workflows).** The smoke is a small, fast replica of the full
+production run, so it reproduces the production dependency chain rather than reordering
+it for convenience. Run it in this order: first the **detector smoke (§2.5)** — the
+detector workflow calibrates the imaging model; then **build the `Nuisance_DLI` (§2.5b)**
+— the calibrated imaging turned into the samplable artifact the biology renderer draws
+from; then the **biology smoke (§2.1–2.4b)** — it consumes that artifact at its DLI
+stage. The section numbering is a reading convenience; this is the required execution
+order. (The detector DLI itself needs no artifact: it draws imaging from the prior box,
+because imaging is the detector's inference target.)
 
 Two rules apply to every smoke and to every production run:
 
@@ -163,42 +178,53 @@ counts, core-per-node geometry, or GPU counts; the scripts already pin them.
 ### 2.1 RDS (reaction-diffusion simulation)
 
 ```bash
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py \
-    --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed None --verbose
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py --total-time-seconds 2.0 --split train --tasks 25 --task-simulations 10 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py --total-time-seconds 2.0 --split test  --tasks 5  --task-simulations 10 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py --total-time-seconds 2.0 --split eval  --tasks 2  --task-simulations 10 --seed None
 ```
 
-**Expected**: one `.h5` trajectory per simulation under the RDS trajectory
-output directory (`READY_TRACT/`):
-`<data_bank>/Video/READY_TRACT/SRM_AND_SBI_DIMER_ALP_2S_50FPS_TASK_0/`
-(`..._TASK_0_SIM_0.h5`, …), one `.zarr` theta set at
-`<data_bank>/Theta/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Theta_Set_TASK_0.zarr`, and
-verbose output showing the sampled diffusion and reaction rates.
+**Expected**: per split, one `.h5` trajectory per simulation under the RDS
+trajectory directory `READY_TRACT/`, namespaced by split — for TRAIN,
+`<data_bank>/Video/READY_TRACT/SRM_AND_SBI_DIMER_ALP_2S_50FPS_TASK_0_TRAIN/`
+(`..._TASK_0_SIM_0_TRAIN.h5`, …), and one `.zarr` theta set per task at
+`<data_bank>/Theta/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Theta_Set_TASK_0_TRAIN.zarr`
+(with the `_TEST` / `_EVAL` namespaces for the other two splits). This generates
+250 / 50 / 20 (train / test / eval) trajectories. Add `--verbose` to print the
+sampled diffusion and reaction rates per simulation.
 
 ### 2.2 DLI (diffraction-limited imaging)
 
 ```bash
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py \
-    --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed None --verbose
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py --total-time-seconds 2.0 --split train --tasks 25 --task-simulations 10 --video-dtype-bits 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py --total-time-seconds 2.0 --split test  --tasks 5  --task-simulations 10 --video-dtype-bits 8 --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py --total-time-seconds 2.0 --split eval  --tasks 2  --task-simulations 10 --video-dtype-bits 8 --seed None
 ```
 
-**Expected**: one `.zarr` video set at
-`<data_bank>/Video/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Video_Set_TASK_0.zarr`. At 2 s
-the video shape is `(100, 256, 256)` — 100 frames at 50 frames per second over
-a 256×256 detector grid. Each value is a non-negative integer pixel count.
+**Expected**: one `.zarr` video set per task at
+`<data_bank>/Video/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Video_Set_TASK_0_TRAIN.zarr`
+(and the `_TEST` / `_EVAL` namespaces), 250 / 50 / 20 videos in all. At 2 s each
+video is `(100, 256, 256)` — 100 frames at 50 frames per second over a 256×256
+detector grid — and every value is a non-negative integer pixel count. Because the
+biology renderer marginalizes imaging, each task additionally writes the per-task draws
+it used, both under `<data_bank>/Theta/`: a `Nuisance_DLI_Theta_Set` (the imaging
+vectors drawn from the artifact) and a `Nuisance_SCOPE_Theta_Set` (the EMCCD camera
+vectors drawn from the SCOPE box). `--video-dtype-bits 8` matches the bit depth the
+estimator trains on and is also the DLI default.
 
-**Requires**: the RDS smoke test must have run first with the same
-`--total-time-seconds` and `--task-simulations`. DLI reads the `.h5`
-trajectories and the theta set written by RDS; the two stages share `--tasks`
-and `--task-simulations`. It also requires the `Nuisance_DLI` artifact (built by the
-`SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI` analysis): the stage marginalizes imaging
-by drawing the photophysics from it and the camera from the SCOPE box, and fails loud
-if it is absent.
+**Requires**: two prerequisites. First, the RDS smoke (§2.1) must have run with the
+same duration, splits, and `--task-simulations`; DLI reads the `.h5` trajectories and
+theta set RDS wrote, so the two stages share `--tasks`, `--split`, and
+`--task-simulations`. Second — the cross-workflow dependency — the `Nuisance_DLI`
+artifact must already exist: the biology renderer **marginalizes imaging** by drawing
+the photophysics from that artifact (and the camera from the SCOPE box), and fails loud
+if it is absent. The artifact is a detector-side product, so the detector smoke (§2.5)
+and the `Nuisance_DLI` build (§2.5b) must run first — see **Run order** in the section
+intro.
 
 ### 2.3 Inference (posterior training)
 
 ```bash
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-    --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed None --verbose
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --total-time-seconds 2.0 --tasks 25 --test-tasks 5 --epochs 5 --batch-size 8 --seed None
 ```
 
 **Expected**: a network checkpoint at
@@ -208,28 +234,28 @@ version-portable estimator artifact at
 training loop also writes a full-state resume file beside the checkpoint,
 `<data_bank>/Labor/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Resurrect_State_ANN.pth`, updated
 every epoch — its presence is what lets a later `--resurrect` hot-restart (see §2.4).
-One epoch on a handful of (video, theta) pairs will not produce a useful
-posterior, but it exercises the full training and save path, including the
-network construction and the data loader. This command loads no TEST set, so it
-writes only the canonical pair; a run with `--test-tasks > 0` additionally writes
-a provenance-named backup of each (see PROJECT_CONTEXT §3 and the HPC runbook §7).
+Five epochs on the small smoke dataset (250 train / 50 test videos) will not
+produce a useful posterior, but they exercise the full training and save path,
+including the network construction and the data loader. Because it passes
+`--test-tasks 5`, the run loads the held-out TEST set, selects the checkpoint on
+best test loss, and additionally writes a provenance-named backup of the
+checkpoint and estimator (see PROJECT_CONTEXT §3 and the HPC runbook §7).
 
 **Requires**: the RDS and DLI smoke tests (sections 2.1 and 2.2) must have run
-first with `--task-simulations 5` (or higher). With too few simulations the dataset is too
-small to form even a single training batch and the run fails early; five
-simulations is enough for the smoke test.
+first with the same `--task-simulations 10` and matching task counts. With too few
+simulations the dataset is too small to form even a single training batch and the
+run fails early.
 
-**Small-GPU batch-size workaround**: the `Complex3DCNN` forward pass at the
-default `--batch-size 32` over 2 s videos needs several GB of GPU memory (one
-3D convolution alone needs roughly 6 GB). A small GPU (for example a 4 GB card)
-will raise `CUDA out of memory` partway into the first epoch. Two options:
+**Small-GPU batch-size workaround**: the `Complex3DCNN` forward pass over 2 s videos
+is memory-heavy (one 3D convolution alone needs roughly 6 GB), so even the smoke's
+`--batch-size 8` can exceed a small GPU (for example a 4 GB card) and raise
+`CUDA out of memory` partway into the first epoch. Two options:
 
 - **Reduce the batch size** to `1` or `2` for a memory-light smoke check on a
   small GPU. This verifies the pipeline without producing a useful posterior:
 
   ```bash
-  python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-      --total-time-seconds 2.0 --tasks 1 --epochs 1 --batch-size 1 --seed None --verbose
+  python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --total-time-seconds 2.0 --tasks 25 --test-tasks 5 --epochs 5 --batch-size 1 --seed None
   ```
 
 - **Train on a larger GPU**, or on CPU when no adequate GPU is available
@@ -239,18 +265,16 @@ will raise `CUDA out of memory` partway into the first epoch. Two options:
 ### 2.4 Resurrect (continue from an existing run)
 
 ```bash
-python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py \
-    --total-time-seconds 2.0 --tasks 1 --epochs 1 --seed None --resurrect --verbose
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --total-time-seconds 2.0 --tasks 25 --test-tasks 5 --epochs 5 --seed None --resurrect
 ```
 
 **Expected**: because the inference smoke test (§2.3) left a full-state resume file
 beside the checkpoint, this run **hot-restarts** — it prints a
 `HOT RESTART: resumed full state ...` line reporting the resumed global epoch and
 learning rate, then runs one more epoch continuing the exact optimizer + learning-rate
-schedule (no re-converging, no LR reset). This §2.3-style command loads no TEST set, so
-it keeps the last-epoch checkpoint each epoch and the reported best test loss is `inf`;
-add `--test-tasks 1` to exercise best-on-test selection, where the checkpoint is
-overwritten only on a new best. If the resume file is
+schedule (no re-converging, no LR reset). Because it passes `--test-tasks 5`, it loads
+the held-out TEST set and selects the checkpoint on best test loss (overwritten only on
+a new best), continuing the best-on-test bookkeeping §2.3 began. If the resume file is
 absent (for example deleted, or a run predating this feature), the same command falls
 back to a **cold** restart — loading the best checkpoint weights into a fresh optimizer
 at the peak LR (a `RESURRECT (cold: ...)` line) — and then writes a resume file so the
@@ -261,6 +285,29 @@ wall-time-limited invocations behave like one continuous run.
 learning rate; then run this `--resurrect` command — the printed global epoch resumes
 where §2.3 left off and the learning rate continues from the saved schedule rather than
 jumping back to the peak.
+
+### 2.4b Evaluate and Experiment (biology)
+
+The two remaining stages complete the biology smoke's `generate → infer → evaluate →
+experiment` sequence, mirroring the Detector reference (§2.5, steps 4–5) with the
+biology entry points and the same flags:
+
+```bash
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Evaluation.py --total-time-seconds 2.0 --eval-tasks 2 --pool-mode unrestricted --seed None
+python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Experiment.py --total-time-seconds 2.0 --kinds ALP,BET --max-cells 2 --pool-mode unrestricted --seed None
+```
+
+`--pool-mode unrestricted` is mandatory here for the same reason as §2.5: the smoke
+posterior is undertrained, so its mass falls outside the prior box and the default
+`bounded` rejection pool stalls. Evaluation reports MAP recovery on the 20 EVAL videos
+(requires the Inference smoke's estimator); Experiment applies the posterior to the real
+MET recordings and writes a per-condition report for the ALP and BET cells (requires
+those recordings present under the experiment data directory).
+
+**Acceptance** (biology): all five stages exit zero; the Inference test loss descends
+across the epochs on fresh per-video data (a flat curve signals a frozen-seed
+regression); Evaluation reports MAP recovery on the 20 EVAL videos; Experiment writes a
+per-condition report for the ALP and BET cells.
 
 ### 2.5 Detector calibration smoke test
 
@@ -295,12 +342,80 @@ undertrained, so its mass falls outside the prior box and the default `bounded`
 rejection pool stalls; `bounded` is for a well-trained (production) posterior.
 `--video-dtype-bits 8` matches the synthetic-video bit depth the estimator trains
 on (raw experimental frames are 16-bit, converted to 8-bit for inference) and is
-also the DLI default.
+also the DLI default. Unlike biology, the detector DLI needs no `Nuisance_DLI` artifact
+— it draws imaging from the prior box, because imaging is what the detector infers. As
+with biology, Evaluation and Experiment require the estimator trained in step 3, and
+Experiment additionally requires the real ALP/BET recordings staged under the experiment
+data directory.
 
 **Acceptance**: all five stages exit zero; the Inference test loss descends across
 the five epochs on fresh per-video data (a flat curve signals a frozen-seed
 regression); Evaluation reports MAP recovery on the 20 EVAL videos; Experiment
 writes a per-condition report for the ALP and BET cells.
+
+### 2.5b Build the Nuisance_DLI (detector → biology bridge)
+
+The biology DLI stage draws its imaging from the `Nuisance_DLI` artifact — the detector
+calibration turned into a samplable imaging distribution. It is therefore built **after**
+the detector workflow (§2.5) and **before** the biology smoke (see **Run order** in the
+section intro). The artifact is Detector-namespaced
+(`<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Nuisance_DLI.npz`) and shared:
+the detector workflow produces it, the biology workflow consumes it.
+
+The construction (`Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py`)
+reads a value-based spec whose `posterior_sample_pool_choice` sets how the calibration
+becomes the samplable artifact. **Production** uses `raw` — the faithful calibration,
+resampled from the detector estimator's posterior over the real recordings; it is a GPU
+step and needs the estimator trained in the detector Inference stage. For a **smoke** the
+imaging values need only be valid, so use `box_user` with each parameter's range set to its
+imaging prior box — the six learnable imaging parameters' `PRIOR_RANGE` values defined in
+`srm_and_sbi_dimer_alp/detector_parameterization.py` (the `DETECTOR_PARAMETERIZATION` table).
+This is a per-parameter uniform over the prior that needs no estimator, no GPU, and no
+recordings — the smoke's fast stand-in for the calibration, occupying the same recipe slot. Write the spec to
+`<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Nuisance_DLI_Spec.toml`:
+
+```toml
+[block]
+posterior_sample_pool_choice = "box_user"   # per-parameter uniform over the ranges below; no pool / estimator / GPU
+pool_mode = "bounded"
+# Each [low, high] is that parameter's imaging prior PRIOR_RANGE (log10), defined in
+# srm_and_sbi_dimer_alp/detector_parameterization.py (the DETECTOR_PARAMETERIZATION table;
+# also det.theta_lower_bound() / det.theta_upper_bound()). The numbers below are that prior
+# at the current version — if the imaging prior changes there, re-derive these to match.
+# box_user validates every range against the prior box and fails loud otherwise, so a stale
+# copy cannot silently pass; a uniform over the full prior is trivially valid smoke imaging.
+[imaging.mu_r]
+low = 0.0
+high = 0.3
+[imaging.sigma_r]
+low = -1.0
+high = -0.25
+[imaging.mu_pc]
+low = 2.0
+high = 2.75
+[imaging.sigma_pc]
+low = -0.75
+high = 0.0
+[imaging.prob_photo_bleach]
+low = -2.0
+high = -0.5
+[imaging.lambda_rate]
+low = 0.0
+high = 1.0
+```
+
+Then build it (CPU, seconds):
+
+```bash
+python Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py --total-time-seconds 2.0 --build
+```
+
+**Expected**: `<data_bank>/Posit/SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Nuisance_DLI.npz`
+plus a `..._Nuisance_DLI_Analysis/` directory (a `report.md` and a 1-D marginals figure).
+The biology DLI (§2.2) then loads it; with `box_user` over the prior box every drawn imaging
+vector lies inside the prior (the report's "frac outside prior" is 0). The full set of
+representations and the calibration rationale are in the companion note
+`SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.md`.
 
 ### 2.6 Running smokes on HPC
 

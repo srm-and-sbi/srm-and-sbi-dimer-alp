@@ -59,6 +59,10 @@ def _run(script: Path, split: str, tasks: int, seed: Optional[int],
         cmd += ["--seed", str(seed)]
     if args.no_compress:
         cmd.append("--no-compress")
+    # --skin-factor is an RDS-only knob (a ReaDDy neighbor-list performance setting;
+    # the DLI entry point has no such flag). Omit when None -> the code default.
+    if script == _RDS and args.skin_factor is not None:
+        cmd += ["--skin-factor", str(args.skin_factor)]
 
     label = f"{_stage_label(script):<3} {split:<5} (--tasks {tasks}, --seed {seed})"
     if args.dry_run:
@@ -194,6 +198,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--no-compress", action="store_true",
         help="Save sets as .npy instead of compressed .zarr (passed to RDS/DLI).",
+    )
+    parser.add_argument(
+        "--skin-factor", type=float, default=None,
+        help="ReaDDy neighbor-list skin as a MULTIPLE of the particle diameter "
+             "(performance-only; RDS stage only -- not passed to DLI). Default None "
+             "-> the code default (PARAMETERS.simulation.rds.neighbor_list_skin_factor, "
+             "10x = 100 nm).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",

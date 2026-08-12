@@ -5,6 +5,53 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.12 - 2026-08-12
+
+Expose the ReaDDy neighbor-list (Verlet) **skin** as a documented, diameter-relative performance knob.
+The skin coarsens ReaDDy's cell-linked-list grid in the large, dilute imaging box; it is a pure
+performance parameter and does **not** change the physics — reactions still fire at the true reaction
+radius. Measured ~13× RDS speedup with statistically identical output (verified at the prior extremes,
+including max diffusivity with fusion-on-contact). No prior, artifact, or data-schema change;
+regeneration is not required.
+
+### Added
+
+- **`SimulationRDS.neighbor_list_skin_factor` (default `10.0`).** The neighbor-list skin expressed as a
+  MULTIPLE of `particle_diameter_nm` (skin = factor × diameter; `10×` = 100 nm). The default sits on the
+  broad fast plateau and clears the worst-case per-step displacement (~47 nm at max diffusivity) with
+  margin. The field carries the full rationale and the U-shaped cost curve (too small → a ~16-million
+  mostly-empty-cell sweep; too large → the box collapses toward ~1 cell and the candidate search
+  degrades to O(N²)).
+- **`build_simulation(..., skin_factor=None)`** applies the skin (`smut.skin = skin_factor ×
+  particle_diameter_nm`), defaulting to the config value; shared by both workflows — the detector twin
+  `build_detector_rds_simulation` forwards it. `None` → config default; negative values are rejected.
+- **`--skin-factor` on the RDS entry points** (via the shared `build_rds_parser`, so both the biology and
+  detector `Simulation_RDS.py` twins) and on `Generate_Datasets.py` (RDS stage only). The effective skin
+  in nm is echoed in the RDS run banner.
+- **`SKIN_FACTOR` batch knob** on the biology and detector `…_HPC_Simulation.sh` launchers (passed to the
+  RDS entry point only, never DLI), the `…_HPC_Submit.sh` front end (`simulation` stage), and the
+  `…_HPC_Generate_Controller.sh` campaign controller. Unset → the code default.
+
+### Context
+
+- Root cause of the RDS slowdown: the reaction radius (contact distance = 1 diameter = 10 nm) sets
+  ReaDDy's cell size, which in the ~40 µm dilute imaging box forces a >99.99%-empty ~16-million-cell grid
+  whose per-step management — not the physics — dominates runtime. The skin decouples the cell size from
+  the reaction radius, recovering the speed without altering the simulation.
+
+### Documentation
+
+- **`VALIDATION.md` §2 — smoke recipe synchronized across both workflows.** One reference
+  configuration (the detector §2.5 sizing) with an explicit **Run order** — detector workflow → build
+  `Nuisance_DLI` → biology workflow — that reproduces the production dependency instead of reordering
+  it for convenience. A new **§2.5b** documents building the `Nuisance_DLI`: production `raw` (from the
+  trained detector estimator) versus a smoke `box_user` uniform over the imaging prior box (standalone,
+  CPU-only — no estimator, GPU, or recordings), with the prior ranges pinned to
+  `detector_parameterization.py` (`DETECTOR_PARAMETERIZATION`) as the authoritative source. The
+  cross-workflow prerequisite, the `--video-dtype-bits` / `--batch-size` flags, the DLI nuisance-record
+  outputs, and a biology acceptance block were harmonized; the genuine per-workflow difference (only
+  biology consumes the artifact) is preserved.
+
 ## 0.4.11 - 2026-08-11
 
 Design note for a planned matched-imaging embedding validation, and a stale cross-reference fix.

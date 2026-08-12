@@ -22,7 +22,10 @@
 #   <stage> = simulation | inference | evaluation | experiment
 #   KEY=VALUE pairs are the stage's --export knobs (see each stage script header);
 #   anything not passed falls back to that stage script's own default:
-#     simulation  : SPLIT TASK_OFFSET TASK_COUNT TASK_SIMS TOTAL_TIME
+#     simulation  : SPLIT TASK_OFFSET TASK_COUNT TASK_SIMS TOTAL_TIME SKIN_FACTOR
+#                   (SKIN_FACTOR = ReaDDy neighbor-list skin as a multiple of the
+#                   particle diameter; RDS-only, performance not physics; unset =
+#                   the code default 10x = 100 nm)
 #     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH HEARTBEAT RESURRECT
 #                   (RESURRECT=1 continues training from the existing checkpoint)
 #     evaluation  : EVAL_TASKS SUMMARY POOL_MODE TOTAL_TIME
@@ -117,7 +120,7 @@ case "$STAGE" in
     case "$SPLIT" in train|test|eval) ;; *) echo "FATAL: SPLIT='$SPLIT' (use train|test|eval)." >&2; exit 1 ;; esac
     split_uc="$(echo "$SPLIT" | tr '[:lower:]' '[:upper:]')"
     JOBNAME="SRM_AND_SBI_DIMER_ALP_${timing_label}_Simulation_${split_uc}"
-    _add SPLIT; _add TASK_OFFSET; _add TASK_COUNT; _add TASK_SIMS; _add TOTAL_TIME
+    _add SPLIT; _add TASK_OFFSET; _add TASK_COUNT; _add TASK_SIMS; _add TOTAL_TIME; _add SKIN_FACTOR
     SB+=( --array="${ARRAY:-0-0}" )   # always array-submit so %a is a clean node number
     [ -n "${NTPN:-}" ] && SB+=( --ntasks-per-node="$NTPN" )
     [ -n "${CPT:-}" ]  && SB+=( --cpus-per-task="$CPT" )

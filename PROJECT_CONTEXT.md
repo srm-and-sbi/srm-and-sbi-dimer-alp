@@ -172,6 +172,23 @@ stay flat across arbitrarily many simulations while every simulation's output is
 unchanged. An opt-in `--probe` flag logs per-simulation thread, file-descriptor,
 and memory counts for diagnosing resource behavior, and is off by default.
 
+**Neighbor-list skin (performance, not physics).** ReaDDy finds reaction partners
+with a cell-linked list whose cell edge is `reaction_radius + skin`. In the large,
+dilute imaging box (~40 µm across, ~1000 particles) the reaction radius alone
+(= one particle diameter = 10 nm) partitions the box into a ~16-million-cell grid
+that is >99.99% empty, and per-step management of that grid — not the physics —
+dominates runtime. The **skin** (Verlet skin) decouples the cell size from the
+reaction radius: enlarging it coarsens the grid and recovers roughly a 13× RDS
+speedup, while the physics is untouched (reactions still fire only at the true
+reaction radius; the skin only widens which particles are considered as
+candidates). It is exposed as `SimulationRDS.neighbor_list_skin_factor` — a
+**multiple of the particle diameter** (default `10×` = 100 nm) — overridable per run
+via `--skin-factor` (RDS entry points, `Generate_Datasets.py`) or the `SKIN_FACTOR`
+batch knob. The cost is U-shaped: too small leaves the empty-cell sweep, too large
+collapses the box toward one cell and degrades the candidate search to O(N²); the
+default sits on the broad fast plateau and clears the worst-case per-step
+displacement (~47 nm at max diffusivity) with margin, so no reaction is missed.
+
 ### DLI Imaging (this repository, step 2)
 
 **Script:** `Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py`
