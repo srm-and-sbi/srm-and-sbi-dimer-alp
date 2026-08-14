@@ -6,10 +6,16 @@
 # trained posterior + the .tif recordings under <data_bank>/Experiment/, builds the
 # pooled posterior-sample pool (the GPU cost), caches it, and emits the value-based
 # spec pre-filled with the calibrated-imaging percentiles for a person to finalize.
-# Adapts to the allocated GPUs: with >1 GPU it shards the (kind, cell) work across
-# one worker per GPU (torchrun) into per-rank pool shards, then a single-process,
-# no-GPU --merge step concatenates the shards into the cached pool + spec; with 1 GPU
-# it is the original single-process path. A worker that draws no cells writes no shard.
+# Adapts to the allocation: with >1 node it shards the (kind, cell) work across one
+# worker per GPU on EVERY node (srun places one torchrun launcher per node) into
+# per-rank pool shards on the shared filesystem, then a single-process, no-GPU
+# --merge step concatenates every shard into the cached pool + spec; with 1 node
+# and >1 GPU it shards across that node's GPUs (torchrun --standalone) then merges;
+# with 1 GPU it is the original single-process path. --gres is per node, so
+# --nodes=N --gres=gpu:G gives N*G shard workers (world_size = N*G); the sharding is
+# embarrassingly parallel (workers just need the shared output dir for the merge). A
+# worker that draws no cells writes no shard. (This stage is submitted directly by
+# sbatch, not via Submit.sh, so pass --nodes=N on the sbatch line for multi-node.)
 # This does NOT build the artifact -- edit the emitted _Nuisance_DLI_Spec.toml, then
 # run the analysis with --build (single process; it reuses the cached pool, no GPU).
 # Overridable via --export: POOL_MODE (bounded|unrestricted; default unrestricted),
@@ -27,6 +33,8 @@
 # Example (5 s window, bounded pool):
 #   cd /path/to/srm-and-sbi-dimer-alp
 #   sbatch --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_5S_50FPS_Nuisance_DLI --export=ALL,REPO=$PWD,POOL_MODE=bounded,TOTAL_TIME=5.0 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Nuisance_DLI.sh
+# Example (two nodes, pool build sharded across both -- add --nodes=N; --gres is per node):
+#   sbatch --nodes=2 --gres=gpu:4 --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Nuisance_DLI --export=ALL,REPO=$PWD Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Nuisance_DLI.sh
 # -----------------------------------------------------------------------------
 #SBATCH --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI   # fallback; per-run --job-name (with timing_label) overrides this
 #SBATCH --partition=gpu
@@ -79,16 +87,37 @@ POOL_MODE="${POOL_MODE:-unrestricted}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 SPAN="${SPAN:-20}"
 
-# GPU count for sharding: SRM_AND_SBI_GPUS override, else allocated GPUs, else 1.
+# GPUs PER NODE for sharding: SRM_AND_SBI_GPUS override, else the node's allocation,
+# else 1. NODE COUNT comes from the Slurm allocation (SLURM_NNODES; 1 for a
+# non-Slurm/local run), so the shard-worker count is world_size = NNODES * GPUS.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
+NNODES="${SLURM_NNODES:-1}"
 NDLI_PY="$REPO/Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py"
 NDLI_ARGS=( --emit-template --pool-mode "$POOL_MODE"
             --total-time-seconds "$TOTAL_TIME" --experiment-span-seconds "$SPAN" )
 
-echo "=== Nuisance_DLI (emit-template) | pool=${POOL_MODE} time=${TOTAL_TIME}s span=${SPAN}s gpus=${GPUS} | node $(hostname) ==="
+echo "=== Nuisance_DLI (emit-template) | pool=${POOL_MODE} time=${TOTAL_TIME}s span=${SPAN}s nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) | node $(hostname) ==="
 
-if [ "${GPUS:-1}" -gt 1 ]; then
-    # Shard the (kind, cell) work across $GPUS workers (one GPU each) into per-rank
+if [ "${NNODES:-1}" -gt 1 ]; then
+    # Multi-node sharding: srun places ONE torchrun launcher per node, each spawning
+    # GPUS local workers, so the (kind, cell) work shards round-robin across all
+    # NNODES*GPUS ranks into per-rank pool shards on the shared output dir (a worker
+    # that draws no cells writes no shard; no cross-rank communication); a single
+    # no-GPU --merge pass then concatenates every shard into the cached pool + spec.
+    MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
+    MASTER_PORT="${MASTER_PORT:-29500}"
+    echo "    multi-node: nnodes=$NNODES nproc_per_node=$GPUS rdzv=$MASTER_ADDR:$MASTER_PORT"
+    srun --nodes="$NNODES" --ntasks-per-node=1 --cpu-bind=none \
+        torchrun \
+            --nnodes="$NNODES" \
+            --nproc_per_node="$GPUS" \
+            --rdzv-id="${SLURM_JOB_ID:-0}" \
+            --rdzv-backend=c10d \
+            --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+            "$NDLI_PY" "${NDLI_ARGS[@]}"
+    python -u "$NDLI_PY" "${NDLI_ARGS[@]}" --merge
+elif [ "${GPUS:-1}" -gt 1 ]; then
+    # Single-node sharding: one worker per GPU (torchrun --standalone) into per-rank
     # pool shards, then merge them into the cached pool + emitted spec (no GPU).
     torchrun --standalone --nproc_per_node="$GPUS" "$NDLI_PY" "${NDLI_ARGS[@]}"
     python -u "$NDLI_PY" "${NDLI_ARGS[@]}" --merge

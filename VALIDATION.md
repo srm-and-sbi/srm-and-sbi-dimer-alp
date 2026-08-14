@@ -423,9 +423,13 @@ The same smoke runs on a cluster through the committed wrappers — the biology
 `SRM_AND_SBI_DIMER_ALP_HPC_*` set and the Detector `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_*`
 set — which exercise the paths a single workstation cannot: **multi-CPU
 generation** (many tasks packed per node, fanned out with a Slurm `--array`) and
-**multi-GPU training and evaluation** (data-parallel training; sharded evaluation
-with a separate `--merge` step). Running the smoke on HPC therefore validates the
-multi-node and multi-GPU machinery, not only the stage logic.
+**multi-GPU training, evaluation, and experiment** (data-parallel training;
+sharded evaluation/experiment with a separate `--merge` step). Each GPU stage also
+scales **across nodes** with `NODES=N` — `--gres` is per node, so
+`world_size = NODES * GPUs-per-node`; add `NODES=2` to a GPU smoke to exercise the
+multi-node path (inference binds all ranks in a c10d rendezvous; the sharded stages
+just need the shared output dir for the merge). Running the smoke on HPC therefore
+validates the multi-node and multi-GPU machinery, not only the stage logic.
 
 Submit on the short-lived check partitions (`test` for CPU generation, `gpu_test`
 for GPU stages), leaving the production partitions for full runs. Take the
@@ -476,7 +480,8 @@ default, in contrast to the smoke's `unrestricted`. Generation is seedless.
 
 Submit on HPC: generation on the CPU partition (tasks packed per node, fanned out
 with `--array` per split), training and evaluation on the GPU partition
-(multi-GPU). Partitions and node geometry are per-machine, supplied by each
+(multi-GPU, optionally multi-node via `NODES=N` — `world_size = NODES *
+GPUs-per-node`). Partitions and node geometry are per-machine, supplied by each
 cluster's `hpc_local.env`; the submission pattern and commands are in the HPC
 runbook (`Script_Bank/HPC/README.md`). The biology DLI stage runs with the
 imaging block marginalized (§3.1); a full biology production run, like the detector

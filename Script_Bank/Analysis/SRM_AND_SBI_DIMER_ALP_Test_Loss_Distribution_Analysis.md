@@ -1,18 +1,27 @@
 # Test-loss distribution analysis — usage and interpretation
 
-Companion to `SRM_AND_SBI_DIMER_ALP_Test_Loss_Distribution_Analysis.py`. The script reads a
-saved per-example test-loss distribution artifact and produces the picture the single scalar
-test loss cannot give: the shape of the distribution, an interpretable reference for what the
-numbers mean, and which regions of parameter space the estimator finds hard. This note
-explains how to run it and how to read its outputs, so the analysis can be used and understood
-without reverse-engineering the code.
+Companion to `SRM_AND_SBI_DIMER_ALP_Test_Loss_Distribution_Analysis.py` (biology) and
+`SRM_AND_SBI_DIMER_ALP_DETECTOR_Test_Loss_Distribution_Analysis.py` (detector); this is the
+authoritative reference for both. The script reads a saved per-example test-loss distribution
+artifact and produces the picture the single scalar test loss cannot give: the shape of the
+distribution, an interpretable reference for what the numbers mean, and which regions of
+parameter space the estimator finds hard. This note explains how to run it and how to read its
+outputs, so the analysis can be used and understood without reverse-engineering the code.
+
+**One tool, both workflows.** Both workflows write a Test-Loss-Distribution artifact whose
+manifest is self-describing, so the analysis is workflow-agnostic and built once over the
+shared-engine pattern: a workflow-agnostic kernel (`test_loss_analysis.py`), a shared runner
+(`test_loss_analysis_runner.py`), and two thin namespaced shims. The only per-workflow
+difference is which alias-qualified `Posit/` the canonical artifact is resolved from; the
+entry-point name carries the namespace (biology's 10 reaction-diffusion parameters, or the
+detector's 6 imaging parameters).
 
 This is a post-hoc, read-only analysis step, not one of the canonical pipeline stages. It
 lives in `Script_Bank/Analysis`, is never wired into the stage dispatcher, and is purely
-additive: it imports the core modules (`test_loss_distribution`, `diagnostics`) and reads a
-completed artifact, modifying nothing. It consumes only the artifact and the machine profile,
-so it can be run at any time after training on any machine that holds the artifact — including
-directly on an arbitrary `.npz` with no machine profile at all.
+additive: it imports the core modules (`test_loss_analysis`, `test_loss_distribution`,
+`diagnostics`) and reads a completed artifact, modifying nothing. It consumes only the artifact
+and the machine profile, so it can be run at any time after training on any machine that holds
+the artifact — including directly on an arbitrary `.npz` with no machine profile at all.
 
 ## What it analyzes
 
@@ -91,9 +100,9 @@ Ad hoc, on a specific artifact (no machine profile required):
 Arguments:
 
 - `--total-time-seconds` — the recording duration that sets the `timing_label` (for example
-  `2.0` → `2S_50FPS`), used to resolve the canonical Detector-namespaced artifact from the
-  machine profile. Required unless `--tld-path` is given; it does not itself trigger any
-  computation.
+  `2.0` → `2S_50FPS`), used to resolve this workflow's canonical artifact — the biology one,
+  or the `_DETECTOR`-namespaced one — from the machine profile. Required unless `--tld-path`
+  is given; it does not itself trigger any computation.
 - `--tld-path` — analyze this artifact verbatim instead of resolving the canonical one. In this
   mode no machine profile is consulted, so any artifact anywhere can be analyzed.
 - `--outdir` — output directory. Defaults to an `*_Analysis` directory beside the artifact.
@@ -162,14 +171,18 @@ carries three tables:
 - **This is a density-fit view, not a calibration certificate.** A low NLL means the posterior
   places high density on the true parameter; it does not, on its own, certify that the
   posterior's credible intervals have correct coverage. Calibration and coverage
-  (simulation-based calibration, TARP) require posterior *samples* per example, which this NLL
-  artifact does not carry, and are quantified in the Detector Evaluation stage (MAP recovery on
-  the held-out EVAL namespace), not here.
+  (simulation-based calibration, expected coverage, TARP, local C2ST) require posterior
+  *samples* per example, which this NLL artifact does not carry; they are measured by the
+  **`Posterior_Calibration` diagnostic** (on the held-out EVAL namespace). This matters for the
+  identifiability read below: this analysis locates *where* the estimator is challenged (the
+  hard tail's parameter regime), but whether that hardness is an honest identifiability limit —
+  a wide but calibrated posterior there — or overconfidence is answered by
+  `Posterior_Calibration`, stratified by the inferred value. Locate here, measure there.
 - **The mean NLL alone does not rank two estimators.** Comparing two trained models by their
-  mean test NLL conflates the (fixed) data entropy with the fit; a defensible ranking uses a
-  paired per-example log-score on the shared test set (a Diebold-Mariano or signed-rank test),
-  or the recovery comparison on EVAL. This analysis characterizes one artifact; it is not a
-  model-selection verdict.
+  mean test NLL conflates the (fixed) data entropy with the fit; a defensible ranking pairs the
+  per-example log-score on the shared `(task, sim)` test subset (a Diebold-Mariano or signed-rank
+  test). That comparison is the **`Estimator_Comparison` diagnostic**; this analysis
+  characterizes one artifact and is not a model-selection verdict.
 - **The bootstrap interval is a post-hoc summary.** It quantifies the sampling uncertainty of
   the mean over the recorded test examples; it is reproducible from the stored losses and is
   unrelated to the seedless generation and training pipeline.

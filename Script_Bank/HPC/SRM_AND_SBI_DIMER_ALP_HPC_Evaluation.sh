@@ -2,10 +2,19 @@
 # =============================================================================
 # Slurm HPC validation submitter: MAP recovery on the held-out EVAL set.
 # =============================================================================
-# Adapts to the allocated GPUs: with >1 GPU it shards the EVAL set across one
-# worker per GPU (torchrun) then merges the per-shard results into one report;
-# with 1 GPU it is the original single-GPU path. Reads the trained posterior +
-# EVAL data, writes the recovery report (Posit/..._MAP_Recovery/).
+# Adapts to the allocation: with >1 node it shards the EVAL set across one worker
+# per GPU on EVERY node (srun places one torchrun launcher per node), each writing
+# its own shard to the shared filesystem, then a single --merge pass combines them
+# into one report; with 1 node and >1 GPU it shards across that node's GPUs
+# (torchrun --standalone) then merges; with 1 GPU it is the original single-GPU
+# path (writes the report directly, no merge). --gres is per node, so --nodes=N
+# --gres=gpu:G gives N*G shard workers (world_size = N*G). The sharding is
+# embarrassingly parallel (no cross-rank communication -- the c10d rendezvous
+# torchrun sets up is unused here, shared with training only for one uniform
+# GPU-binding path); workers just need the shared output dir for the merge. Node
+# count comes from the allocation (Submit.sh NODES -> sbatch --nodes; SLURM_NNODES),
+# not an --export knob. Reads the trained posterior + EVAL data, writes the
+# recovery report (Posit/..._MAP_Recovery/).
 # Overridable via --export: EVAL_TASKS, SUMMARY (map|posterior|both), POOL_MODE
 #   (bounded|unrestricted), TOTAL_TIME, SRM_AND_SBI_GPUS (cap the GPUs used;
 #   default = all allocated). Workers are auto-capped at EVAL_TASKS (an idle
@@ -18,9 +27,11 @@
 # launcher default (2.0 s) gives timing_label 2S_50FPS, so swap the token (e.g.
 # 5S_50FPS) whenever you pass TOTAL_TIME=5.0. POOL_MODE defaults to bounded (a
 # trained posterior); use POOL_MODE=unrestricted for an undertrained/smoke posterior.
-# Example:
+# Example (single node):
 #   cd /path/to/srm-and-sbi-dimer-alp
 #   sbatch --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Evaluation --export=ALL,REPO=$PWD,EVAL_TASKS=1,SUMMARY=both Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Evaluation.sh
+# Example (two nodes, EVAL set sharded across both -- add --nodes=N; --gres is per node):
+#   sbatch --nodes=2 --gres=gpu:4 --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Evaluation --export=ALL,REPO=$PWD,EVAL_TASKS=25,SUMMARY=both Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Evaluation.sh
 # -----------------------------------------------------------------------------
 #SBATCH --job-name=SRM_AND_SBI_DIMER_ALP_Evaluation   # fallback; per-run --job-name (with timing_label) overrides this
 #SBATCH --partition=gpu
@@ -74,19 +85,41 @@ SUMMARY="${SUMMARY:-both}"
 POOL_MODE="${POOL_MODE:-bounded}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 
-# GPU count for sharding: SRM_AND_SBI_GPUS override, else allocated GPUs, else 1.
+# GPUs PER NODE for sharding: SRM_AND_SBI_GPUS override, else the node's allocation,
+# else 1. NODE COUNT comes from the Slurm allocation (SLURM_NNODES; 1 for a
+# non-Slurm/local run), so the shard-worker count is world_size = NNODES * GPUS.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
-# Never launch more workers than EVAL tasks -- an idle worker does no recovery.
-# EVAL_TASKS < GPUS caps GPUS; EVAL_TASKS <= 1 collapses to the single-process path.
+NNODES="${SLURM_NNODES:-1}"
+# Never launch more per-node workers than EVAL tasks -- an idle worker does no
+# recovery. EVAL_TASKS < GPUS caps GPUS; EVAL_TASKS <= 1 collapses to the
+# single-process path. (Across nodes world_size may still exceed EVAL_TASKS; an
+# idle rank simply writes no shard and --merge tolerates the missing file.)
 if [ "$EVAL_TASKS" -lt "$GPUS" ]; then GPUS="$EVAL_TASKS"; fi
 EVAL_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Evaluation.py"
 EVAL_ARGS=( --eval-tasks "$EVAL_TASKS" --summary "$SUMMARY" --pool-mode "$POOL_MODE"
             --total-time-seconds "$TOTAL_TIME" )
 
-echo "=== Evaluation | eval_tasks=${EVAL_TASKS} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s gpus=${GPUS} seed=None | node $(hostname) ==="
+echo "=== Evaluation | eval_tasks=${EVAL_TASKS} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
 
-if [ "${GPUS:-1}" -gt 1 ]; then
-    # Shard recovery across $GPUS workers (one GPU each), then merge to one report.
+if [ "${NNODES:-1}" -gt 1 ]; then
+    # Multi-node sharding: srun places ONE torchrun launcher per node, each spawning
+    # GPUS local workers, so the EVAL set shards round-robin across all NNODES*GPUS
+    # ranks. Each rank writes its own _shard_<r>_of_<n>.npz to the shared output dir
+    # (no cross-rank communication); a single --merge pass then combines every shard.
+    MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
+    MASTER_PORT="${MASTER_PORT:-29500}"
+    echo "    multi-node: nnodes=$NNODES nproc_per_node=$GPUS rdzv=$MASTER_ADDR:$MASTER_PORT"
+    srun --nodes="$NNODES" --ntasks-per-node=1 --cpu-bind=none \
+        torchrun \
+            --nnodes="$NNODES" \
+            --nproc_per_node="$GPUS" \
+            --rdzv-id="${SLURM_JOB_ID:-0}" \
+            --rdzv-backend=c10d \
+            --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+            "$EVAL_PY" "${EVAL_ARGS[@]}"
+    python -u "$EVAL_PY" "${EVAL_ARGS[@]}" --merge
+elif [ "${GPUS:-1}" -gt 1 ]; then
+    # Single-node sharding: one worker per GPU (torchrun --standalone), then merge.
     torchrun --standalone --nproc_per_node="$GPUS" "$EVAL_PY" "${EVAL_ARGS[@]}"
     python -u "$EVAL_PY" "${EVAL_ARGS[@]}" --merge
 else

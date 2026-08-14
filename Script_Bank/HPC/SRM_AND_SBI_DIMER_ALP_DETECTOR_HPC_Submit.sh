@@ -38,7 +38,11 @@
 #             each starts after the previous ENDS, regardless of success/failure)
 #   ARRAY     Simulation only: --array spec (default 0-0 = one node)
 #   NTPN CPT  Simulation only: --ntasks-per-node / --cpus-per-task (else baked)
-#   GRES      GPU stages: --gres override (else baked gpu:8)
+#   GRES      GPU stages: --gres override (else baked gpu:8); --gres is per node
+#   NODES     GPU stages: --nodes override for multi-node (else the baked --nodes=1).
+#             --gres is per node, so NODES=2 GRES=gpu:4 spans 2*4=8 ranks (world_size):
+#             inference trains data-parallel across them, evaluation/experiment shard
+#             the work across them. Inference --batch-size stays per-rank.
 #   EXCLUDE   --exclude node list -- steer off specific node(s), e.g. one with a degraded /work mount
 #   MON_OUT   batch-log --output dir (else the baked submit-directory --output)
 #
@@ -136,6 +140,7 @@ case "$STAGE" in
     _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add NUM_WORKERS; _add HEARTBEAT; _add RESURRECT
     [ -n "${GPU_PART:-}" ] && SB+=( --partition="$GPU_PART" )
     [ -n "${GRES:-}" ]     && SB+=( --gres="$GRES" )
+    [ -n "${NODES:-}" ]    && SB+=( --nodes="$NODES" )   # multi-node: --gres is per node -> world_size = NODES * GPUs-per-node
     [ -n "${MON_OUT:-}" ]  && SB+=( --output="$MON_OUT/%x_%A.out" )
     ;;
   evaluation)
@@ -144,6 +149,7 @@ case "$STAGE" in
     _add EVAL_TASKS; _add SUMMARY; _add POOL_MODE; _add TOTAL_TIME
     [ -n "${GPU_PART:-}" ] && SB+=( --partition="$GPU_PART" )
     [ -n "${GRES:-}" ]     && SB+=( --gres="$GRES" )
+    [ -n "${NODES:-}" ]    && SB+=( --nodes="$NODES" )   # multi-node: --gres is per node -> world_size = NODES * GPUs-per-node
     [ -n "${MON_OUT:-}" ]  && SB+=( --output="$MON_OUT/%x_%A.out" )
     ;;
   experiment)
@@ -155,6 +161,7 @@ case "$STAGE" in
     if [ -n "${KINDS:-}" ]; then export KINDS; KINDS_NOTE="KINDS=$KINDS (carried via ALL, comma-safe)"; fi
     [ -n "${GPU_PART:-}" ] && SB+=( --partition="$GPU_PART" )
     [ -n "${GRES:-}" ]     && SB+=( --gres="$GRES" )
+    [ -n "${NODES:-}" ]    && SB+=( --nodes="$NODES" )   # multi-node: --gres is per node -> world_size = NODES * GPUs-per-node
     [ -n "${MON_OUT:-}" ]  && SB+=( --output="$MON_OUT/%x_%A.out" )
     ;;
   *)

@@ -27,18 +27,21 @@ runs the matching entry point under `Script_Bank/Prime/`.
 - **Simulation** packs many generation tasks per node (RDS reaction-diffusion
   trajectories, then DLI diffraction-limited videos) and is CPU-bound.
 - **Inference** trains the posterior on the TRAIN tasks and selects on the
-  TEST tasks. It adapts to the allocated GPUs: more than one GPU trains
-  data-parallel via `DistributedDataParallel` (torchrun, one process per GPU);
-  one GPU uses the single-GPU path.
+  TEST tasks. It adapts to the allocation: more than one **node** trains
+  data-parallel *across nodes* (`srun` + `torchrun`, one process per GPU, all ranks
+  bound by a c10d rendezvous); one node with more than one GPU trains data-parallel
+  on that node (`torchrun --standalone`); one GPU uses the single-GPU path.
 - **Evaluation** estimates the maximum-a-posteriori parameter vector on the
   held-out EVAL set and reports per-parameter recovery accuracy and posterior
-  calibration. With more than one GPU it shards EVAL across workers (torchrun),
-  then merges the per-shard results into one report.
+  calibration. It shards EVAL across one worker per GPU on every allocated node
+  (`torchrun`, or `srun` + `torchrun` across nodes), each writing its own shard,
+  then merges the per-shard results into one report; one GPU uses the single-GPU path.
 - **Experiment** applies the trained estimator to real microscopy `.tif`
   recordings (no ground truth) and reports the inferred-parameter distribution
-  per condition. With more than one GPU it shards its `(kind, cell)` work across
-  workers (torchrun), then merges the per-shard results into one report. It is the
-  scientific end use, not a correctness check.
+  per condition. It shards its `(kind, cell)` work across one worker per GPU on
+  every allocated node (`torchrun`, or `srun` + `torchrun` across nodes), then
+  merges the per-shard results into one report. It is the scientific end use, not
+  a correctness check.
 
 The normal ordering is **Simulation → Inference → Evaluation**. Experiment runs
 once a trained posterior exists. Generation runs on the CPU partition; training,
@@ -98,7 +101,8 @@ pairs are that stage's `--export` knobs (anything omitted falls back to the
 stage script's own default). sbatch-level overrides go in the environment:
 `PART` (CPU partition — required for a live `simulation`, whose baked
 `--partition` is a placeholder), `GPU_PART`, `ACCT`, `TIME`,
-`ARRAY`/`NTPN`/`CPT` (simulation only), `GRES`, `MON_OUT`. A multi-value `KINDS`
+`ARRAY`/`NTPN`/`CPT` (simulation only), `GRES`, `NODES` (GPU stages — multi-node,
+`--gres` is per node so `NODES=2 GRES=gpu:4` → `world_size` 8), `MON_OUT`. A multi-value `KINDS`
 (e.g. `KINDS=ALP,BET`) is carried safely through the exported environment via
 `ALL` rather than the comma-split `--export`. The helper is to a single job what
 the generation controller (§5) is to the full generation campaign — both default
@@ -261,18 +265,35 @@ sbatch --partition=test --array=0-0 --ntasks-per-node=2  --export=ALL,REPO=$PWD,
 
 ### Inference / Evaluation / Experiment (GPU)
 
-The GPU scripts bake a whole-node allocation:
+The GPU scripts bake a single-node default that scales out with `NODES`:
 
-- `--nodes=1`, `--gres=gpu:8`, `--cpus-per-task=64`, `--mem=480G`
+- `--nodes=1` (default; override with `NODES=N` via `Submit.sh`, or `--nodes=N` on
+  a raw `sbatch`), `--gres=gpu:8` (per node), `--cpus-per-task=64`, `--mem=480G`
 - `--time=1-00:00:00` (Inference, Experiment); `--time=12:00:00` (Evaluation)
 
-Inference, Evaluation, and Experiment adapt to the GPUs they receive
-(`SLURM_GPUS_ON_NODE`, capped by the optional `SRM_AND_SBI_GPUS`): more than one
-GPU runs the torchrun path — data-parallel training (Inference) or work-sharded
-estimation (Evaluation shards its EVAL videos; Experiment shards its
-`(kind, cell)` work), each followed by a merge of the per-shard results — while
-one GPU runs the original single-GPU path. Use the full `gpu` partition (whole
-node, `gpu:8`) for validation unless a run is a genuinely tiny throwaway.
+Inference, Evaluation, and Experiment adapt to the allocation. `--gres` is per
+node, so `--nodes=N --gres=gpu:G` gives `world_size = N*G` ranks:
+
+- **More than one node** runs the multi-node path (`srun` places one `torchrun`
+  launcher per node, all ranks bound by a c10d rendezvous). Inference trains
+  data-parallel across every rank on every node (SyncBatchNorm + the loss
+  all-reduced across all ranks, so `--batch-size` stays per-rank and the effective
+  batch is `batch*world_size`); Evaluation and Experiment shard their work across
+  every rank (each writes its own shard to the shared filesystem — the rendezvous
+  is unused there, kept only for one uniform GPU-binding path), then a single
+  `--merge` pass combines the shards.
+- **One node, more than one GPU** runs the single-node path (`torchrun
+  --standalone`) — data-parallel training (Inference) or work-sharded estimation
+  (Evaluation shards its EVAL videos; Experiment shards its `(kind, cell)` work),
+  each followed by the merge.
+- **One GPU** runs the original single-GPU path.
+
+The GPU count per node is `SLURM_GPUS_ON_NODE`, capped by the optional
+`SRM_AND_SBI_GPUS`; the node count is `SLURM_NNODES` (from `--nodes`). Use the full
+`gpu` partition (whole node, `gpu:8`) for validation unless a run is a genuinely
+tiny throwaway. Multi-node Evaluation/Experiment need the output directory on a
+shared filesystem so the merge sees every node's shards (the case on the HPC data
+banks).
 
 **Wall-limited training continues with `RESURRECT`.** Training checkpoints its
 optimum each epoch. A run that will not reach its target epochs within the
@@ -280,7 +301,7 @@ partition wall is continued by relaunching the same submission with `RESURRECT=1
 (a `Submit.sh` knob, or `RESURRECT=1` in the raw `--export`): it loads that
 checkpoint and resumes. The first job runs fresh; every continuation passes
 `RESURRECT=1`. Repeat until the target epochs are reached. This works on the
-single-GPU and the data-parallel paths alike.
+single-GPU, single-node data-parallel, and multi-node paths alike.
 
 To pre-submit the whole chain so each link starts **even if the previous job hit
 the wall** (a timeout is recorded as a failure), gate each continuation on the
@@ -497,9 +518,9 @@ or the four biology stage wrappers**, and they are never wired into it.
 | Detector script | Role | Compute |
 |---|---|---|
 | `..._DETECTOR_HPC_Simulation.sh` | generation: diffusion-only RDS (B1) → imaging-from-theta DLI (B2), packed per node, `--array` fan-out, seedless | CPU |
-| `..._DETECTOR_HPC_Inference.sh` | train the imaging posterior (B3); >1 GPU → DDP via `torchrun`; saves the version-portable A5 estimator | GPU |
-| `..._DETECTOR_HPC_Evaluation.sh` | imaging MAP recovery on the held-out EVAL set (B5); >1 GPU → shard + a separate `--merge` step | GPU |
-| `..._DETECTOR_HPC_Experiment.sh` | imaging MAP estimation on real microscopy videos (B4); >1 GPU → shard + a separate `--merge` step | GPU |
+| `..._DETECTOR_HPC_Inference.sh` | train the imaging posterior (B3); >1 GPU → DDP via `torchrun`, >1 node → DDP across nodes (`srun`+torchrun, c10d); saves the version-portable A5 estimator | GPU |
+| `..._DETECTOR_HPC_Evaluation.sh` | imaging MAP recovery on the held-out EVAL set (B5); shards across all ranks (>1 GPU/node) + a separate `--merge` step | GPU |
+| `..._DETECTOR_HPC_Experiment.sh` | imaging MAP estimation on real microscopy videos (B4); shards across all ranks (>1 GPU/node) + a separate `--merge` step | GPU |
 | `..._DETECTOR_HPC_Submit.sh` | the Detector dispatcher — dry-run-first single-job submit builder | — |
 
 (The gap-simulation and coverage wrappers join this set as those stages are

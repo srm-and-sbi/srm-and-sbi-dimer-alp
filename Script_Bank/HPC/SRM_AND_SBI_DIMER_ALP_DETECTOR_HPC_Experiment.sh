@@ -2,11 +2,20 @@
 # =============================================================================
 # Slurm HPC application submitter: MAP estimation on real microscopy videos.
 # =============================================================================
-# Adapts to the allocated GPUs: with >1 GPU it shards the (kind, cell) work across
-# one worker per GPU (torchrun) then merges the per-shard results into one report;
-# with 1 GPU it is the original single-GPU path. Reads the trained posterior + the
-# .tif recordings under <data_bank>/Experiment/, writes inferred-parameter
-# distributions per condition (Posit/..._MAP_Experiment/).
+# Adapts to the allocation: with >1 node it shards the (kind, cell) work across one
+# worker per GPU on EVERY node (srun places one torchrun launcher per node), each
+# writing its own shard to the shared filesystem, then a single --merge pass
+# combines them into one report; with 1 node and >1 GPU it shards across that
+# node's GPUs (torchrun --standalone) then merges; with 1 GPU it is the original
+# single-GPU path (writes the report directly, no merge). --gres is per node, so
+# --nodes=N --gres=gpu:G gives N*G shard workers (world_size = N*G). The sharding is
+# embarrassingly parallel (no cross-rank communication -- the c10d rendezvous
+# torchrun sets up is unused here, shared with training only for one uniform
+# GPU-binding path); workers just need the shared output dir for the merge. Node
+# count comes from the allocation (Submit.sh NODES -> sbatch --nodes; SLURM_NNODES),
+# not an --export knob. Reads the trained posterior + the .tif recordings under
+# <data_bank>/Experiment/, writes inferred-parameter distributions per condition
+# (Posit/..._MAP_Experiment/).
 # Overridable via --export: KINDS (e.g. ALP,BET), MAX_CELLS (0=all),
 #   CHUNK_STEP (seconds; unset -> model-window default, non-overlapping), SUMMARY (map|posterior|both), POOL_MODE, TOTAL_TIME,
 #   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated). A worker that
@@ -29,6 +38,8 @@
 #   cd /path/to/srm-and-sbi-dimer-alp
 #   export KINDS=ALP,BET
 #   sbatch --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Experiment --export=ALL,REPO=$PWD,SUMMARY=both Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Experiment.sh
+# Example (two nodes, (kind, cell) work sharded across both -- add --nodes=N; --gres is per node):
+#   sbatch --nodes=2 --gres=gpu:4 --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_2S_50FPS_Experiment --export=ALL,REPO=$PWD,SUMMARY=both Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Experiment.sh
 # -----------------------------------------------------------------------------
 #SBATCH --job-name=SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment   # fallback; per-run --job-name (with timing_label) overrides this
 #SBATCH --partition=gpu
@@ -89,8 +100,11 @@ SUMMARY="${SUMMARY:-both}"
 POOL_MODE="${POOL_MODE:-bounded}"
 TOTAL_TIME="${TOTAL_TIME:-2.0}"
 
-# GPU count for sharding: SRM_AND_SBI_GPUS override, else allocated GPUs, else 1.
+# GPUs PER NODE for sharding: SRM_AND_SBI_GPUS override, else the node's allocation,
+# else 1. NODE COUNT comes from the Slurm allocation (SLURM_NNODES; 1 for a
+# non-Slurm/local run), so the shard-worker count is world_size = NNODES * GPUS.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
+NNODES="${SLURM_NNODES:-1}"
 EXP_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment.py"
 EXP_ARGS=( --kinds "$KINDS" --max-cells "$MAX_CELLS"
            --summary "$SUMMARY" --pool-mode "$POOL_MODE" --total-time-seconds "$TOTAL_TIME" )
@@ -98,11 +112,29 @@ EXP_ARGS=( --kinds "$KINDS" --max-cells "$MAX_CELLS"
 # point default it to the model window (see the CHUNK_STEP note above).
 [ -n "$CHUNK_STEP" ] && EXP_ARGS+=( --chunk-step-seconds "$CHUNK_STEP" )
 
-echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP:-window-default} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s gpus=${GPUS} seed=None | node $(hostname) ==="
+echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP:-window-default} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
 
-if [ "${GPUS:-1}" -gt 1 ]; then
-    # Shard the (kind, cell) work across $GPUS workers (one GPU each), then merge
-    # the per-shard arrays into one report. A worker that draws no cells writes no shard.
+if [ "${NNODES:-1}" -gt 1 ]; then
+    # Multi-node sharding: srun places ONE torchrun launcher per node, each spawning
+    # GPUS local workers, so the (kind, cell) work shards round-robin across all
+    # NNODES*GPUS ranks. Each rank writes its own shard to the shared output dir (a
+    # worker that draws no cells writes no shard; no cross-rank communication); a
+    # single --merge pass then combines every shard into one report.
+    MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
+    MASTER_PORT="${MASTER_PORT:-29500}"
+    echo "    multi-node: nnodes=$NNODES nproc_per_node=$GPUS rdzv=$MASTER_ADDR:$MASTER_PORT"
+    srun --nodes="$NNODES" --ntasks-per-node=1 --cpu-bind=none \
+        torchrun \
+            --nnodes="$NNODES" \
+            --nproc_per_node="$GPUS" \
+            --rdzv-id="${SLURM_JOB_ID:-0}" \
+            --rdzv-backend=c10d \
+            --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+            "$EXP_PY" "${EXP_ARGS[@]}"
+    python -u "$EXP_PY" "${EXP_ARGS[@]}" --merge
+elif [ "${GPUS:-1}" -gt 1 ]; then
+    # Single-node sharding: one worker per GPU (torchrun --standalone), then merge.
+    # A worker that draws no cells writes no shard.
     torchrun --standalone --nproc_per_node="$GPUS" "$EXP_PY" "${EXP_ARGS[@]}"
     python -u "$EXP_PY" "${EXP_ARGS[@]}" --merge
 else

@@ -366,21 +366,26 @@ single GPU). This keeps a multi-GPU run from exhausting host memory through work
 multiplication. This budget is the data-loading workers only; the GPU/shard-worker
 count is bounded separately (see Multi-GPU scaling).
 
-**Multi-GPU scaling.** Training, MAP-recovery evaluation, and the real-data
-application adapt to the GPUs they are given. Launched with one worker per GPU
-(via `torchrun`), training runs data-parallel through `DistributedDataParallel` —
-each worker holds a replica, processes its own shard of every batch, and
-synchronizes gradients each step, with `SyncBatchNorm` sharing batch statistics
-across workers by default — while MAP-recovery evaluation partitions the held-out
-videos across the workers, and the experiment stage partitions its
-`(condition, cell)` work the same way, each merging the per-shard results into
-one report. The single-GPU run is the collapse case of
-the same code: with one worker the distributed wrappers reduce to no-ops and the
-loop is exactly the original single-GPU path, so behavior is unchanged where
-only one GPU is present. The GPU count is read from the allocation, capped by an
-optional `SRM_AND_SBI_GPUS` override (set it to 1 to force the single-GPU path),
-and `SRM_AND_SBI_NO_SYNC_BN=1` opts each worker into its own local batch
-statistics for speed at the cost of re-validating recovery.
+**Multi-GPU / multi-node scaling.** Training, MAP-recovery evaluation, and the
+real-data application adapt to the allocation — across GPUs on one node and across
+nodes. `--gres` is per node, so `--nodes=N --gres=gpu:G` gives `world_size = N*G`
+ranks. Launched with one worker per GPU (via `torchrun` on one node, or `srun` +
+`torchrun` with a c10d rendezvous across nodes), training runs data-parallel
+through `DistributedDataParallel` — each worker holds a replica, processes its own
+shard of every batch, and synchronizes gradients each step across every rank on
+every node, with `SyncBatchNorm` sharing batch statistics across all ranks by
+default (so the batch size is per-rank and the effective batch is
+`batch*world_size`) — while MAP-recovery evaluation partitions the held-out videos
+across the ranks, and the experiment stage partitions its `(condition, cell)` work
+the same way, each writing its own shard to the shared filesystem and a single
+`--merge` step combining them into one report. The single-GPU run is the collapse
+case of the same code: with one worker the distributed wrappers reduce to no-ops
+and the loop is exactly the original single-GPU path, so behavior is unchanged
+where only one GPU is present. The per-node GPU count is read from the allocation,
+capped by an optional `SRM_AND_SBI_GPUS` override (set it to 1 to force the
+single-GPU path), and the node count from `SLURM_NNODES`; `SRM_AND_SBI_NO_SYNC_BN=1`
+opts each worker into its own local batch statistics for speed at the cost of
+re-validating recovery.
 
 ### Leak-proof data split (TRAIN / TEST / EVAL)
 
@@ -495,12 +500,40 @@ rather than a single monolithic support file. The modules and their roles:
 - **`evaluation.py`** — the MAP-recovery core shared by the validation stages:
   the seed-then-optimize estimator, posterior-quantile summaries, and report
   tables.
+- **`posterior_calibration.py`, `posterior_calibration_runner.py`** — the
+  workflow-agnostic posterior-calibration diagnostic (an Analysis tool, not a
+  pipeline stage). The kernel scores a trained posterior's calibration with
+  simulation-based calibration, expected coverage, TARP, and local C2ST (§7),
+  overall and stratified by target-theta dimension, operating only on pre-drawn
+  theta-space arrays and embeddings (it wraps `sbi.diagnostics` and imports nothing
+  from `parameterization`/`artifacts`). The runner streams the EVAL set, draws each
+  video's posterior samples, sample and truth log-densities, and embedding, and
+  writes the report; its two namespaced Analysis shims share it exactly as the stage
+  shims share their runner.
+- **`estimator_comparison.py`, `estimator_comparison_runner.py`** — the
+  workflow-agnostic estimator-comparison diagnostic (an Analysis tool, not a pipeline
+  stage). The kernel decides whether one trained estimator generalizes better than
+  another by the paired log-score on the shared `(task, sim)` subset of the held-out
+  TEST set (Diebold-Mariano + Wilcoxon + paired bootstrap; §7), operating on two
+  per-video loss arrays and importing nothing from `parameterization`/`artifacts`. The
+  runner reads two `TestLossDistribution` artifacts (per-video loss keyed by
+  `(task, sim)`), runs the statistics, and reports; its two namespaced Analysis shims
+  share it over one engine. No GPU.
+- **`test_loss_analysis.py`, `test_loss_analysis_runner.py`** — the workflow-agnostic
+  test-loss-distribution analysis (an Analysis tool, not a pipeline stage). The kernel
+  reads a best-epoch per-example NLL artifact and produces the distribution shape, the
+  uniform-prior NLL reference (the no-information baseline), and the tail-vs-parameter
+  identifiability read — which learnable parameters, and which end of their range, mark
+  the hardest examples (for biology the species counts, whose low end yields
+  uninformative videos). Everything is read from the artifact manifest, so it is
+  workflow-agnostic; the runner resolves the artifact through `cfg.paths` (or an ad-hoc
+  `--tld-path`) and reports; its two namespaced Analysis shims share it. No GPU.
 - **`io.py`** — file I/O: transparent loading of `.zarr`/`.npy`/`.npz`, video
   and theta-set writing, and bit-depth conversion. All paths come from the
   configuration helpers, never hardcoded.
-- **`visualization_rds.py`, `visualization_dli.py`, `visualization_inference.py`**
-  — stage-specific diagnostic and figure builders (matplotlib imported lazily so
-  headless runs do not pay its import cost).
+- **`visualization_rds.py`, `visualization_dli.py`, `visualization_inference.py`,
+  `visualization_calibration.py`** — stage-specific diagnostic and figure builders
+  (matplotlib imported lazily so headless runs do not pay its import cost).
 - **`diagnostics.py`** — the shared diagnostics engine behind the `--debug` /
   `--debug-dump` flags: per-step checkpoints, fail-loud invariant checks,
   quantitative stats, and a self-contained dumped report.
@@ -526,6 +559,28 @@ its held-out recovery quality, and writes figures plus a self-contained `report.
 its companion `Experiment_Temporal_Dynamics.md` gives the full interpretation.
 `SRM_AND_SBI_DIMER_ALP_Seeding_Validation.py` checks the RNG / non-determinism
 behavior of the generation stack.
+
+`SRM_AND_SBI_DIMER_ALP_Posterior_Calibration.py` and its
+`SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Calibration.py` twin score how
+well-calibrated a trained posterior is on the held-out EVAL set — simulation-based
+calibration, expected coverage, TARP, and local C2ST (§7), overall and stratified by
+each target parameter — over one shared engine
+(`posterior_calibration_runner.run_posterior_calibration`), the same two-shim structure
+the pipeline stages use, so one implementation serves both workflows and the entry-point
+name carries the namespace. It reads only the estimator and the EVAL set, writes its
+report to `Posit/`, is multi-GPU sharded with a `--merge` combine step, and is kept out
+of the stage dispatcher; the companion `SRM_AND_SBI_DIMER_ALP_Posterior_Calibration.md`
+documents both workflows.
+
+`SRM_AND_SBI_DIMER_ALP_Estimator_Comparison.py` and its
+`SRM_AND_SBI_DIMER_ALP_DETECTOR_Estimator_Comparison.py` twin decide whether one trained
+estimator generalizes better than another by the paired log-score on the shared
+`(task, sim)` TEST subset — pairing cancels each video's intrinsic entropy floor, so the
+difference isolates the two estimators' KL gap (§7) — over one shared engine
+(`estimator_comparison_runner.run_estimator_comparison`), the same two-shim structure.
+It reads two `TestLossDistribution` artifacts, needs no GPU, writes its report to
+`Posit/`, is kept out of the dispatcher, and is documented for both workflows in
+`SRM_AND_SBI_DIMER_ALP_Estimator_Comparison.md`.
 
 `SRM_AND_SBI_DIMER_ALP_Experiment_CD86_CTLA-4_Controls.py` reuses the trained DIMER-ALP
 posterior — with no retraining — to MAP-estimate parameters from real recordings of two
@@ -758,7 +813,12 @@ alternatives. Comparing the two *means* of two different-sized sets is invalid: 
 confounds the sets' intrinsic-entropy content. Whether the mean itself is
 trustworthy is checkable from the stored scores (a subsampling-rate log-log slope
 near −0.5; tail-index estimation; bootstrap skew); a heavy tail is itself the
-generalization red flag the mean concealed.
+generalization red flag the mean concealed. The `Estimator_Comparison` Analysis
+diagnostic implements this over one shared, workflow-agnostic engine: it reads two
+`TestLossDistribution` artifacts, pairs them on the shared `(task, sim)` subset, and
+reports the Diebold-Mariano statistic with the Wilcoxon signed-rank test and the
+paired-bootstrap interval as its heavy-tail-robust companions, for both the biology and
+the detector estimators.
 
 **Calibration and coverage.** A low loss cannot detect an overconfident
 posterior, so faithfulness — the coverage read-out introduced above — is measured
@@ -769,7 +829,14 @@ coverage of credible regions (Hermans et al. 2022), TARP (necessary and
 sufficient, in the population limit, for matching the true posterior; Lemos et al.
 2023), and local C2ST for per-observation fidelity on the few real observations
 (Linhart et al. 2023). These require posterior sampling and are therefore
-periodic/post-hoc rather than per-epoch.
+periodic/post-hoc rather than per-epoch. The `Posterior_Calibration` Analysis
+diagnostic implements all four over one shared, workflow-agnostic engine — reported
+overall and stratified along each target parameter by the posterior's **inferred**
+value (conditioning on the observation, since the rank is uniform conditional on it;
+binning on the latent truth would confound Bayesian shrinkage with miscalibration). A
+subregion where calibration degrades — the low-count regime for biology, an imaging
+setting for detector — is thereby localized rather than averaged away, for both the
+biology and the detector posteriors.
 
 **Scope.** All of the above measure **in-distribution** generalization — to new
 draws from the same prior-predictive. Out-of-distribution / real-data

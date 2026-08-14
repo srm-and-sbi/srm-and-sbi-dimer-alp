@@ -5,6 +5,93 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.14 - 2026-08-14
+
+Three workflow-general Analysis diagnostics, each built once as a workflow-agnostic kernel +
+shared runner + two namespaced shims (the shared-engine pattern the pipeline stages use), so
+one implementation serves both the biology and the detector workflows.
+
+### Added
+
+- **Posterior-calibration diagnostic** (`SRM_AND_SBI_DIMER_ALP_Posterior_Calibration.py`
+  + `…_DETECTOR_Posterior_Calibration.py`). Scores a trained posterior's calibration on
+  the held-out EVAL set with simulation-based calibration (Talts et al. 2018), expected
+  coverage (Deistler/Hermans 2022), TARP (Lemos et al. 2023), and local C2ST (Linhart et
+  al. 2023) — overall and stratified along each target parameter by the posterior's
+  inferred value (a function of the observation, so a calibrated posterior is not falsely
+  flagged by Bayesian shrinkage), localizing a subregion where calibration degrades rather
+  than averaging it away. New package modules:
+  `posterior_calibration.py` (workflow-agnostic kernel wrapping `sbi.diagnostics`, on
+  pre-drawn theta-space arrays + embeddings; the raw videos never leave the stream),
+  `posterior_calibration_runner.py` (streams EVAL, draws per-video samples/log-densities/
+  embeddings, multi-GPU sharded with `--merge`), and `visualization_calibration.py`. An
+  Analysis diagnostic — read-only, never wired into the `Submit.sh` dispatcher — built as
+  two namespaced shims over one shared engine, the same pattern as the pipeline stages, so
+  one implementation serves both workflows. Validated on a synthetic Gaussian toy: all four
+  measures separate a calibrated posterior from a deliberately overconfident one.
+
+- **Estimator-comparison diagnostic** (`SRM_AND_SBI_DIMER_ALP_Estimator_Comparison.py`
+  + `…_DETECTOR_Estimator_Comparison.py`). Decides whether one trained estimator generalizes
+  better than another by the paired log-score on the shared `(task, sim)` TEST subset —
+  pairing cancels each video's intrinsic entropy floor, so the difference isolates the two
+  estimators' KL gap — reported via the Diebold-Mariano statistic (Diebold & Mariano 1995)
+  with the Wilcoxon signed-rank test and a paired bootstrap as heavy-tail-robust companions.
+  New package modules: `estimator_comparison.py` (workflow-agnostic kernel, numpy + scipy)
+  and `estimator_comparison_runner.py` (reads two `TestLossDistribution` artifacts, no GPU).
+  An Analysis diagnostic — read-only, never dispatched — as two namespaced shims over one
+  shared engine. Validated end to end on the real biology checkpoints: −7.12 significantly
+  beats −6.91 (mean improvement +0.21, DM/Wilcoxon p≈0, bootstrap CI clear of zero).
+
+### Changed
+
+- **Test-loss-distribution analysis generalized to both workflows.** The previously
+  detector-only `SRM_AND_SBI_DIMER_ALP_Test_Loss_Distribution_Analysis.py` is retrofitted onto
+  the shared-engine two-shim pattern: its (already workflow-agnostic) analysis + figures move to
+  a new kernel `test_loss_analysis.py` + runner `test_loss_analysis_runner.py`; the canonical
+  artifact is now resolved through the workflow's `cfg.paths` (the unqualified shim → biology, a
+  new `…_DETECTOR_…` shim → detector), with the ad-hoc `--tld-path` mode preserved. Extended
+  with a `hardest_regime` summary (the least-identifiable parameter + which end of its range) and
+  a cross-reference to `Posterior_Calibration` for the hard tail's honesty. Validated on the real
+  biology TLD: the three species counts dominate the hard tail (KS D 0.23–0.47, all harder at low
+  count) — confirming the low-count identifiability limit.
+
+## 0.4.13 - 2026-08-13
+
+Scale the GPU HPC stages **across nodes**. Every GPU launcher now takes a `NODES=N`
+allocation and runs data-parallel (Inference) or work-sharded (Evaluation, Experiment,
+Nuisance_DLI) across all `world_size = NODES × GPUs-per-node` ranks; one node and one GPU
+behave exactly as before. No Python-engine change — the runners already shard and normalize
+by `world_size` (`resolve_topology` reads `SLURM_NNODES` / `SLURM_NTASKS`); this release is
+launcher + docs only. Validated on JUPITER: near-linear scaling (2.0× at 2 nodes, 3.7× at 4).
+
+### Added
+
+- **Multi-node branch in every GPU wrapper.** With `>1` node, `srun` places one `torchrun`
+  launcher per node, each spawning one process per GPU, bound by a c10d rendezvous — so
+  `--nodes=N --gres=gpu:G` trains/shards across `N×G` ranks. The single-node
+  `torchrun --standalone` path (`>1` GPU) and the single-GPU `python` path are byte-for-byte
+  unchanged. Applies to biology + detector `…_HPC_Inference.sh` (DDP), and
+  `…_HPC_Evaluation.sh`, `…_HPC_Experiment.sh`, `…_DETECTOR_HPC_Nuisance_DLI.sh`
+  (shard-then-`--merge`; the rendezvous is unused there, kept only for one uniform
+  GPU-binding path).
+- **`NODES` knob** on both `…_HPC_Submit.sh` dispatchers → `sbatch --nodes` for the GPU
+  stages (biology inference already had it; extended to biology evaluation/experiment and all
+  three detector GPU stages). `--gres` is per node, so `NODES=2 GRES=gpu:4` → `world_size` 8.
+
+### Context
+
+- The batch rule keys off `world_size`, not node count: `SyncBatchNorm` and the loss are
+  all-reduced across every rank on every node, so `--batch-size` stays per-rank and the
+  effective batch is `batch × world_size` whether the ranks sit on one node or several.
+- The sharded stages (Evaluation/Experiment/Nuisance_DLI) are embarrassingly parallel: each
+  rank writes its own `_shard_<r>_of_<n>.npz` and a single-process `--merge` combines them.
+  Multi-node needs no new shard/merge logic — an idle rank (world_size > shard count) writes
+  no shard and the merge tolerates it — but it does require the output directory on a shared
+  filesystem so the merge sees every node's shards (the case on the HPC data banks).
+- Documentation updated across the wrapper headers, both `Submit.sh` headers, the HPC runbook
+  (`Script_Bank/HPC/README.md`), the root `README.md`, `PROJECT_CONTEXT.md`, `VALIDATION.md`
+  (§2.6/§2.7), and `DETECTOR_WORKFLOW.md` (B3–B5).
+
 ## 0.4.12 - 2026-08-12
 
 Expose the ReaDDy neighbor-list (Verlet) **skin** as a documented, diameter-relative performance knob.

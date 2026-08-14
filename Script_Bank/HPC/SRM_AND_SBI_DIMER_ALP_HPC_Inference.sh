@@ -2,9 +2,18 @@
 # =============================================================================
 # Slurm HPC training submitter: train the posterior on TRAIN, select on TEST.
 # =============================================================================
-# Adapts to the allocated GPUs: with >1 GPU it trains data-parallel via
-# DistributedDataParallel (torchrun, one process per GPU); with 1 GPU it is the
-# original single-GPU path. The `gpu` partition allocates a whole node (8 GPUs).
+# Adapts to the allocation: with >1 node it trains data-parallel ACROSS NODES
+# (srun places one torchrun launcher per node, each spawning one process per GPU;
+# a c10d rendezvous binds all ranks into one process group); with 1 node and >1
+# GPU it is single-node data-parallel (torchrun --standalone, one process per
+# GPU); with 1 GPU it is the original single-GPU path. --gres is per node, so
+# --nodes=N --gres=gpu:G allocates N*G GPUs and world_size = N*G. The batch rule
+# keys off world_size, NOT node count: SyncBatchNorm shares the BatchNorm stats
+# and the loss is all-reduced across EVERY rank on EVERY node, so --batch-size
+# stays PER-RANK and the effective batch is batch*world_size whether the ranks sit
+# on one node or several. Node count comes from the allocation (Submit.sh NODES ->
+# sbatch --nodes; SLURM_NNODES), not an --export knob. The `gpu` partition
+# allocates a whole node (8 GPUs on the reference cluster; 4 GH200 on JUPITER).
 # Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
 #   HEARTBEAT (within-epoch progress: a line every N batches; default ~4/epoch),
 #   RESURRECT (set 1 to load the existing checkpoint and continue training from it
@@ -26,9 +35,11 @@
 # SRM_AND_SBI_DIMER_ALP_<timing_label>_Inference; with no TOTAL_TIME set the
 # launcher default (2.0 s) gives timing_label 2S_50FPS, so swap the token (e.g.
 # 5S_50FPS) whenever you pass TOTAL_TIME=5.0.
-# Example:
+# Example (single node):
 #   cd /path/to/srm-and-sbi-dimer-alp
 #   sbatch --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Inference --export=ALL,REPO=$PWD,TRAIN_TASKS=8,TEST_TASKS=2,EPOCHS=50 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Inference.sh
+# Example (two nodes, data-parallel across both -- add --nodes=N; --gres is per node):
+#   sbatch --nodes=2 --gres=gpu:4 --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Inference --export=ALL,REPO=$PWD,TRAIN_TASKS=8,TEST_TASKS=2,EPOCHS=50 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Inference.sh
 # Quick smoke on a shorter-lived test GPU partition (set <gpu-partition> to your cluster's):
 #   sbatch --partition=<gpu-partition> --gres=gpu:1 --time=01:00:00 --job-name=SRM_AND_SBI_DIMER_ALP_2S_50FPS_Inference --export=ALL,REPO=$PWD,TRAIN_TASKS=8,TEST_TASKS=2,EPOCHS=1 Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_HPC_Inference.sh
 # -----------------------------------------------------------------------------
@@ -97,16 +108,36 @@ LR_ARG=()
 RESURRECT_ARG=()
 [ "$RESURRECT" = 1 ] && RESURRECT_ARG=(--resurrect)   # only the value 1 resumes; unset/0/other = fresh
 
-# GPU count for data-parallel training: SRM_AND_SBI_GPUS override, else allocated, else 1.
+# GPUs PER NODE for data-parallel training: SRM_AND_SBI_GPUS override, else the
+# node's allocation, else 1. NODE COUNT comes from the Slurm allocation
+# (SLURM_NNODES; 1 for a non-Slurm/local run), so world_size = NNODES * GPUS.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
+NNODES="${SLURM_NNODES:-1}"
 INFER_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py"
 INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS"
              --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" "${LR_ARG[@]}" )
 
-echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} gpus=${GPUS} seed=None | node $(hostname) ==="
+echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
 
-if [ "${GPUS:-1}" -gt 1 ]; then
-    # Data-parallel: one worker per GPU (DistributedDataParallel via torchrun).
+if [ "${NNODES:-1}" -gt 1 ]; then
+    # Multi-node data-parallel: srun places ONE torchrun launcher per node, each
+    # spawning GPUS local worker processes; a c10d rendezvous at the first node
+    # binds all NNODES*GPUS ranks into one process group. torchrun exports
+    # RANK/LOCAL_RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT, which resolve_topology
+    # reads; --cpu-bind=none lets each node's GPUS children spread over its cores.
+    MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
+    MASTER_PORT="${MASTER_PORT:-29500}"
+    echo "    multi-node: nnodes=$NNODES nproc_per_node=$GPUS rdzv=$MASTER_ADDR:$MASTER_PORT"
+    srun --nodes="$NNODES" --ntasks-per-node=1 --cpu-bind=none \
+        torchrun \
+            --nnodes="$NNODES" \
+            --nproc_per_node="$GPUS" \
+            --rdzv-id="${SLURM_JOB_ID:-0}" \
+            --rdzv-backend=c10d \
+            --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+            "$INFER_PY" "${INFER_ARGS[@]}"
+elif [ "${GPUS:-1}" -gt 1 ]; then
+    # Single-node data-parallel: one worker per GPU (DistributedDataParallel via torchrun).
     torchrun --standalone --nproc_per_node="$GPUS" "$INFER_PY" "${INFER_ARGS[@]}"
 else
     # Single GPU: the original path.

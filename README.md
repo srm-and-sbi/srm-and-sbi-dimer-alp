@@ -67,17 +67,23 @@ python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Generate_Datasets.py --core-tasks
 python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Inference.py --total-time-seconds 2.0 --tasks 8 --test-tasks 2 --epochs 50
 ```
 
-#### Multi-GPU
+#### Multi-GPU / multi-node
 
-Training, evaluation, and the real-data application auto-adapt to the GPUs they
-are given. Launched under `torchrun` with one worker per GPU, training runs
-data-parallel (`DistributedDataParallel`); evaluation shards its EVAL videos
-across the workers and the experiment stage shards its `(condition, cell)` work,
-each then merging the per-shard results into one report. With a single GPU the
-same code collapses to the original single-GPU path — no flags to change.
-The GPU count is read from the allocation (`SLURM_GPUS_ON_NODE`); the HPC
-submitters wrap the `torchrun` launch, so on a whole-node `gpu` allocation a run
-uses every GPU automatically. Four controls tune the behavior:
+Training, evaluation, and the real-data application auto-adapt to the
+allocation — across GPUs on one node and across nodes. `--gres` is per node, so
+`--nodes=N --gres=gpu:G` gives `world_size = N*G` ranks. Training runs
+data-parallel (`DistributedDataParallel`): on one node under `torchrun`, across
+nodes under `srun` + `torchrun` with a c10d rendezvous binding every rank, with
+`SyncBatchNorm` and the loss all-reduced across all ranks (so the batch size stays
+per-rank and the effective batch is `batch*world_size`). Evaluation shards its
+EVAL videos across every rank and the experiment stage shards its
+`(condition, cell)` work, each writing its own shard and then merging the
+per-shard results into one report. With a single GPU the same code collapses to
+the original single-GPU path — no flags to change. The GPU count per node is read
+from the allocation (`SLURM_GPUS_ON_NODE`) and the node count from `SLURM_NNODES`;
+the HPC submitters wrap the launch, so on a whole-node `gpu` allocation a run uses
+every GPU automatically, and adding `NODES=N` scales it across nodes. Four controls
+tune the behavior:
 
 - **`--heartbeat N`** (Inference) — emit a within-epoch progress line every `N`
   batches (rank 0 only). Unset gives roughly four lines per epoch; a smaller `N`
