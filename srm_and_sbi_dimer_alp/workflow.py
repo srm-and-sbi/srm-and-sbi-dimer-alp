@@ -84,3 +84,31 @@ def detector_workflow() -> WorkflowConfig:
         param_module=detector_param,
         console_log_paths=detector_paths,
     )
+
+
+def parameter_keys(cfg) -> list:
+    """This workflow's learnable-parameter keys, in theta order.
+
+    The two parameterization modules name this table differently by design -- biology exposes
+    ``PARAMETER_KEYS``, detector ``DETECTOR_PARAMETER_KEYS`` -- so every shared runner would
+    otherwise repeat the same conditional, and a runner that forgot it would work for whichever
+    workflow its author tested and raise ``AttributeError`` for the other. Resolved once, here.
+    """
+    para = cfg.param_module
+    keys = getattr(para, "PARAMETER_KEYS", None)
+    if keys is None:
+        keys = para.DETECTOR_PARAMETER_KEYS
+    return list(keys)
+
+
+def parameter_table(cfg):
+    """This workflow's full parameter table (the per-parameter dicts carrying KEY, LABEL, ...).
+
+    Same naming asymmetry as :func:`parameter_keys`: ``PARAMETERIZATION`` for biology,
+    ``DETECTOR_PARAMETERIZATION`` for detector.
+    """
+    para = cfg.param_module
+    table = getattr(para, "PARAMETERIZATION", None)
+    if table is None:
+        table = para.DETECTOR_PARAMETERIZATION
+    return table

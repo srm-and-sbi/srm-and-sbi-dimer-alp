@@ -435,8 +435,13 @@ Submit on the short-lived check partitions (`test` for CPU generation, `gpu_test
 for GPU stages), leaving the production partitions for full runs. Take the
 partition, node geometry, and GPU counts from each wrapper's `#SBATCH` block and
 header, and replicate them — changing only the duration and the small smoke
-counts (section 2.5). The wrappers default to dry-run; preview the resolved
-`sbatch` line before submitting. The end-to-end dependency-chained sequence is in
+counts (section 2.5). Submit through the dispatchers — `..._HPC_Submit.sh` and
+`..._HPC_Generate_Controller.sh` (biology and Detector alike) — which default to
+dry-run (`DRYRUN=1` prints the resolved `sbatch` line and submits nothing; set
+`DRYRUN=0` only after the printed command is verified); the fleet-sync utility
+follows the same convention. The per-stage wrappers themselves are plain
+`sbatch` scripts with no dry-run mode, which is why submission goes through the
+dispatchers. The end-to-end dependency-chained sequence is in
 the HPC runbook (`Script_Bank/HPC/README.md`).
 
 ### 2.7 Production runs
@@ -475,8 +480,35 @@ restart spends at each requeue. The in-run LR warm restart (see `train_loop`) is
 a within-run plateau-escape at the LR floor, and its state persists across requeues too,
 so the sawtooth is continuous across rounds.
 
-Evaluation and Experiment use `--pool-mode bounded` — the well-trained-posterior
-default, in contrast to the smoke's `unrestricted`. Generation is seedless.
+**The sharded stages balance at video granularity, so any task count divides evenly over
+any worker count.** Evaluation and the calibration diagnostic enumerate the individual
+`(task, sim)` videos and deal *those* round-robin, rather than splitting whole tasks. This
+matters because every video costs about the same, so a whole-task split would set the wall
+clock by the heaviest rank: ten tasks over eight workers would give two of them twice the
+work of the other six, and the run would cost what sixteen tasks should. Video-level
+sharding balances any combination to within a single video, so the task count needs no
+relation to `world_size` (`world_size = NODES × GPUs-per-node`) and no configuration is
+penalized.
+
+That imbalance was also, historically, a **failure mode** worth understanding. `torchrun`'s
+exit barrier defaults to 300 s: ranks that finish early wait five minutes for the rest and
+then tear down the rendezvous, killing any rank still working and discarding its shard,
+after which the wrapper's `set -e` aborts before the merge and no report is written. A
+single-node launch (`torchrun --standalone`) has one agent and so never hits this; the
+multi-node launch places one agent per node and does. The wrappers now raise that timeout
+(`TORCHELASTIC_EXIT_BARRIER_TIMEOUT`, override with `EXIT_BARRIER=`) as a safety net, but
+with video-level sharding the skew that triggered it no longer arises.
+
+Evaluation uses `--pool-mode bounded` — the well-trained-posterior default, in
+contrast to the smoke's `unrestricted` — because the EVAL parameters *are* prior
+draws, so rejection sampling inside the prior box is both correct and efficient.
+**Experiment uses `--pool-mode unrestricted`**, even with a well-trained posterior:
+the real recordings are not prior draws, so the posterior conditioned on one can sit
+largely or wholly outside the prior box, and bounded rejection sampling then accepts
+essentially no proposals and the stage hangs (sbi reports `Only 0.000% proposal
+samples are accepted`). The pool mode therefore follows the *data*, not the training
+quality: bounded for synthetic parameters drawn from the prior, unrestricted for real
+recordings. Generation is seedless.
 
 Submit on HPC: generation on the CPU partition (tasks packed per node, fanned out
 with `--array` per split), training and evaluation on the GPU partition
@@ -516,7 +548,7 @@ against any particular reference run. Equivalence rests on three pillars:
    ```bash
    python -c "
    import zarr
-   z = zarr.open('<data_bank>/Theta/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Theta_Set_TASK_0.zarr', mode='r')
+   z = zarr.open('<data_bank>/Theta/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Theta_Set_TASK_0_TRAIN.zarr', mode='r')
    print(z[:].tolist())
    "
    ```
@@ -572,14 +604,15 @@ for i in 1 2 3; do
     rm -rf "$DB/Theta" "$DB/Video"
     python Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py \
         --total-time-seconds 2.0 --tasks 1 --task-simulations 5 --seed 42
-    md5sum "$DB/Theta/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Theta_Set_TASK_0.zarr"/0.0
+    find "$DB/Theta/SRM_AND_SBI_DIMER_ALP_2S_50FPS_Theta_Set_TASK_0_TRAIN.zarr" \
+        -type f | sort | xargs md5sum
 done
 ```
 
 **Acceptance**:
 
-- **Theta sets are bit-identical** across all three runs (the three md5 hashes
-  match). This proves the prior-sampling RNG is seeded and correctly propagated
+- **Theta sets are bit-identical** across all three runs (the per-file md5
+  listings match line for line). This proves the prior-sampling RNG is seeded and correctly propagated
   through the entry point; if a future code change ever drops that seed
   handling, this check catches the regression immediately.
 - **Trajectories (`.h5`), videos (`.zarr`), and inference outputs
@@ -718,8 +751,12 @@ report (figures, tables, arrays, and a live, tail-able `progress.log`) under
 For a small or undertrained posterior whose probability mass can fall outside
 the prior box, use the `unrestricted` candidate pool (`--pool-mode unrestricted`)
 so candidate sampling does not stall; for a well-trained posterior the default
-`bounded` pool (rejection sampling within the prior) is correct. Run any stage
-with `--help` for the full flag list.
+`bounded` pool (rejection sampling within the prior) is correct **on Evaluation
+only** — its EVAL parameters are synthetic prior draws, so the posterior mass
+lies inside the box. Experiment stays `unrestricted` even with a well-trained
+posterior: the pool mode follows the *data*, not the training quality, and the
+experimental recordings are not prior draws (see the pool-mode rule in
+section 2.7). Run any stage with `--help` for the full flag list.
 
 ---
 
@@ -795,8 +832,10 @@ A correctly set up and validated installation has:
 - A working `SRM_AND_SBI_ENVY_V0` environment (or a reused compatible one) with
   the package installed editable, and a `machine_profiles.toml` configured for
   the machine.
-- All four biology smoke-test invocations (RDS, DLI, Inference, and Inference
-  `--resurrect`) running end-to-end on minimal inputs. (The biology DLI stage renders
+- All six biology smoke-test invocations (RDS, DLI, Inference, Inference
+  `--resurrect`, Evaluation, and Experiment — sections 2.1–2.4b) running
+  end-to-end on minimal inputs, meeting the biology acceptance in section 2.4b.
+  (The biology DLI stage renders
   through the shared `render_dli_video` with the imaging block marginalized — see the
   imaging-pipeline pillar in section 3.1 — so it requires the `Nuisance_DLI` artifact to
   be built first, per the DLI smoke prerequisites in section 2.2.)
@@ -812,3 +851,59 @@ A correctly set up and validated installation has:
   frame counts (100 and 500).
 - A trained posterior validated by MAP recovery on the held-out EVAL set, with
   recovery accuracy and posterior calibration reported.
+
+---
+
+## 6. Assurance roadmap (not yet implemented)
+
+Everything above describes validation the repository performs today. The items
+below are engineering-assurance work the project has deliberately deferred
+behind the scientific program. They are listed here so a reader can distinguish
+completed validation from planned assurance — none of them exists yet.
+
+- **Automated pytest suite.** The checks in section 3 are run by hand; an
+  automated suite would pin them as regression tests. The natural targets:
+  parameter-table schemas and ordering (the theta layout the estimator depends
+  on), estimator artifact save/load round-trips with checksum and schema
+  rejection of a corrupted or mismatched file, shard/merge coverage and balance
+  invariants for the sharded stages (every video assigned exactly once, ranks
+  balanced to within one video), the deterministic renderer components (PSF
+  pixel integration at a fixed input), the EMCCD noise model's mean/variance
+  behavior against its analytic form, and a CLI `--dry-run` smoke driven by a
+  temporary machine profile so the entry points are exercised without a data
+  bank.
+
+- **CPU-only continuous integration.** A CI job running compilation, the unit
+  tests above, and packaging checks on every push would catch import breakage,
+  schema drift, and dependency-resolution regressions before they reach a
+  compute run. CPU-only keeps it runnable on any hosted runner; the GPU paths
+  remain covered by the smoke tests.
+
+- **Tagged releases plus a `CITATION.cff`.** Versions are currently identified
+  by the package version string; tagged releases would make each version
+  immutable and retrievable, and a `CITATION.cff` would make them citable, so a
+  result can name the exact code that produced it.
+
+- **A minimal runnable example.** A small reference dataset with expected
+  outputs would let a new user (or a reviewer) confirm an installation
+  end-to-end in minutes, without generating data first — the smoke tests verify
+  that the code runs, but only against data the user must produce.
+
+- **A per-release machine-readable validation manifest.** Each release would
+  ship a manifest recording the commit, the environment specification, the
+  dataset checksums, the per-parameter recovery and calibration metrics, and a
+  pass/fail verdict per criterion in section 5 — turning "validated" from a
+  narrative claim into a checkable record.
+
+- **Decoupling module import from machine configuration.** The configuration
+  currently validates at import time (section 1.4), which is a deliberate
+  fail-loud choice but couples every import — including a test collector's — to
+  a valid `MACHINE_PROFILE`. Loading the profile at the CLI boundary instead
+  would keep the fail-loud behavior for runs while letting the package import
+  cleanly on an unconfigured machine.
+
+- **An executable derivation script for the localization-derived imaging
+  priors.** The imaging prior ranges trace to localization analyses of the
+  public reference recordings; an executable script reproducing that chain —
+  from the public accession to the fitted values — would make the prior
+  derivation itself reproducible rather than only documented.

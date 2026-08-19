@@ -29,6 +29,7 @@ already-built and saved via ``Figure.savefig``, which needs no display.
 from __future__ import annotations
 
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
@@ -184,7 +185,12 @@ class DiagnosticReporter:
         dump_dir: Destination directory for the report and ``figures/``.
         run_label: Human-facing run identifier for the report header
             (e.g., "SRM_AND_SBI_DIMER_ALP_2S_50FPS_TASK_0").
-        timestamp: Optional run timestamp string for the report header.
+        timestamp: Run time for the report header, as a formatted string. Optional:
+            when omitted the reporter stamps the current UTC time itself, so a report
+            can never be written without a date and time.
+        run_note: Optional free-text remark about the run, rendered on its own line
+            beneath the timestamp. Anything a caller wants to SAY about a run belongs
+            here; passing prose as ``timestamp`` would displace the stamp.
     """
 
     # Minimum free space required before writing dump artifacts. Guards the
@@ -197,12 +203,20 @@ class DiagnosticReporter:
                  dump: bool = False,
                  dump_dir: Optional[Union[str, Path]] = None,
                  run_label: str = "",
-                 timestamp: str = "") -> None:
+                 timestamp: str = "",
+                 run_note: str = "") -> None:
         self.stage = stage
         self.enabled = bool(enabled)
         self.dump = bool(dump) and self.enabled
         self.run_label = run_label
-        self.timestamp = timestamp
+        # Every report states when it was produced. Defaulted here rather than required
+        # from the caller so that no entry point -- a stage runner, a smoke, or a one-off
+        # re-analysis harness -- can emit an undated report. A caller with a remark about
+        # the run passes ``run_note``, which is rendered separately and never displaces
+        # the stamp.
+        self.timestamp = timestamp or datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC")
+        self.run_note = run_note
         self.dump_dir = Path(dump_dir) if dump_dir else None
 
         self._checks = []        # list of (name, passed, detail)
@@ -458,9 +472,9 @@ class DiagnosticReporter:
         if self.run_label:
             title += f" - {self.run_label}"
 
-        lines = [f"# {title}"]
-        if self.timestamp:
-            lines.append(f"Run: {self.timestamp}")
+        lines = [f"# {title}", f"Run: {self.timestamp}"]
+        if self.run_note:
+            lines.append(f"Note: {self.run_note}")
         lines.append("")
 
         # -- Checks table --------------------------------------------------

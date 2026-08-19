@@ -8,7 +8,8 @@
 > produced the working 2 s and 5 s posteriors, so this file doubles as a timing
 > reference and as a provenance record of those runs. Read the two files together
 > — the single-GPU file isolates one device on a micro-check; this one measures
-> the real allocation on real data.
+> the real allocation on real data. All numbers here were measured at code
+> version 0.2.10 (commit `6702526`, 2026-07-01).
 
 ## What was measured (2026-07-01)
 
@@ -19,7 +20,8 @@ Two settings, both real pipeline runs (no synthetic micro-check):
   working checkpoint.
 - **Multi-GPU, production-scale runs** — four MI210 devices of an eight-GPU HPC
   node (Goethe), exclusive allocation, networked scratch filesystem. The 2 s and
-  5 s training, evaluation, and experiment runs from the current pipeline.
+  5 s training, evaluation, and experiment runs from the pipeline as of
+  version 0.2.10 (2026-07-01).
 
 | Setting | Device(s) | Filesystem | Exclusivity | `num_workers` |
 |---|---|---|---|---|

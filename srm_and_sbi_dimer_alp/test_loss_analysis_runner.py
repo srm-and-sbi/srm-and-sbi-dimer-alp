@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -84,10 +84,15 @@ def run_test_loss_analysis(cfg: WorkflowConfig, args: argparse.Namespace) -> int
     production_date = datetime.fromtimestamp(tld_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The report header states when THIS analysis ran; the artifact's own production date is
+    # a separate fact and goes in the note, so both are on the record and neither displaces
+    # the other. (Reading the analysis without its own date makes it impossible to tell
+    # which of several re-analyses of one artifact produced the numbers in front of you.)
     reporter = DiagnosticReporter(
         stage="Test_Loss_Distribution_Analysis", enabled=True, dump=True, dump_dir=out_dir,
         run_label=f"{manifest.get('project_alias', '?')}_{manifest.get('timing_label', '?')}",
-        timestamp=f"analysis of artifact produced {production_date}",
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        run_note=f"analysis of an artifact produced {production_date}",
     )
 
     # ---- Preconditions ---------------------------------------------------

@@ -18,8 +18,10 @@
 # (Posit/..._MAP_Experiment/).
 # Overridable via --export: KINDS (e.g. ALP,BET), MAX_CELLS (0=all),
 #   CHUNK_STEP (seconds; unset -> model-window default, non-overlapping), SUMMARY (map|posterior|both), POOL_MODE, TOTAL_TIME,
-#   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated). A worker that
-#   draws no cells writes no shard.
+#   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated),
+#   EXIT_BARRIER (seconds; raises torch-elastic's 300 s exit barrier so straggler
+#     ranks are not killed; default 3600 -- the job wall time is the real bound).
+#   A worker that draws no cells writes no shard.
 #   Non-deterministic (no seed).
 # Submit from the repo root and forward REPO: Slurm spools this script to
 # /var/spool, so the child must be told where the repo is (--export=ALL,REPO=$PWD).
@@ -113,6 +115,14 @@ EXP_ARGS=( --kinds "$KINDS" --max-cells "$MAX_CELLS"
 [ -n "$CHUNK_STEP" ] && EXP_ARGS+=( --chunk-step-seconds "$CHUNK_STEP" )
 
 echo "=== Experiment | kinds=${KINDS} max_cells=${MAX_CELLS} chunk_step=${CHUNK_STEP:-window-default} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
+
+# torch-elastic's exit barrier defaults to 300 s: the ranks that finish first wait only five
+# minutes for the rest and then tear down the rendezvous -- which KILLS any rank still
+# working, discarding its results. The sharded stages are embarrassingly parallel and
+# routinely skewed (a rank drawing two tasks takes twice as long as one drawing a single
+# task), so five minutes is far tighter than the real spread and the teardown destroys
+# completed work. Raise it well past any plausible skew; the job wall time is the real bound.
+export TORCHELASTIC_EXIT_BARRIER_TIMEOUT="${EXIT_BARRIER:-3600}"
 
 if [ "${NNODES:-1}" -gt 1 ]; then
     # Multi-node sharding: srun places ONE torchrun launcher per node, each spawning

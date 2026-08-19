@@ -125,6 +125,46 @@ def figure_tarp(tarp) -> Figure:
     return fig
 
 
+def figure_pairwise(matrix, theta_keys, *, threshold: float = 0.05) -> Optional[Figure]:
+    """Heat map of one- and two-dimensional marginal calibration (``|ATC|``).
+
+    The diagonal is each parameter alone; off-diagonal ``[i, j]`` is the joint calibration
+    of the pair. Marginal (one-dimensional) calibration is necessary but not sufficient, so
+    an off-diagonal cell that is worse than both of its diagonals localizes a
+    *dependence* error -- the pair's correlation is misstated even though each parameter on
+    its own looks fine, which no per-parameter measure can reveal.
+    """
+    if matrix is None:
+        return None
+    m = np.asarray(matrix, dtype=float)
+    d = m.shape[0]
+    keys = [str(k) for k in theta_keys]
+
+    fig = Figure(figsize=(1.05 * d + 3.0, 0.95 * d + 2.4), dpi=200)
+    ax = fig.add_subplot(1, 1, 1)
+    # Scale to the data but always show at least the practical threshold, so a clean
+    # matrix reads as uniformly pale rather than being stretched into false contrast.
+    vmax = max(float(np.nanmax(m)), 2.0 * threshold)
+    im = ax.imshow(m, cmap="magma_r", vmin=0.0, vmax=vmax)
+    ax.set_xticks(range(d)); ax.set_yticks(range(d))
+    ax.set_xticklabels(keys, rotation=45, ha="right", fontsize=7, color=_INK)
+    ax.set_yticklabels(keys, fontsize=7, color=_INK)
+    for i in range(d):
+        for j in range(d):
+            v = m[i, j]
+            ax.text(j, i, f"{v:.02f}".lstrip("0"), ha="center", va="center", fontsize=6.5,
+                    color=("white" if v > 0.55 * vmax else _INK))
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+    cbar.set_label(f"|ATC|  (0 = calibrated; practical threshold {threshold:g})",
+                   fontsize=8, color=_INK)
+    cbar.ax.tick_params(labelsize=7, colors=_INK)
+    ax.set_title("Calibration of the 1-D and 2-D marginals\n"
+                 "diagonal = each parameter alone;  off-diagonal = the pair jointly",
+                 fontsize=10, color=_INK)
+    fig.tight_layout()
+    return fig
+
+
 def figure_stratified(result, *, test: str = "coverage") -> Optional[Figure]:
     """At-a-glance stratified panel: a summary statistic across each theta-dim's bins.
 
@@ -139,16 +179,21 @@ def figure_stratified(result, *, test: str = "coverage") -> Optional[Figure]:
     if not strata:
         return None
 
-    def value(s):
-        if test == "sbc" and s.sbc is not None:
-            return float(np.min(s.sbc.ks_pvals))
-        if test == "coverage" and s.coverage is not None:
-            return s.coverage.ks_pval
-        if test == "tarp" and s.tarp is not None:
-            return abs(s.tarp.atc)
-        if test == "lc2st" and s.lc2st is not None:
-            return s.lc2st.reject_fraction
-        return None
+    # Every panel plots an EFFECT SIZE, never a p-value: at production N the p-values are
+    # ~0 in every stratum, so bars drawn from them have zero height and the panel renders
+    # blank apart from its reference line. Effect sizes stay on a comparable, readable
+    # scale and are what actually ranks the strata.
+    #
+    # The per-stratum value comes from the kernel's shared accessor (which also feeds the
+    # report's stratified digest), so a plotted bar and its tabulated summary always
+    # describe the same quantity. For SBC that is the STRATIFYING parameter's OWN rank
+    # statistic, not the worst across all marginals: the panel answers "is this parameter
+    # calibrated across its own range?", so a max over marginals would paint every panel
+    # with whichever parameter happens to be worst overall and say nothing about the one
+    # named. The remaining measures are joint by construction.
+    def value(s, dim):
+        from .posterior_calibration import stratum_effect
+        return stratum_effect(s, test, dim)
 
     keys = []
     for s in strata:
@@ -157,24 +202,20 @@ def figure_stratified(result, *, test: str = "coverage") -> Optional[Figure]:
     ncols = min(3, len(keys)) or 1
     nrows = math.ceil(len(keys) / ncols)
     fig = Figure(figsize=(4.4 * ncols, 2.8 * nrows), dpi=200)
-    # Reference lines / interpretation per test.
+    # One practical threshold per test; larger is worse for every effect size here.
     ref = {"sbc": 0.05, "coverage": 0.05, "tarp": 0.05, "lc2st": 0.10}.get(test)
-    small_is_bad = test in ("sbc", "coverage")
 
+    # Map each stratifying parameter to its column in the theta vector, so the SBC panel
+    # can show that parameter's own statistic.
+    theta_keys = list(result.theta_keys)
     for j, key in enumerate(keys):
         ax = fig.add_subplot(nrows, ncols, j + 1)
         _style_axes(ax)
+        dim = theta_keys.index(key) if key in theta_keys else None
         rows = [s for s in strata if s.key == key]
         centers = [0.5 * (s.lo + s.hi) for s in rows]
-        vals = [value(s) for s in rows]
-        colors = []
-        for v in vals:
-            if v is None:
-                colors.append(_REFERENCE)
-            elif small_is_bad:
-                colors.append(_CRIT if v < ref else _GOOD)
-            else:
-                colors.append(_CRIT if v > ref else _GOOD)
+        vals = [value(s, dim) for s in rows]
+        colors = [_REFERENCE if v is None else (_CRIT if v > ref else _GOOD) for v in vals]
         ax.bar(range(len(rows)), [0 if v is None else v for v in vals],
                color=colors, zorder=3)
         if ref is not None:
@@ -183,9 +224,10 @@ def figure_stratified(result, *, test: str = "coverage") -> Optional[Figure]:
         ax.set_xticklabels([f"{c:.3g}" for c in centers], rotation=45, fontsize=7)
         ax.set_title(key, fontsize=8, color=_INK)
         ax.set_xlabel("inferred value (bin center)", fontsize=7, color=_INK)
-    label = {"sbc": "min KS p", "coverage": "KS p", "tarp": "|ATC|",
-             "lc2st": "reject frac"}.get(test, test)
-    fig.suptitle(f"Stratified {test}: {label} across bins of the inferred value",
+    label = {"sbc": "that parameter's own KS D", "coverage": "max coverage gap",
+             "tarp": "|ATC|", "lc2st": "reject frac"}.get(test, test)
+    fig.suptitle(f"Stratified {test}: {label} across bins of the inferred value  "
+                 f"(dashed = {ref:g} practical threshold; lower is better)",
                  fontsize=10, color=_INK)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig

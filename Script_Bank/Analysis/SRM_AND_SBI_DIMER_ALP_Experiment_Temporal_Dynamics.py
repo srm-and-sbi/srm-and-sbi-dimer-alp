@@ -238,7 +238,7 @@ def _recovery_within_band(recovery_npz_path, band=0.3):
     try:
         if not recovery_npz_path.exists():
             return None
-        with np.load(str(recovery_npz_path), allow_pickle=True) as d:
+        with np.load(str(recovery_npz_path), allow_pickle=False) as d:
             if "true_log10" not in d.files or "inferred_log10" not in d.files:
                 return None
             err = np.abs(d["inferred_log10"] - d["true_log10"])
@@ -471,7 +471,7 @@ def main(args):
             f"Experiment array not found: {npz_path}. Run the Experiment stage for "
             f"--total-time-seconds {args.total_time_seconds} first.")
 
-    with np.load(str(npz_path), allow_pickle=True) as d:
+    with np.load(str(npz_path), allow_pickle=False) as d:
         inferred_log10 = d["inferred_log10"]
         kind_index = d["kind_index"].astype(int)
         cell = d["cell"].astype(int)

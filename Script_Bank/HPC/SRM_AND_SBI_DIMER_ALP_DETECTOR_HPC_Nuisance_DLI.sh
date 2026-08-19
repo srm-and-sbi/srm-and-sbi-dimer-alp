@@ -20,7 +20,9 @@
 # run the analysis with --build (single process; it reuses the cached pool, no GPU).
 # Overridable via --export: POOL_MODE (bounded|unrestricted; default unrestricted),
 #   TOTAL_TIME (model/recording seconds; default 2.0), SPAN (recording span seconds;
-#   default 20), SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated).
+#   default 20), SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated),
+#   EXIT_BARRIER (seconds; raises torch-elastic's 300 s exit barrier so straggler
+#     ranks are not killed; default 3600 -- the job wall time is the real bound).
 # Submit from the repo root and forward REPO: Slurm spools this script to
 # /var/spool, so the child must be told where the repo is (--export=ALL,REPO=$PWD).
 # --job-name follows the data-file naming convention
@@ -97,6 +99,14 @@ NDLI_ARGS=( --emit-template --pool-mode "$POOL_MODE"
             --total-time-seconds "$TOTAL_TIME" --experiment-span-seconds "$SPAN" )
 
 echo "=== Nuisance_DLI (emit-template) | pool=${POOL_MODE} time=${TOTAL_TIME}s span=${SPAN}s nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) | node $(hostname) ==="
+
+# torch-elastic's exit barrier defaults to 300 s: the ranks that finish first wait only five
+# minutes for the rest and then tear down the rendezvous -- which KILLS any rank still
+# working, discarding its results. The sharded stages are embarrassingly parallel and
+# routinely skewed (a rank drawing two tasks takes twice as long as one drawing a single
+# task), so five minutes is far tighter than the real spread and the teardown destroys
+# completed work. Raise it well past any plausible skew; the job wall time is the real bound.
+export TORCHELASTIC_EXIT_BARRIER_TIMEOUT="${EXIT_BARRIER:-3600}"
 
 if [ "${NNODES:-1}" -gt 1 ]; then
     # Multi-node sharding: srun places ONE torchrun launcher per node, each spawning

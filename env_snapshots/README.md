@@ -5,8 +5,9 @@ SBI inference pipeline).
 
 > **Canonical environment:** `SRM_AND_SBI_ENVY_V0` (instructions below). The repo's
 > top-level `README.md` points here as the canonical install guide. A `READY_MARS`
-> environment (Python 3.9) is available as an alternative/fallback and is documented at
-> the end of this file.
+> environment (Python 3.9) is available as an alternative/fallback for legacy runs and is
+> documented at the end of this file — note it cannot host a fresh install of this
+> package (see the caveat there).
 
 > **Local env snapshots.** Dated `conda env export` / `conda list --explicit` captures of
 > the built environments are kept locally for the author's own reference and audit; they are
@@ -62,6 +63,11 @@ trains on CPU.**
 ---
 
 ## Install from scratch (canonical method)
+
+The conda-forge layer of step 1 below is also captured machine-readably in the repo-root
+`environment.yml` (the reference spec of that layer; PyTorch, sbi, and the package are
+installed on top per steps 2–3). Note the file's `name:` field differs — the canonical
+environment name is `SRM_AND_SBI_ENVY_V0`.
 
 ### Before you start
 1. Have **conda** installed (Miniconda / Miniforge: <https://github.com/conda-forge/miniforge>).
@@ -143,8 +149,11 @@ inside a GPU Slurm allocation, not the login node; on the CPU path `False` is ex
 ## Alternative environment: READY_MARS (Python 3.9)
 
 A program-wide Python 3.9 environment, available as an alternative/fallback to the
-canonical stack. Three captured mirrors are **not identical** (different torch builds and
-some drift):
+canonical stack. **Caveat — legacy runs only:** the packaged editable install
+(`pip install -e .`) requires Python >= 3.10 (`requires-python` in `pyproject.toml`), so
+`READY_MARS` cannot host a fresh install of this package; it serves pre-existing legacy
+runs, not new setups. Three captured mirrors are **not identical** (different torch builds
+and some drift):
 
 | role | python | torch | readdy | zarr | sbi |
 |---|---|---|---|---|---|

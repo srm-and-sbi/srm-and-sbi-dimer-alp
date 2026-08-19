@@ -47,7 +47,7 @@ Usage:
     MACHINE_PROFILE=<p> python \
         Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI_Sample_Geometric_Median.py \
         --total-time-seconds 2.0 [--collection map|posterior] [--map-source experiment|window-sgm] \
-        [--condition pooled|ALP|BET] [--pool-source artifact|cache] [--dry-run]
+        [--condition pooled|MET-FAB|MET-INLB] [--pool-source artifact|cache] [--dry-run]
 """
 import argparse
 import json
@@ -66,9 +66,10 @@ from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming
 _KDE_SUBSAMPLE = 50000           # cap on points used to estimate local density for the typicality read
 _FIGURE_SUBSAMPLE = 5000         # cap on scatter points drawn per figure
 
-# Internal condition keys map to publication display names.
-CONDITION_DISPLAY = {"ALP": "MET-FAB", "BET": "MET-INLB"}
-CONDITION_CHOICES = ("pooled", "ALP", "BET")
+# Conditions are named scientifically wherever a reader sees them. "ALP"/"BET" survive only as the
+# stored `kinds` field of the pools, a data-schema artifact, and are translated at the boundary.
+KIND_OF_CONDITION = {"MET-FAB": "ALP", "MET-INLB": "BET"}
+CONDITION_CHOICES = ("pooled", "MET-FAB", "MET-INLB")
 _NUISANCE_DLI_BUILD = "Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py"
 
 
@@ -95,9 +96,9 @@ def parse_args(argv):
                         "posterior-sample pool -- an explicit samples-derived estimate.")
     p.add_argument("--condition", choices=CONDITION_CHOICES, default="pooled",
                    help="restrict the collection to one experimental condition before the summary: "
-                        "'pooled' (default) both; 'ALP' = MET-FAB (monomer control); 'BET' = MET-INLB "
-                        "(dimer). Uses the collection's own per-row labels; a legacy unlabeled pool must "
-                        "be migrated first (the Nuisance_DLI build's --migrate-pool-labels).")
+                        "'pooled' (default) both; 'MET-FAB' the monomer control; 'MET-INLB' the dimer "
+                        "condition. Uses the collection's own per-row labels; a legacy unlabeled pool "
+                        "must be migrated first (the Nuisance_DLI build's --migrate-pool-labels).")
     p.add_argument("--n-samples", type=int, default=0,
                    help="number of vectors to draw when the artifact is a gaussian/box representation "
                         "(0 = 200000; ignored for a stored sample pool).")
@@ -256,17 +257,18 @@ def _apply_condition(args, vecs, labels):
             f"--condition {args.condition} needs a labeled collection, but this one carries no per-row "
             f"condition labels. Migrate the pool ({_NUISANCE_DLI_BUILD} --migrate-pool-labels), use "
             f"--pool-source cache, or the experiment map source.")
-    kinds = list(labels["kinds"])
-    if args.condition not in kinds:
-        raise SystemExit(f"--condition {args.condition} is not among the collection's kinds {kinds}.")
-    mask = np.asarray(labels["kind_index"]) == kinds.index(args.condition)
+    kind = KIND_OF_CONDITION.get(args.condition, args.condition)   # scientific name -> schema key
+    kinds = [str(k) for k in labels["kinds"]]
+    if kind not in kinds:
+        raise SystemExit(f"--condition {args.condition} (stored as {kind!r}) is not among the "
+                         f"collection's kinds {kinds}.")
+    mask = np.asarray(labels["kind_index"]) == kinds.index(kind)
     if not mask.any():
         raise SystemExit(f"--condition {args.condition}: the collection has no vectors for it.")
     vecs = vecs[mask]
     labels = {k: (np.asarray(v)[mask] if k in ("kind_index", "cell", "chunk") else v)
               for k, v in labels.items()}          # mask only the per-row arrays, not kinds/version
-    disp = CONDITION_DISPLAY.get(args.condition, args.condition)
-    return vecs, labels, f" [{args.condition} = {disp}, n={int(mask.sum())}]"
+    return vecs, labels, f" [{args.condition}, n={int(mask.sum())}]"
 
 
 def _load_collection(args, R):
@@ -455,8 +457,9 @@ def _write_report(args, R, pool_log, keys, choice, mode, n_source, low, high, re
 
     reporter.stat("Nuisance_DLI artifact", str(R["artifact_path"]))
     reporter.stat("collection", collection_label)
-    reporter.stat("condition", args.condition
-                  + (f" ({CONDITION_DISPLAY[args.condition]})" if args.condition in CONDITION_DISPLAY else ""))
+    reporter.stat("condition", args.condition,
+                  note=("both conditions summarized together" if args.condition == "pooled" else
+                        "MET-FAB is the monomer control; MET-INLB is the dimer condition"))
     reporter.stat("map source" if args.collection == "map" else "pool source",
                   args.map_source if args.collection == "map" else args.pool_source)
     reporter.stat("posterior_sample_pool_choice", choice)

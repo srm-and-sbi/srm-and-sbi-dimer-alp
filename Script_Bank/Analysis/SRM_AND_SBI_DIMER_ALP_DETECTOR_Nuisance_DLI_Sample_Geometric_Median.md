@@ -87,7 +87,7 @@ read or written without loading or computing anything.
     MACHINE_PROFILE=<profile> python \
       Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI_Sample_Geometric_Median.py \
       --total-time-seconds 2.0 [--collection map|posterior] [--map-source experiment|window-sgm] \
-      [--condition pooled|ALP|BET] [--pool-source artifact|cache] [--dry-run]
+      [--condition pooled|MET-FAB|MET-INLB] [--pool-source artifact|cache] [--dry-run]
 
 Arguments:
 
@@ -108,9 +108,11 @@ Arguments:
   (the medoid of each window's posterior draws), an explicit samples-derived estimate computed CPU-only
   from the posterior-sample pool. (This `window-sgm` is the SGM applied per window; it was previously a
   silent fallback and is now an explicit, named choice.)
-- `--condition` (`pooled` default, or `ALP`/`BET`) — restrict the collection to one experimental
-  condition before summarizing: `pooled` both, `ALP` = MET-FAB (monomer control), `BET` = MET-INLB
-  (dimer). The restriction reads the collection's own per-row condition labels, so it needs a labeled
+- `--condition` (`pooled` default, or `MET-FAB`/`MET-INLB`) — restrict the collection to one
+  experimental condition before summarizing: `pooled` both, `MET-FAB` the monomer control,
+  `MET-INLB` the dimer condition. (The stored per-row labels use the schema tokens `ALP`/`BET`;
+  the scientific names are translated at the boundary.) The restriction reads the collection's
+  own per-row condition labels, so it needs a labeled
   pool (a fresh build writes them; migrate a legacy pool with the Nuisance_DLI build's
   `--migrate-pool-labels`) or the labeled experiment MAP; a real condition on an unlabeled collection
   is a loud error, not a silent full-pool summary.
@@ -184,10 +186,10 @@ Written to the Detector-namespaced `Posit/` subdirectory under the data bank (`<
 - **A pooled summary averages across acquisition regimes; use `--condition` to separate them.** The pool
   mixes a monomer condition and a dimer condition, which shift the apparent width and brightness, so a
   single representative vector over the whole pool averages across them. The tool splits by regime
-  directly — `--condition ALP`/`BET` reads the collection's own per-row condition labels and summarizes
-  one condition alone — so the pooled out-of-prior mass and correlation matrix flag the mixing, and
-  `--condition` resolves it (the biology imaging is calibrated per condition; the monomer control, ALP,
-  is the reference).
+  directly — `--condition MET-FAB`/`MET-INLB` reads the collection's own per-row condition labels and
+  summarizes one condition alone — so the pooled out-of-prior mass and correlation matrix flag the
+  mixing, and `--condition` resolves it (the biology imaging is calibrated per condition; the monomer
+  control, MET-FAB, is the reference).
 - **The tractability path does not change the answer's meaning.** For a large pool the geometric median
   is found by Weiszfeld's iteration and snapped to the nearest actual member rather than by an exhaustive
   pairwise search; both return a real pool member, and the report records which path was taken.

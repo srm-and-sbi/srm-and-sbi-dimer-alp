@@ -5,10 +5,12 @@ part of the production pipeline: they render an already-produced artifact and ne
 simulation or an inference.
 
 - **`SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.ipynb`** — the posterior-predictive
-  check. Views one persisted clip (`*_Synthetic_Video.npz`, written by
-  `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.py`) as an
-  experimental-vs-synthetic pair: a scrubber (frame / center / zoom sliders) and a real-time
-  player. A pure viewer — it needs only `numpy`, `matplotlib`, and `ipywidgets`; no project
+  check. Views one persisted clip (`*_Synthetic_Video.npz`) as an experimental-vs-synthetic pair:
+  a scrubber (frame / center / zoom sliders) and a real-time player. The clip format is shared by
+  both posterior-predictive engines, so the notebook serves clips written by either
+  `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Predictive_Video.py` (detector
+  workflow) or `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Posterior_Predictive_Video.py`
+  (biology workflow). A pure viewer — it needs only `numpy`, `matplotlib`, and `ipywidgets`; no project
   package and no `MACHINE_PROFILE`.
 - **`Video_Scrubber.ipynb`** — frame-by-frame viewer and player for DLI video **sets**. Loads a
   generated video set through the project package, so it needs the package importable and a
@@ -22,9 +24,9 @@ frames). Do not route these images through a lossy codec.
 ## Prerequisites — exactly two
 
 **1. The correct environment: `SRM_AND_SBI_ENVY_V0`.** These notebooks are supported on this
-environment only. It carries both the project package and the notebook tooling: `jupyterlab`,
-`ipywidgets`, `ipykernel`. If a machine's `SRM_AND_SBI_ENVY_V0` does not yet have the tooling,
-add it once (additive; it does not touch the scientific stack):
+environment only. It carries the project package; the notebook tooling — `jupyterlab`,
+`ipywidgets`, `ipykernel` — is **not** part of the canonical install recipe and is added once
+on top (additive; it does not touch the scientific stack):
 
 ```bash
 <envy_v0_prefix>/bin/pip install jupyterlab ipywidgets ipykernel
@@ -33,7 +35,8 @@ add it once (additive; it does not touch the scientific stack):
 Do **not** run the notebooks from any other environment (a base or legacy environment). Those
 carry an older `ipywidgets` whose JupyterLab widget frontend is incompatible and fails with
 `Failed to load model class 'VBoxModel' from module '@jupyter-widgets/controls'`. The matched
-pairing is `jupyterlab` 4 with `ipywidgets` 8, which `SRM_AND_SBI_ENVY_V0` provides.
+pairing is `jupyterlab` 4 with `ipywidgets` 8, which the one-time install above provides in
+`SRM_AND_SBI_ENVY_V0`.
 
 **2. The data.**
 - Posterior-Predictive-Video: a rendered clip `*_Synthetic_Video.npz` (run the engine script to

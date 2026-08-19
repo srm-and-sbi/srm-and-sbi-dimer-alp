@@ -1,7 +1,9 @@
 # Single-GPU timing benchmark — srm-and-sbi-dimer-alp
 
 > Scope: **single GPU per machine** (one device used, no DataParallel/sharding).
-> These are the dated single-GPU baseline numbers. Data-parallel training and
+> These are the dated single-GPU baseline numbers, measured 2026-06-18; the
+> document text reflects the pipeline as of version 0.3.0 (commit `966015f`,
+> 2026-07-17). Data-parallel training and
 > evaluation sharding shipped in 0.2.0, and the experiment-stage sharding in 0.2.2
 > (all three GPU stages now adapt to the allocated GPUs); their timings live in
 > the companion `BENCHMARKS_Multi_GPU.md`, drawn from the production-scale 2 s and
@@ -15,9 +17,9 @@ Cross-machine timing for the standard check: **16 train / 4 test / 2 eval tasks 
 used, no data-parallel training or sharding, to fix this baseline);
 `num_workers` = 4 (workstations) / 8 (HPC node). HPC times are
 **run-only** (`sacct Elapsed` / script `Total elapsed`; Slurm queue excluded).
-These timings characterize the single-GPU configuration with current data-I/O
-(worker-count) and compile settings; the optimization opportunities below are
-measured against them.
+These timings characterize the single-GPU configuration with the data-I/O
+(worker-count) and compile settings as of the 2026-06-18 baseline; the
+optimization opportunities below are measured against them.
 
 This standard check is a canonical single-GPU timing benchmark, **not** the
 Detector calibration smoke test — the Detector smoke is seedless and uses

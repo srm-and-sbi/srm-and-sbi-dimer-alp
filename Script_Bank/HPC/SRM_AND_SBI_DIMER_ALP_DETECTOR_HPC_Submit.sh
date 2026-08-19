@@ -23,8 +23,10 @@
 #   KEY=VALUE pairs are the stage's --export knobs (see each stage script header);
 #   anything not passed falls back to that stage script's own default:
 #     simulation  : SPLIT TASK_OFFSET TASK_COUNT TASK_SIMS TOTAL_TIME
-#     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH NUM_WORKERS HEARTBEAT RESURRECT
-#                   (RESURRECT=1 continues training from the existing checkpoint)
+#     inference   : TRAIN_TASKS TEST_TASKS EPOCHS TOTAL_TIME BATCH NUM_WORKERS LR HEARTBEAT RESURRECT
+#                   (RESURRECT=1 continues training from the existing checkpoint;
+#                   LR = per-run starting/peak learning rate, unset = the stage
+#                   script's default peak)
 #     evaluation  : EVAL_TASKS SUMMARY POOL_MODE TOTAL_TIME
 #     experiment  : KINDS MAX_CELLS CHUNK_STEP SUMMARY POOL_MODE TOTAL_TIME
 #
@@ -137,7 +139,7 @@ case "$STAGE" in
   inference)
     SUBMIT_SCRIPT="$REPO/Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Inference.sh"
     JOBNAME="SRM_AND_SBI_DIMER_ALP_DETECTOR_${timing_label}_Inference"
-    _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add NUM_WORKERS; _add HEARTBEAT; _add RESURRECT
+    _add TRAIN_TASKS; _add TEST_TASKS; _add EPOCHS; _add TOTAL_TIME; _add BATCH; _add NUM_WORKERS; _add LR; _add HEARTBEAT; _add RESURRECT
     [ -n "${GPU_PART:-}" ] && SB+=( --partition="$GPU_PART" )
     [ -n "${GRES:-}" ]     && SB+=( --gres="$GRES" )
     [ -n "${NODES:-}" ]    && SB+=( --nodes="$NODES" )   # multi-node: --gres is per node -> world_size = NODES * GPUs-per-node

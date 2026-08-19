@@ -226,32 +226,37 @@ def _validate_table(raw: list[dict]) -> None:
     seen = set()
     for entry in raw:
         key = entry['KEY']
-        assert key not in seen, f"duplicate parameter KEY {key!r} in the detector table."
+        if key in seen:
+            raise ValueError(f"duplicate parameter KEY {key!r} in the detector table.")
         seen.add(key)
         role = role_of(entry)  # raises on the undefined POSTERIOR+range cell
         prior_range = entry['PRIOR_RANGE']
         if prior_range is not None:
             # Constraint 3: every ranged row is log10.
-            assert entry['LOG_FLAG'] is True and entry['LOG_BASE'] == 10, (
-                f"parameter {key!r}: a ranged row must be log10 "
-                f"(LOG_FLAG=True, LOG_BASE=10); got LOG_FLAG={entry['LOG_FLAG']!r}, "
-                f"LOG_BASE={entry['LOG_BASE']!r}."
-            )
+            if not (entry['LOG_FLAG'] is True and entry['LOG_BASE'] == 10):
+                raise ValueError(
+                    f"parameter {key!r}: a ranged row must be log10 "
+                    f"(LOG_FLAG=True, LOG_BASE=10); got LOG_FLAG={entry['LOG_FLAG']!r}, "
+                    f"LOG_BASE={entry['LOG_BASE']!r}."
+                )
             low, high = prior_range
-            assert low < high, f"parameter {key!r}: PRIOR_RANGE low {low} !< high {high}."
+            if not low < high:
+                raise ValueError(f"parameter {key!r}: PRIOR_RANGE low {low} !< high {high}.")
             if role == 'learnable':
                 # VALUE = LOG_BASE ** mid(range) invariant (linear-space center).
                 center = entry['LOG_BASE'] ** ((low + high) / 2)
-                assert abs(entry['VALUE'] - center) < 1e-9 * max(1.0, center), (
-                    f"parameter {key!r}: learnable VALUE {entry['VALUE']} is not the "
-                    f"prior center {center} (= {entry['LOG_BASE']}**{(low + high) / 2})."
-                )
+                if not abs(entry['VALUE'] - center) < 1e-9 * max(1.0, center):
+                    raise ValueError(
+                        f"parameter {key!r}: learnable VALUE {entry['VALUE']} is not the "
+                        f"prior center {center} (= {entry['LOG_BASE']}**{(low + high) / 2})."
+                    )
         else:
             # Fixed / nuisance-object / posterior rows carry no log metadata.
-            assert entry['LOG_FLAG'] is None and entry['LOG_BASE'] is None, (
-                f"parameter {key!r}: a non-ranged row must have LOG_FLAG=None, "
-                f"LOG_BASE=None."
-            )
+            if not (entry['LOG_FLAG'] is None and entry['LOG_BASE'] is None):
+                raise ValueError(
+                    f"parameter {key!r}: a non-ranged row must have LOG_FLAG=None, "
+                    f"LOG_BASE=None."
+                )
 
 
 # =============================================================================

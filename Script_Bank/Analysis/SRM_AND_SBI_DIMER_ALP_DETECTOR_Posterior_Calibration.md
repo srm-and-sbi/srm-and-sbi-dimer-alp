@@ -13,7 +13,8 @@ documented once in the authoritative companion:
 
 This shim differs only in the config it builds (`detector_workflow()`): the detector
 prior, parameter table, keys, and `_DETECTOR`-aliased paths. Outputs land under
-`<data_bank>/Posit/<project_alias>_DETECTOR_<timing_label>_Posterior_Calibration/`.
+`<data_bank>/Posit/<project_alias>_<timing_label>_Posterior_Calibration/`, where
+`<project_alias>` is `SRM_AND_SBI_DIMER_ALP_DETECTOR` for this workflow.
 
 ```bash
 MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Posterior_Calibration.py \

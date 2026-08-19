@@ -49,29 +49,41 @@ accession S-BSST712).
 - **A (monomer):** Single receptor. Diffuses freely (diffusion coefficient `D_A`).
 - **B (mobile dimer):** Two receptors bound, still mobile. Diffuses at rate
   `D_B` (typically slower than `D_A`).
-- **C (immobile dimer):** Two receptors bound and internalized or otherwise
-  immobilized. Does not diffuse (`D_C = 0`).
+- **C (immobile dimer):** Two receptors bound and immobilized. Diffuses slowly:
+  `D_C = R_C · D_A`, where the learnable relative diffusivity `R_C`
+  (`relative_diffusivity_chi`) is sampled over log10 [−2, −1] — 1% to 10% of the
+  monomer diffusivity.
 
 **Reactions:**
 - **`A + A ↔ B`:** Two monomers associate at rate `k_on`; the dimer dissociates
   at rate `k_off`.
-- **`B ↔ C`:** Mobile dimer transitions to the immobile state at rate `k_imm`;
-  no reverse (irreversible internalization).
+- **`B ↔ C`:** Mobile dimer immobilizes at rate `k_imm` (`rate_immobility`);
+  the immobile dimer remobilizes at rate `k_mob` (`rate_mobility`) — a
+  reversible mobility switch, with both directions learnable reaction channels.
 - **Future extension:** **`C → ∅`:** degradation/recycling of the immobile
   dimer, a biological extension reserved for future work.
 
-**Parameters to infer (θ):**
-- `D_A`: Monomer diffusion coefficient (μm²/s)
-- `D_B`: Mobile dimer diffusion coefficient (μm²/s)
-- `k_on`: Association rate (μm³/s or equivalent)
-- `k_off`: Dissociation rate (1/s)
-- `k_imm`: Immobilization rate (1/s)
-- `n_A_0`: Initial monomer count
-- `n_B_0`: Initial dimer count (typically 0)
-- `n_C_0`: Initial immobile dimer count (typically 0)
+**Parameters to infer (θ) — the ten learnables**, each sampled log-uniformly
+(prior ranges in log10 space, from the parameter table in `parameterization.py`):
+- `count_alp`, `count_bet`, `count_chi`: initial particle counts of A, B, and C
+  (counts; log10 prior [0, 2.5] each, i.e. 1 to ~316 particles)
+- `diffusivity_alp` (`D_A`): monomer diffusion coefficient (μm²/s; log10 prior
+  [−1.25, −0.25])
+- `relative_diffusivity_bet` (`R_B`): dimensionless mobile-dimer diffusivity
+  ratio, `D_B = R_B · D_A` (log10 prior [−0.625, −0.125])
+- `relative_diffusivity_chi` (`R_C`): dimensionless immobile-dimer diffusivity
+  ratio, `D_C = R_C · D_A` (log10 prior [−2, −1])
+- `relative_rate_dimerization` (`R_ON`): dimensionless dimerization rate as a
+  fraction of the diffusion-limited Smoluchowski cap (log10 prior [−2, 0])
+- `rate_dissociation` (`k_off`): dissociation rate, B → A + A (1/s; log10 prior
+  [−1, 1])
+- `rate_immobility` (`k_imm`): immobilization rate, B → C (1/s; log10 prior
+  [−1, 1])
+- `rate_mobility` (`k_mob`): mobilization rate, C → B (1/s; log10 prior [−1, 1])
 
 **Detector parameters — calibrated, not free constants** (inferred in the
-Stage-1 detector workflow, then held fixed for molecular inference; see §3):
+Stage-1 detector workflow, then marginalized as the calibrated-imaging nuisance
+for molecular inference; see §3):
 - Point-spread-function (PSF) width: **inferred** as a lognormal distribution
   over the Gaussian width (median `mu_r`, log-spread `sigma_r`) — *not* a fixed σ.
 - Brightness and photophysics: **inferred** — emitter brightness (median `mu_pc`,
@@ -94,7 +106,8 @@ Stage-1 detector workflow, then held fixed for molecular inference; see §3):
 
 The full program separates detector inference from molecular-parameter
 inference. The detector is characterized first, on a simpler system, and then
-held fixed while the molecular parameters are inferred. This disentangles
+marginalized — drawn per simulation from its calibrated nuisance — while the
+molecular parameters are inferred. This disentangles
 optical and sensor effects from the biological reaction-diffusion parameters,
 reduces the dimensionality of each inference problem, improves posterior
 geometry, and speeds convergence.
@@ -104,10 +117,13 @@ geometry, and speeds convergence.
 **Input:** Synthetic videos from a diffusion-only model (reactions disabled;
 pure Brownian motion), rendered through the same imaging model.
 
-**Objective:** Infer detector parameters (`β`) — camera gain, offset,
-read-noise, and photon conversion; PSF widths; emitter brightness; and
-brightness flicker — with the physics frozen so the imaging model is
-identifiable.
+**Objective:** Infer the six learnable imaging parameters (`β`) — the PSF-width
+lognormal (`mu_r`, `sigma_r`), the emitter-brightness lognormal (`mu_pc`,
+`sigma_pc`), the photobleaching probability `prob_photo_bleach`, and the flicker
+rate `lambda_rate` — with the physics frozen so the imaging model is
+identifiable. The EMCCD camera chain (`gamma`, `kappa_o`, `kappa_b`, `kappa_s`,
+`kappa_q`) is **not** inferred: it is marginalized as the SCOPE camera nuisance,
+each value drawn per simulation from its a-priori box (§2).
 
 **Output:** A posterior over `β` and a versioned, provenanced imaging-parameter
 artifact. This calibration is a complete workflow parallel to the biology
@@ -124,10 +140,15 @@ workflow.
 1. **RDS simulation:** ReaDDy solves the DIMER reactions and diffusion for the
    configured recording length.
 2. **DLI imaging:** A Gaussian PSF, Poisson photon noise, and EMCCD readout
-   noise are applied. The detector parameters (`β`) are **fixed**.
+   noise are applied. The imaging block is **marginalized** per simulation: the
+   six calibrated photophysics parameters are drawn from the persisted
+   `Nuisance_DLI` artifact (which may be collapsed to a single representative
+   vector, such as the sample geometric median), and the five SCOPE camera
+   parameters are drawn from their a-priori boxes.
 
-**Objective:** Infer the RDS parameters (`θ`) conditional on the fixed detector:
-`p(θ | video, β_fixed)`.
+**Objective:** Infer the RDS parameters (`θ`) with the imaging block
+marginalized — `p(θ | video)`, integrating over the calibrated-imaging and
+SCOPE camera nuisances rather than conditioning on a single fixed `β`.
 
 **Output:** A version-portable estimator artifact and a trained neural-network
 checkpoint. Both are written under canonical, duration-stamped names that every
@@ -214,7 +235,7 @@ brightness distribution is the *n*-fold convolution of the monomer's (Mutch et a
 2007; Digman & Gratton number-and-brightness) — giving a dimer a mean of `~2×` a
 monomer with a lighter upper tail than rigidly doubling one draw. It is corroborated
 by the data: the fitted per-spot intensity is `~1.8×` between the monomer-dominated
-Fab and the dimer-rich InlB condition (a lower bound, given the analysis
+MET-FAB and the dimer-rich MET-INLB condition (a lower bound, given the analysis
 intensity-range clip; see `DETECTOR_WORKFLOW.md` §6.4–§6.5).
 
 The retained alternative, `dimer_model="multiply"` (a non-default mode of the shared
@@ -226,7 +247,7 @@ is visible on average (a photoswitching dye, whose time-averaged brightness is t
 geometric mean `GM(1×, 2×) = √2`, or ~50% labeling). It shares the `~2×` mean but
 has a heavier upper tail, and is kept for sensitivity checks.
 
-The condition difference (Fab vs InlB) is carried by the **dimer fraction** (the
+The condition difference (MET-FAB vs MET-INLB) is carried by the **dimer fraction** (the
 species counts), with the combination model and the per-monomer brightness `mu_pc`
 shared across conditions — not by a per-condition brightness.
 
@@ -235,9 +256,10 @@ shared across conditions — not by a per-condition brightness.
 per-frame bleach probability is
 `prob_1 = 1 − (1 − prob_photo_bleach)^(1 / numb_photo_bleach)`, where
 `numb_photo_bleach = 100` is a fixed reference-frame count (a calibration
-convention, *not* the clip or video frame count) and `prob_photo_bleach = 0.1`
-is the cumulative bleach fraction over that 100-frame (2 s at 50 Hz) reference
-window.
+convention, *not* the clip or video frame count) and `prob_photo_bleach` is the
+cumulative bleach fraction over that 100-frame (2 s at 50 Hz) reference window —
+a detector-inferred photophysics parameter, marginalized per simulation from the
+`Nuisance_DLI` artifact (production calibration ≈ 0.107), not a fixed constant.
 
 The bleach rate is parameterized by this pair — a cumulative bleach probability
 together with the reference-frame count over which it accrues — rather than by a
@@ -247,13 +269,14 @@ clip duration, the per-frame rate `prob_1` is constant across video lengths; the
 cumulative bleach over an `n`-frame clip is
 `p_video = 1 − (1 − prob_photo_bleach)^(n / numb_photo_bleach)`, so a longer clip
 accumulates more bleaching through repeated application of the same per-frame
-transition matrix (about 10% over 100 frames / 2 s, about 41% over 500 frames /
-10 s).
+transition matrix (at `prob_photo_bleach ≈ 0.1`: about 10% over 100 frames /
+2 s, about 41% over 500 frames / 10 s).
 
 The reference count is pinned to 100 by design rather than tied to the clip
-length. The value `prob_photo_bleach = 0.1` over the 100-frame reference was
+length. The value of `prob_photo_bleach` over the 100-frame reference was
 calibrated by detector-parameter SBI inference on the experimental raw videos,
-with the reaction-diffusion parameters held out; `numb_photo_bleach = 100` is the
+with the reaction-diffusion parameters held out — the production `Nuisance_DLI`
+calibration puts it at ≈ 0.107; `numb_photo_bleach = 100` is the
 convention that inference was run under, so it is preserved to keep the
 calibrated value meaningful. Making `numb_photo_bleach` track the clip length
 would render the per-frame rate duration-dependent — unphysical, since bleaching
@@ -462,9 +485,8 @@ rather than a single monolithic support file. The modules and their roles:
 - **`workflow.py`** — the shared-engine control layer. It defines the frozen
   `WorkflowConfig` and the two factories `biology_workflow()` and
   `detector_workflow()` that build it. The config carries the genuine
-  per-workflow differences — the parameterization module, the alias-qualified
-  paths, the workflow tag, and the DLI imaging source (the `Nuisance_DLI`
-  artifact for biology, the imaging prior box for detector) — so one engine serves
+  per-workflow differences — the workflow tag, the alias-qualified paths, the
+  parameterization module, and the console-log paths — so one engine serves
   both the biology workflow (infers the ten reaction-diffusion parameters and
   marginalizes the imaging block) and the detector workflow (infers the six
   imaging parameters and marginalizes the reaction-diffusion domain and the
@@ -474,7 +496,10 @@ rather than a single monolithic support file. The modules and their roles:
   shared runner per stage, each exposing `run_<stage>(cfg, args)`. This is the
   single orchestration engine both workflows execute for that stage, so neither
   can silently drift; the per-workflow differences are localized in a
-  `_<stage>_spec(cfg)` resolver rather than duplicated across entry points.
+  `_<stage>_spec(cfg)` resolver rather than duplicated across entry points. In
+  particular, `simulation_dli_runner`'s per-stage spec resolver resolves the DLI
+  imaging source — the `Nuisance_DLI` artifact for biology, the imaging prior
+  box for detector.
 - **`parameterization.py`** — the single source of truth for configuration. It
   loads the per-machine profile, holds the sibling-wide defaults as frozen
   dataclasses (path conventions, simulation geometry and timing, RDS/DLI
@@ -482,12 +507,29 @@ rather than a single monolithic support file. The modules and their roles:
   the rich parameter specification (parameter ranges, log flags, units, and
   labels). It exposes a typed `PARAMETERS` singleton and prior/bounds helpers,
   and validates the configuration at import time.
+- **`detector_parameterization.py`** — the detector workflow's parameter
+  contract (value-based roles): the six learnable imaging parameters' priors,
+  with the reaction-diffusion block and the SCOPE camera marginalized as
+  nuisances; deliberately decoupled from `parameterization.py`, since the two
+  workflows' roles and ranges differ by design.
 - **`simulation_rds_support.py`** — the ReaDDy primitives: system builder,
   simulation builder, and trajectory-pose extraction (the extractor is reused by
   the imaging stage, which also requests a dimer mask).
+- **`detector_simulation_rds_support.py`** — the detector RDS forward model:
+  reuses the canonical `build_system` (with `pure_diffusion=True`) and
+  `build_simulation` by import, and draws the six reaction-diffusion nuisance
+  values (three species counts, three diffusivities) per simulation.
 - **`simulation_dli_support.py`** — the imaging pipeline: Gaussian PSF, EMCCD
   detector, intensity accumulation, the brightness state machine, the transition
   matrices (including photobleaching), and the top-level imaging orchestrator.
+- **`detector_simulation_dli_support.py`** — the detector DLI forward model:
+  re-exports the shared, source-agnostic renderer `render_dli_video` under the
+  detector-facing name `render_detector_video`, so both DLI stages render
+  through one implementation.
+- **`detector_nuisance_dli.py`** — the `Nuisance_DLI` calibrated-imaging
+  nuisance: the artifact format, its construction from the detector posterior
+  (including the pool modes and the single-vector sample-geometric-median
+  collapse), and the require-gate through which the biology DLI stage loads it.
 - **`experiment_support.py`** — the workflow-agnostic real-recording machinery:
   loading, windowing, and preparing experimental microscopy videos. It is shared
   by both the Experiment stage and the `Nuisance_DLI` analysis, so it carries no
@@ -497,6 +539,11 @@ rather than a single monolithic support file. The modules and their roles:
 - **`inference_support.py`** — the training pipeline: the video dataset (with
   augmentation), normalization, training/validation set-up, the training loop
   (with the resurrect branch), and posterior save/load.
+- **`artifacts.py`** — the self-describing, version-portable estimator artifact:
+  persists a trained estimator as separable components (compile-stripped
+  `state_dict`, rebuild spec, parameter schema) in one `.npz`, so it
+  reconstructs under whatever torch version loads it; the sole persisted
+  estimator format for both workflows.
 - **`evaluation.py`** — the MAP-recovery core shared by the validation stages:
   the seed-then-optimize estimator, posterior-quantile summaries, and report
   tables.
@@ -519,6 +566,10 @@ rather than a single monolithic support file. The modules and their roles:
   runner reads two `TestLossDistribution` artifacts (per-video loss keyed by
   `(task, sim)`), runs the statistics, and reports; its two namespaced Analysis shims
   share it over one engine. No GPU.
+- **`test_loss_distribution.py`** — the per-example best-epoch TEST-loss
+  artifact: holds the held-out per-example loss keyed by `(task_index,
+  sim_index)` with a self-describing manifest; written by the Inference stage
+  and read by the comparison and test-loss analyses.
 - **`test_loss_analysis.py`, `test_loss_analysis_runner.py`** — the workflow-agnostic
   test-loss-distribution analysis (an Analysis tool, not a pipeline stage). The kernel
   reads a best-epoch per-example NLL artifact and produces the distribution shape, the
@@ -528,6 +579,26 @@ rather than a single monolithic support file. The modules and their roles:
   uninformative videos). Everything is read from the artifact manifest, so it is
   workflow-agnostic; the runner resolves the artifact through `cfg.paths` (or an ad-hoc
   `--tld-path`) and reports; its two namespaced Analysis shims share it. No GPU.
+- **`embedding_space_distance.py`** — the workflow-agnostic embedding-space
+  distance kernel: the maximum-mean-discrepancy (MMD, permutation null) and
+  classifier two-sample (C2ST) statistics over trained-embedding vectors,
+  blocked by recording so within-recording correlation cannot masquerade as a
+  real difference.
+- **`embedding_space_distance_runner.py`** — the shared engine for the
+  experimental-versus-synthetic embedding-distance analysis (does the trained
+  network place the real recordings where it places its own synthetic
+  distribution?); its two namespaced Analysis shims share it.
+- **`sample_geometric_median.py`** — the workflow-agnostic sample-geometric-median
+  kernel: the correlation-preserving single-vector summary of a cloud of
+  parameter vectors (the median vector snapped to a realized sample, never the
+  vector of per-dimension medians).
+- **`sample_geometric_median_runner.py`** — the shared engine for the
+  sample-geometric-median analysis over the Experiment MAP cloud (and, for
+  detector, the `Nuisance_DLI` pool); its two namespaced Analysis shims share it.
+- **`posterior_predictive_video_runner.py`** — the shared engine for the
+  posterior-predictive video comparison: render a synthetic video at the
+  parameters inferred from one real recording and put the two side by side; its
+  two namespaced Analysis shims share it.
 - **`io.py`** — file I/O: transparent loading of `.zarr`/`.npy`/`.npz`, video
   and theta-set writing, and bit-depth conversion. All paths come from the
   configuration helpers, never hardcoded.
@@ -632,7 +703,7 @@ shared runner, and produces a defined on-disk artifact. Module paths are relativ
 
 | Scientific concept / stage | Code (module → function/class) | On-disk artifact |
 | --- | --- | --- |
-| DIMER reaction system (`A + A ↔ B`, `B → C`): species, diffusion coefficients, reaction rates, simulation box | `simulation_rds_support.py` → `build_system()`; the ReaDDy simulation is then assembled by `build_simulation()` | (in-memory ReaDDy system/simulation; trajectory written below) |
+| DIMER reaction system (`A + A ↔ B`, `B ↔ C`): species, diffusion coefficients, reaction rates, simulation box | `simulation_rds_support.py` → `build_system()`; the ReaDDy simulation is then assembled by `build_simulation()` | (in-memory ReaDDy system/simulation; trajectory written below) |
 | RDS trajectory recording (particle positions, species, time over the recording length) | entry point `SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py` (drives `build_system()` → `build_simulation()`) | trajectory `.h5` (HDF5, ReaDDy convention); sampled theta set `.zarr` (via `io.py` → `save_theta_set()`) |
 | Trajectory extraction (per-frame poses and the dimer mask) | `simulation_rds_support.py` → `extract_trajectory_poses()` (reused by the imaging stage, which requests the dimer mask) | (per-frame pose arrays passed to imaging) |
 | Diffraction-limited imaging forward model: Gaussian PSF, Poisson + EMCCD readout noise, dimer-brightness scaling, photobleaching | `simulation_dli_support.py` → `render_dli_video()` (source-agnostic renderer of an assembled 11-key imaging vector; shared by both DLI stages), with `Gaussian` / `sample_psf_width()` (PSF), `compute_intensity()` + `add_pixel_counts()` (intensity accumulation), `compute_brightness()` / `compute_brightness_probability()` and `generate_state_trajectories()` (brightness state machine), `compute_matrices()` (transition matrices incl. photobleaching), `EMCCD` / `add_noise()` / `generate_frames()` (detector noise) | (noised video array passed to writer below) |
@@ -842,7 +913,9 @@ biology and the detector posteriors.
 draws from the same prior-predictive. Out-of-distribution / real-data
 generalization is a different question, answered by coverage under model
 misspecification, the embedding-space experimental-versus-synthetic distance (MMD / C2ST,
-in `DETECTOR_WORKFLOW.md`, "Quantitative experimental-versus-synthetic distance"), and
+implemented by the workflow-agnostic `embedding_space_distance` kernel and its shared
+runner; the biology companion note is
+`Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Embedding_Space_Distance.md`), and
 posterior-predictive checks; misspecification-robust simulation-based inference
 (Ward et al. 2022; Kelly et al. 2023 — pending independent verification) is the
 relevant literature.
@@ -926,8 +999,10 @@ Useful diagnostics to compute when analyzing a trained posterior:
 - Marginal distributions (1D histograms per parameter).
 - Bivariate correlations (2D scatter plots, especially for confounded
   parameters).
-- Posterior-predictive check: sample `θ ~ posterior`, generate videos, and
-  compare to real data.
+- Posterior-predictive check — implemented as the `Posterior_Predictive_Video`
+  analysis (biology and detector Analysis shims over
+  `posterior_predictive_video_runner`): render a synthetic video at the
+  parameters inferred from one real recording and compare the two side by side.
 
 ---
 

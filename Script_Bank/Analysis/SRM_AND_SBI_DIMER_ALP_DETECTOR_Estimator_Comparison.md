@@ -14,7 +14,8 @@ once in the authoritative companion:
 
 This shim differs only in the config it builds (`detector_workflow()`): the
 `_DETECTOR`-aliased `Posit/` namespace its artifacts live under. Outputs land under
-`<data_bank>/Posit/<project_alias>_DETECTOR_<timing_label>_Estimator_Comparison/`.
+`<data_bank>/Posit/<project_alias>_<timing_label>_Estimator_Comparison/`, where
+`<project_alias>` is `SRM_AND_SBI_DIMER_ALP_DETECTOR` for this workflow.
 
 ```bash
 MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Estimator_Comparison.py \

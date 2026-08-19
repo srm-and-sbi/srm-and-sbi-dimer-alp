@@ -139,6 +139,10 @@ Arguments:
 - `--n-per-chunk` — posterior draws per chunk, both modes (default: the evaluation config's
   `posterior_samples`).
 - `--repool` — force recomputing the pool on the GPU even when a fresh cache exists (see Caching).
+- `--merge` — emit-only shard-combine mode: read the per-rank pool shards written by a multi-GPU
+  `--emit-template` run (in the `Posit/` directory), concatenate them into the posterior-sample pool,
+  cache it, then emit the spec, and exit. It does no estimation and needs no GPU; the HPC launcher runs
+  it once after the sharded workers finish. Single-GPU emit runs never use it (they build directly).
 - `--max-cells` — cap the cells per kind (0 = all).
 - `--migrate-pool-labels` — CPU-only maintenance (a mode of its own, independent of `--emit-template`/
   `--build`, needing no estimator or GPU): add the per-row condition/window labels (see Caching) to an

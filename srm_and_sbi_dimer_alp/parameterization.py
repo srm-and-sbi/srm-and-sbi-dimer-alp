@@ -890,16 +890,20 @@ _PARAMETERIZATION_RAW_NESTED: dict[str, list[dict]] = {
 
 # Validation: species count must match parameter count for 'count' and 'diffusivity'
 _species_count = len(PARAMETERS.simulation.rds.particle_species_names)
-assert len(_PARAMETERIZATION_RAW_NESTED['count']) == _species_count, (
-    f"_PARAMETERIZATION_RAW_NESTED['count'] has "
-    f"{len(_PARAMETERIZATION_RAW_NESTED['count'])} entries; "
-    f"expected {_species_count} (one per particle species)."
-)
-assert len(_PARAMETERIZATION_RAW_NESTED['diffusivity']) == _species_count, (
-    f"_PARAMETERIZATION_RAW_NESTED['diffusivity'] has "
-    f"{len(_PARAMETERIZATION_RAW_NESTED['diffusivity'])} entries; "
-    f"expected {_species_count} (one per particle species)."
-)
+# Explicit raises, not asserts: a count/diffusivity table misaligned with the species list
+# would silently misalign every theta column downstream, and `python -O` strips asserts.
+if len(_PARAMETERIZATION_RAW_NESTED['count']) != _species_count:
+    raise ValueError(
+        f"_PARAMETERIZATION_RAW_NESTED['count'] has "
+        f"{len(_PARAMETERIZATION_RAW_NESTED['count'])} entries; "
+        f"expected {_species_count} (one per particle species)."
+    )
+if len(_PARAMETERIZATION_RAW_NESTED['diffusivity']) != _species_count:
+    raise ValueError(
+        f"_PARAMETERIZATION_RAW_NESTED['diffusivity'] has "
+        f"{len(_PARAMETERIZATION_RAW_NESTED['diffusivity'])} entries; "
+        f"expected {_species_count} (one per particle species)."
+    )
 
 
 # Flat list (raw): all parameters in declaration order, regardless of group

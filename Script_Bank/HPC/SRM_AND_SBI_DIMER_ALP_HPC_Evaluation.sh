@@ -17,8 +17,8 @@
 # recovery report (Posit/..._MAP_Recovery/).
 # Overridable via --export: EVAL_TASKS, SUMMARY (map|posterior|both), POOL_MODE
 #   (bounded|unrestricted), TOTAL_TIME, SRM_AND_SBI_GPUS (cap the GPUs used;
-#   default = all allocated). Workers are auto-capped at EVAL_TASKS (an idle
-#   worker would do no recovery), so EVAL_TASKS<=1 runs the single-process path.
+#   default = all allocated). Sharding is at video granularity, so every allocated
+#   GPU gets work regardless of EVAL_TASKS (even EVAL_TASKS=1 spreads its videos).
 #   Non-deterministic (no seed).
 # Submit from the repo root and forward REPO: Slurm spools this script to
 # /var/spool, so the child must be told where the repo is (--export=ALL,REPO=$PWD).
@@ -90,16 +90,28 @@ TOTAL_TIME="${TOTAL_TIME:-2.0}"
 # non-Slurm/local run), so the shard-worker count is world_size = NNODES * GPUS.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 NNODES="${SLURM_NNODES:-1}"
-# Never launch more per-node workers than EVAL tasks -- an idle worker does no
-# recovery. EVAL_TASKS < GPUS caps GPUS; EVAL_TASKS <= 1 collapses to the
-# single-process path. (Across nodes world_size may still exceed EVAL_TASKS; an
-# idle rank simply writes no shard and --merge tolerates the missing file.)
-if [ "$EVAL_TASKS" -lt "$GPUS" ]; then GPUS="$EVAL_TASKS"; fi
+# No worker cap by task count: sharding is at VIDEO granularity, so even EVAL_TASKS=1
+# spreads its thousands of (task, sim) videos across every allocated GPU. Capping GPUS
+# at EVAL_TASKS here (a task-sharding-era rule) would wrongly run a 1-task, 10^4-video
+# set on a single GPU. An over-provisioned rank with no videos writes no shard and
+# --merge tolerates the missing file.
 EVAL_PY="$REPO/Script_Bank/Prime/SRM_AND_SBI_DIMER_ALP_Evaluation.py"
 EVAL_ARGS=( --eval-tasks "$EVAL_TASKS" --summary "$SUMMARY" --pool-mode "$POOL_MODE"
             --total-time-seconds "$TOTAL_TIME" )
 
 echo "=== Evaluation | eval_tasks=${EVAL_TASKS} summary=${SUMMARY} pool=${POOL_MODE} time=${TOTAL_TIME}s nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
+
+# Sharding is at VIDEO granularity (the runner deals individual (task, sim) videos
+# round-robin), so EVAL_TASKS needs no relation to world_size: any combination balances to
+# within a single video and no task count is penalized.
+
+# torch-elastic's exit barrier defaults to 300 s: the ranks that finish first wait only five
+# minutes for the rest and then tear down the rendezvous -- which KILLS any rank still
+# working, discarding its results. The sharded stages are embarrassingly parallel and
+# routinely skewed (a rank drawing two tasks takes twice as long as one drawing a single
+# task), so five minutes is far tighter than the real spread and the teardown destroys
+# completed work. Raise it well past any plausible skew; the job wall time is the real bound.
+export TORCHELASTIC_EXIT_BARRIER_TIMEOUT="${EXIT_BARRIER:-3600}"
 
 if [ "${NNODES:-1}" -gt 1 ]; then
     # Multi-node sharding: srun places ONE torchrun launcher per node, each spawning

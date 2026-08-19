@@ -329,6 +329,23 @@ default (`PARAMETERS` batch size, 32). One early conv3d activation is
 batch × ~1 GiB at 500 frames, so batch 32 OOMs a GPU with ~64 GB of VRAM at long durations
 (e.g. a 10 s, 500-frame run); reduce `BATCH` accordingly.
 
+**Starting learning rate: `LR`.** Both Inference wrappers (biology and detector)
+forward a non-empty `LR` to the entry point as `--learning-rate`, the run's
+starting (peak) learning rate; left unset, the entry point's default peak applies
+(`learning_rate_minimum × max_factor` = 1.28e-03). Useful when continuing a
+wall-stopped run (`RESURRECT=1`) at a chosen rate.
+
+**Straggler protection: `EXIT_BARRIER`.** Every GPU wrapper that launches through
+`torchrun` — Inference, Evaluation, and Experiment in both workflows, plus the
+standalone `Posterior_Calibration` and DETECTOR `Nuisance_DLI` wrappers (§6) —
+exports `TORCHELASTIC_EXIT_BARRIER_TIMEOUT="${EXIT_BARRIER:-3600}"`. torch-elastic's
+own default is 300 s: the ranks that finish first wait only five minutes for the
+rest and then tear down the rendezvous, which kills any rank still working and
+discards its results. The sharded stages are embarrassingly parallel and routinely
+skewed (a rank drawing two tasks takes twice as long as one drawing a single task),
+so the wrappers raise the barrier to 3600 s by default; set `EXIT_BARRIER` higher
+if a run's skew demands it — the job wall time is the real bound.
+
 **Smoke / check evaluation uses `--pool-mode unrestricted`.** An undertrained
 posterior's probability mass can fall outside the prior box, and the default
 `bounded` rejection sampling stalls on it. Pass `POOL_MODE=unrestricted` for any
@@ -393,14 +410,29 @@ Settings it provides:
 | `MACHINE_PROFILE` | profile in `machine_profiles.toml` (selects this machine's data/compute paths) — **required**; the scripts fail loud if unset |
 | `CONDA_SETUP` | path to the conda `profile.d/conda.sh` that defines `conda` in a non-interactive shell |
 | `MON` / `MON_OUT` | monitoring / batch-log output directory (**must already exist**) |
-| `PART` | CPU partition for the generation controller (passed only when set) |
-| `ACCT` | Slurm account, if the cluster requires one (passed only when set) |
+| `PART` | CPU partition for Simulation submissions — consumed by the `Submit.sh` dispatchers and the generation controllers alike (passed only when set) |
+| `ACCT` | Slurm account, if the cluster requires one — likewise consumed by the dispatchers and the controllers (passed only when set) |
 | `USER_ME` | queue-owner username for the controller's polling (defaults to `$USER`) |
 | `REPO` | auto-derived from the script location; override only if the repo is reached by a different path |
 
 Anything left unset falls back to the script defaults (e.g.
 `MON` → `$HOME/process_monitoring`), and an unset `PART`/`ACCT` leaves the
 submit line at the script's baked defaults.
+
+### Fleet sync: propagating the repo
+
+`Script_Bank/HPC/SRM_AND_SBI_DIMER_ALP_Fleet_Sync.sh` is the **single supported
+way to propagate this repository** to the other machines; hand-rolled `rsync`
+invocations have failed in the documented ways its header records, so do not
+improvise one. It reconciles every remote's repo to the reference machine exactly:
+the file list is always relative to the repo root (nothing flattens into the wrong
+directory), deletions on the reference propagate (per-directory recursion with
+`--delete`), the secrets file never leaves the reference machine, and each
+remote's own machine-local files (`machine_profiles.toml`,
+`Script_Bank/HPC/hpc_local.env`) are never touched. Dry run is the default
+(`DRYRUN=1` prints what would change and transfers nothing; set `DRYRUN=0` only
+after reading the printed plan), and an optional machine argument restricts the
+sync to one remote.
 
 ---
 
@@ -409,16 +441,32 @@ submit line at the script's baked defaults.
 The four stages in §1 form the standard, dispatcher-driven pipeline. A handful of
 ad-hoc utilities sit outside it — the post-hoc analyses and calibration builders in
 `Script_Bank/Analysis/` (for example the pooled `Nuisance_DLI` construction, the
-embedding-space distance, and the flicker-rate derivation). They are deliberately
-kept out of the `Submit.sh` dispatcher and the stage wrapper set, so the standard
-submission surface stays exactly the four stages.
+embedding-space distance, and the flicker-rate derivation). They stay out of the
+`Submit.sh` dispatchers by design, so the standard dispatcher surface stays exactly
+the four stages — but three of them have dedicated standalone wrappers in this
+directory, submitted directly with `sbatch`:
 
-Each is documented in its own companion `.md` and is run by hand — single-process
-with plain `python`, not `torchrun`. When one needs a GPU, launch it with a one-off
-`sbatch --wrap` on the check partition that sources `hpc_local.env` (§5) and
-activates `SRM_AND_SBI_ENVY_V0`, following the §3 job-name pattern with the
-utility's own descriptor. The DETECTOR calibration workflow has its own submission
-machinery (§8).
+- `SRM_AND_SBI_DIMER_ALP_HPC_Posterior_Calibration.sh` — the posterior-calibration
+  diagnostic (SBC / coverage / TARP / L-C2ST) for either workflow
+  (`WORKFLOW=biology|detector`). It shares the Evaluation stage's shard-then-merge
+  execution: one worker per GPU on every allocated node writes its own shard, then
+  a single `--merge` pass concatenates them and runs the global statistics.
+- `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Nuisance_DLI.sh` — the pooled `Nuisance_DLI`
+  spec-template build (`--emit-template`): shards the `(kind, cell)` pool build
+  across one worker per GPU on every allocated node, then a single-process, no-GPU
+  `--merge` step assembles the cached pool and the spec.
+- `SRM_AND_SBI_DIMER_ALP_HPC_Embedding_Space_Distance.sh` — the
+  experimental-versus-synthetic embedding-space distance for either workflow
+  (`WORKFLOW=biology|detector`). Its engine is single-GPU by design (no sharding,
+  no merge) on a whole-node allocation; do not read the allocated GPUs as data
+  parallelism.
+
+The rest are run by hand — single-process with plain `python`, not `torchrun` —
+and each is documented in its own companion `.md`. When one of those needs a GPU,
+launch it with a one-off `sbatch --wrap` on the check partition that sources
+`hpc_local.env` (§5) and activates `SRM_AND_SBI_ENVY_V0`, following the §3
+job-name pattern with the utility's own descriptor. The DETECTOR calibration
+workflow has its own submission machinery (§8).
 
 ---
 
@@ -522,19 +570,28 @@ or the four biology stage wrappers**, and they are never wired into it.
 | `..._DETECTOR_HPC_Evaluation.sh` | imaging MAP recovery on the held-out EVAL set (B5); shards across all ranks (>1 GPU/node) + a separate `--merge` step | GPU |
 | `..._DETECTOR_HPC_Experiment.sh` | imaging MAP estimation on real microscopy videos (B4); shards across all ranks (>1 GPU/node) + a separate `--merge` step | GPU |
 | `..._DETECTOR_HPC_Submit.sh` | the Detector dispatcher — dry-run-first single-job submit builder | — |
+| `..._DETECTOR_HPC_Nuisance_DLI.sh` | pooled `Nuisance_DLI` spec-template build (`--emit-template`): posterior-sample pool over the real recordings, sharded across all ranks (>1 GPU/node) + a separate no-GPU `--merge` step; submitted directly with `sbatch`, not via `Submit.sh` | GPU |
+| `..._DETECTOR_HPC_Generate_Controller.sh` | rolling submit-and-gate controller for a full Detector generation campaign — QOS caps, EVAL hard-gated on TRAIN+TEST completion; dry-run by default | — |
 
-(The gap-simulation and coverage wrappers join this set as those stages are
-built.)
+(Posterior calibration and the embedding-space distance are covered for the
+Detector by the standalone analysis wrappers in §6 —
+`SRM_AND_SBI_DIMER_ALP_HPC_Posterior_Calibration.sh` and
+`SRM_AND_SBI_DIMER_ALP_HPC_Embedding_Space_Distance.sh`, each with
+`WORKFLOW=detector`.)
 
 **Dispatcher.** `SRM_AND_SBI_DIMER_ALP_DETECTOR_HPC_Submit.sh` mirrors the
 biology `Submit.sh` — dry-run first (`DRYRUN=1` prints the exact `sbatch` line;
 `DRYRUN=0` submits) — for the Detector stages, and renders the `_DETECTOR`
 job-name `SRM_AND_SBI_DIMER_ALP_DETECTOR_<timing_label>_<Stage>[_<SPLIT>]`.
 
-**Two GPU modes (Goethe), pinned by the dispatcher** so an exclusive whole-node
-allocation never launches more workers than intended: `GPU_PART=gpu_test` → 4 GPUs
-(checks; `gpu:4`, `SRM_AND_SBI_GPUS=4`); `GPU_PART=gpu` → 8 GPUs (production;
-`gpu:8`, `SRM_AND_SBI_GPUS=8`).
+**Two GPU modes (Goethe), set explicitly at submit time.** Neither dispatcher pins
+a GPU mode: both `Submit.sh` scripts only forward what the submitter sets
+(a non-empty `GPU_PART`/`GRES`/`NODES` becomes `--partition`/`--gres`/`--nodes`;
+anything unset leaves the stage script's baked `#SBATCH` defaults, `gpu` +
+`gpu:8`). The two modes in use are therefore a manual recipe: checks set
+`GPU_PART=gpu_test GRES=gpu:4 TIME=08:00:00` explicitly (the `gpu_test` nodes
+carry 4 GPUs); production uses the real `gpu` partition — a whole node, `gpu:8` —
+which is the baked default, so `GPU_PART=gpu` alone suffices.
 
 **Seedless generation.** Detector generation passes no seed by design: each task
 draws fresh entropy, and provenance is carried by the global task index in the

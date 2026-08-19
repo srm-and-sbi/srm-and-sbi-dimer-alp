@@ -2,7 +2,7 @@
 
 ``run_evaluation(cfg, args)`` holds the entire MAP-recovery orchestration -- banner,
 dry-run probe, estimator load, the per-video seed-then-optimize MAP loop, the live
-progress log, multi-GPU round-robin task sharding, the ``--merge`` combine step, and
+progress log, multi-GPU round-robin video sharding, the ``--merge`` combine step, and
 the recovery report + figures. The two entry-point scripts shrink to: build the
 ``WorkflowConfig``, parse args, call ``run_evaluation``.
 
@@ -22,6 +22,7 @@ import random
 import shutil
 import time
 from dataclasses import dataclass
+from itertools import groupby
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -39,6 +40,7 @@ from srm_and_sbi_dimer_alp.evaluation import (
     recovery_table,
     _theta_repr,
 )
+from srm_and_sbi_dimer_alp.experiment_support import shard_by_rank
 from srm_and_sbi_dimer_alp.inference_support import resolve_topology
 from srm_and_sbi_dimer_alp.io import load_data
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming
@@ -387,17 +389,26 @@ def run_evaluation(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
         # Rebuild the prior on THIS worker's device for bounded rejection sampling.
         posterior.prior = spec.build_prior(device=str(device))
 
-    # ---- This worker's task shard ----------------------------------------
-    my_tasks = [t for t in range(args.eval_tasks) if t % topo.world_size == topo.rank]
-
-    # ---- Probe the EVAL namespace for this shard's recovery workload -----
+    # ---- Probe the EVAL namespace, then take this worker's VIDEO shard ----
+    # Sharding is at video granularity, not task granularity. Splitting whole tasks across
+    # ranks leaves them with unequal task counts whenever the worker count does not divide
+    # the task count, and since every video costs about the same, the wall clock is then set
+    # by the heaviest rank while the rest sit idle -- e.g. 10 tasks over 8 ranks gives two
+    # ranks twice the work of the other six, so the run costs what 16 tasks would. Dealing
+    # the individual (task, sim) videos round-robin instead balances any task count over any
+    # worker count to within a single video. Each rank still opens each task's store at most
+    # once (the pairs stay grouped by task), and zarr reads are lazy, so the finer split
+    # costs only a few extra metadata reads.
     per_task_sims = {}
-    for task in my_tasks:
+    for task in range(args.eval_tasks):
         theta_set = load_data(
             paths.theta_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
         n_sims = theta_set.shape[0]
         per_task_sims[task] = min(n_sims, args.max_sims) if args.max_sims > 0 else n_sims
-    total_sims = int(sum(per_task_sims.values()))
+    all_videos = [(t, s) for t in range(args.eval_tasks) for s in range(per_task_sims[t])]
+    my_videos = shard_by_rank(all_videos, topo)     # ordered by task, then sim
+    my_tasks = sorted({t for t, _ in my_videos})
+    total_sims = len(my_videos)
 
     # ---- Live progress log (so a long MAP run can be monitored) ----------
     recovery_dir.mkdir(parents=True, exist_ok=True)
@@ -443,13 +454,16 @@ def run_evaluation(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
     loop_start = time.time()
     done = 0
     try:
-        for task in my_tasks:
+        # Group this rank's videos by task so each store is opened once, in order.
+        for task, task_videos in groupby(my_videos, key=lambda pair: pair[0]):
             video_set = load_data(
                 paths.video_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
             theta_set = load_data(
                 paths.theta_set_path(task, data_bank_root, timing_label, compress, "EVAL"))
             task_start = time.time()
-            for sim in range(per_task_sims[task]):
+            task_count = 0
+            for _, sim in task_videos:
+                task_count += 1
                 video_chunk = np.asarray(video_set[sim])
                 if show:
                     print(f"\n######## MAP estimate: task {task} sim {sim} ########",
@@ -496,7 +510,7 @@ def run_evaluation(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
                     log_file_only(progress_fh,
                                   f"original [LOG] {_theta_repr(true_log)}")
             log_progress(progress_fh,
-                         f"task {task} complete ({per_task_sims[task]} videos in "
+                         f"task {task} complete ({task_count} videos on this rank in "
                          f"{time.time() - task_start:.1f}s).")
         log_progress(progress_fh,
                      f"DONE: {done}/{total_sims} videos in "

@@ -5,6 +5,23 @@ tracks each inferred parameter over the real MET single-particle-tracking
 recordings; this note explains what the figures mean and how to read them, so the
 analysis can be understood and reused without reverse-engineering the code.
 
+## How to run
+
+    MACHINE_PROFILE=<profile> python \
+        Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Experiment_Temporal_Dynamics.py \
+        --total-time-seconds 2.0 [--dry-run]
+
+- `--total-time-seconds` (required) — the run duration; selects the Experiment `.npz`
+  via its `timing_label` (e.g. `2.0` → `2S_50FPS`) and must match a completed
+  Experiment run.
+- `--chunk-step-seconds` — the spacing between consecutive chunks on the time axis;
+  default the run duration (non-overlapping windows). Set only if the Experiment run
+  used overlapping windows.
+- `--params` — comma-separated parameter KEYs to plot (default: all learnable
+  parameters), e.g. `rate_dissociation,diffusivity_alp`.
+- `--dry-run` — resolve and print the input/output paths, then exit without reading
+  data or writing anything.
+
 ## What the figures show
 
 One figure per learnable parameter, written to
@@ -12,7 +29,7 @@ One figure per learnable parameter, written to
 is split into short, **non-overlapping** windows (ten 2 s windows for the 2 s model,
 four 5 s windows for the 5 s model). The parameter is MAP-estimated independently in
 every window of every cell, and each figure shows, per experimental condition
-(**MET-FAB** = ALP, blue; **MET-INLB** = InlB, orange):
+(**MET-FAB** = stored token `ALP`, blue; **MET-INLB** = stored token `BET`, orange):
 
 - **solid line** — the mean, across cells, of the MAP estimate at each time point;
 - **shaded band** — mean ± 1 SD across cells (between-cell spread);

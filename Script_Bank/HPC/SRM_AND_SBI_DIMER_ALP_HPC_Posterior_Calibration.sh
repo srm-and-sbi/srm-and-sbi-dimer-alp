@@ -22,7 +22,10 @@
 # POSTERIOR_SAMPLES (L per video), TESTS (comma-list; NOTE: commas break --export, so pass
 # it only via a quoted --export or leave the all-four default), STRATIFY (all|none|KEY),
 # MAX_SIMS (cap videos/task; 0 = all), POOL_MODE (bounded|unrestricted), TOTAL_TIME,
-# MIN_STRATUM, LC2ST_N_EVAL, LC2ST_NULL_TRIALS, SRM_AND_SBI_GPUS (cap GPUs used).
+# MIN_STRATUM, LC2ST_N_EVAL, LC2ST_NULL_TRIALS, N_JOBS (stratum-loop worker processes;
+# default auto = largest power of two up to 16 fitting the allocated cores -- note the
+# statistics run in the SINGLE-PROCESS merge step, so this, not the GPU count, sets how
+# long a fine stratification takes), SRM_AND_SBI_GPUS (cap GPUs used).
 # Non-deterministic (no seed). Submit from the repo root and forward REPO (Slurm spools
 # this script, so the child must be told where the repo is): --export=ALL,REPO=$PWD,...
 #
@@ -95,17 +98,26 @@ fi
 # 1. NODE COUNT comes from the Slurm allocation (SLURM_NNODES), so world_size = NNODES*GPUS.
 GPUS="${SRM_AND_SBI_GPUS:-${SLURM_GPUS_ON_NODE:-1}}"
 NNODES="${SLURM_NNODES:-1}"
-# Never launch more per-node workers than EVAL tasks -- an idle worker draws nothing.
-if [ "$EVAL_TASKS" -lt "$GPUS" ]; then GPUS="$EVAL_TASKS"; fi
+# No worker cap by task count: the draw loop shards at VIDEO granularity, so every
+# allocated GPU gets work regardless of EVAL_TASKS.
 
 CAL_ARGS=( --total-time-seconds "$TOTAL_TIME" --eval-tasks "$EVAL_TASKS" --pool-mode "$POOL_MODE"
            --posterior-samples "$POSTERIOR_SAMPLES" --tests "$TESTS" --stratify "$STRATIFY" )
 [ "${MAX_SIMS:-0}" -gt 0 ] && CAL_ARGS+=( --max-sims "$MAX_SIMS" )
 [ -n "${MIN_STRATUM:-}" ] && CAL_ARGS+=( --min-stratum "$MIN_STRATUM" )
+[ -n "${N_JOBS:-}" ] && CAL_ARGS+=( --n-jobs "$N_JOBS" )
 [ -n "${LC2ST_N_EVAL:-}" ] && CAL_ARGS+=( --lc2st-n-eval "$LC2ST_N_EVAL" )
 [ -n "${LC2ST_NULL_TRIALS:-}" ] && CAL_ARGS+=( --lc2st-null-trials "$LC2ST_NULL_TRIALS" )
 
 echo "=== Posterior Calibration | workflow=${WORKFLOW} eval_tasks=${EVAL_TASKS} L=${POSTERIOR_SAMPLES} tests=${TESTS} stratify=${STRATIFY} pool=${POOL_MODE} time=${TOTAL_TIME}s max_sims=${MAX_SIMS} nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
+
+# torch-elastic's exit barrier defaults to 300 s: the ranks that finish first wait only five
+# minutes for the rest and then tear down the rendezvous -- which KILLS any rank still
+# working, discarding its results. The sharded stages are embarrassingly parallel and
+# routinely skewed (a rank drawing two tasks takes twice as long as one drawing a single
+# task), so five minutes is far tighter than the real spread and the teardown destroys
+# completed work. Raise it well past any plausible skew; the job wall time is the real bound.
+export TORCHELASTIC_EXIT_BARRIER_TIMEOUT="${EXIT_BARRIER:-3600}"
 
 if [ "${NNODES:-1}" -gt 1 ]; then
     MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"

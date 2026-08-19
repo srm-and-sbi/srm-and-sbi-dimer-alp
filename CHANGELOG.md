@@ -5,6 +5,98 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.15 - 2026-08-19
+
+Correctness, calibration-report, and consistency release: video-granularity sharding for the
+sharded GPU stages, a substantially more interpretable posterior-calibration report, repaired
+statistical machinery, three new workflow-general analyses, and a documentation sweep that
+realigns every major document with the implementation.
+
+### Added
+
+- **Embedding-space distance for both workflows.** The measure module is now the
+  workflow-agnostic `embedding_space_distance.py` (kernel; MMD + classifier two-sample test,
+  recording-blocked) with a shared `embedding_space_distance_runner.py` and two shims
+  (`SRM_AND_SBI_DIMER_ALP_Embedding_Space_Distance.py` + `…_DETECTOR_…`). The companion note
+  documents how the reading INVERTS between workflows (detector: imaging realism; biology:
+  synthetic-prior reach with imaging frozen) and the known limitations of the significance
+  machinery (imbalanced-accuracy C2ST null; block-count-preserving MMD permutation — both
+  conservative for the gap verdict, neither valid for exact p-values). New HPC wrapper
+  `SRM_AND_SBI_DIMER_ALP_HPC_Embedding_Space_Distance.sh` (WORKFLOW=biology|detector;
+  single-GPU engine on a whole-node allocation; absolute script paths).
+- **Posterior-predictive video for both workflows.** Shared engine
+  `posterior_predictive_video_runner.py` + two shims: render a synthetic video from the
+  parameters inferred for one experimental recording and compare side by side. The MAP block
+  inverts per workflow (biology: ten reaction-diffusion parameters, full reactive system,
+  imaging held at the calibrated Nuisance_DLI vector read at run time; detector: six imaging
+  parameters, diffusion-only system, RDS nuisance drawn or pinned); the five SCOPE camera
+  parameters are pinned to their MET values in both. `--map-source cell-sgm` (default) renders
+  a real chunk's estimate selected by the Sample Geometric Median, never a per-dimension
+  composite.
+- **Sample Geometric Median analysis for the biology workflow.** Workflow-agnostic kernel
+  `sample_geometric_median.py` + shared `sample_geometric_median_runner.py` + biology shim
+  (`SRM_AND_SBI_DIMER_ALP_Experiment_Sample_Geometric_Median.py`); the detector Nuisance_DLI
+  tool now delegates to the same kernel (one SGM implementation repo-wide). Condition-restricted
+  runs (`--condition MET-FAB|MET-INLB`) write to their own directories.
+- **Fleet synchronization utility** `SRM_AND_SBI_DIMER_ALP_Fleet_Sync.sh`: the single supported
+  repo-propagation path (dry-run default, per-directory recursion so deletions propagate,
+  secrets and machine-local files excluded by name, post-sync verification).
+- Shared `workflow.parameter_keys()` / `workflow.parameter_table()` resolvers for the two
+  parameterization modules' deliberately different symbol names.
+- `DiagnosticReporter` always stamps the report's UTC run time itself; a caller remark goes in
+  the new `run_note` field and can no longer displace the timestamp.
+
+### Changed
+
+- **Video-granularity sharding** in Evaluation and Posterior_Calibration: individual
+  `(task, sim)` videos are dealt round-robin across ranks (`shard_by_rank` + per-task
+  `groupby`), so any task count balances over any worker count to within one video; the
+  task-count-based GPU caps in the wrappers are removed (they would have throttled the new
+  sharding), and all eight GPU wrappers raise torch-elastic's exit barrier
+  (`TORCHELASTIC_EXIT_BARRIER_TIMEOUT`, override `EXIT_BARRIER=`) so straggler ranks are not
+  killed at the 300 s default.
+- **Posterior-calibration report**: effect sizes lead every table (KS D, coverage max-gap,
+  |ATC|, reject fraction) with p-values demoted to detectability statements (a printed
+  0.00e+00 is double-precision underflow, not a verdict); per-parameter location-versus-width
+  Diagnosis table (bias z, spread z, sharpness, physical bias); a "What this implies" reading;
+  the 1-D/2-D marginal-calibration ladder with `dependence_excess`; the stratified section
+  digested to one row per parameter-test with a profile-shape classification (rises / falls /
+  worst-at-ends / worst-in-middle / flat) over per-bin figures; stratum loop parallelized with
+  a power-of-two worker cascade; defaults `--n-strata=10 --num-bins=50 --lc2st-n-eval=1000`.
+- **L-C2ST repaired**: the classifier is now cross-validated (`num_folds=5`, so observations
+  are scored by folds that did not train on them) and each evaluated observation uses its full
+  stored posterior sample cloud instead of a single draw. Validated on calibrated and
+  deliberately miscalibrated toys.
+- Experiment-stage pool-mode guidance corrected repo-wide: pool mode follows the data —
+  `bounded` for prior-drawn synthetic sets, `unrestricted` for experimental recordings.
+- The posterior-predictive `.npz` provenance field is `rds_provenance` (it holds the MAP for
+  biology and a nuisance draw for the detector); the viewer notebook reads the shared fields
+  and serves both engines.
+
+### Fixed
+
+- `sgm_in_box` is computed against the prior box instead of hardcoded `True`; the regenerated
+  SGM reports now correctly mark the unrestricted pooled and MET-INLB vectors as out-of-box.
+- The seven load-bearing parameter-table validations raise `ValueError` instead of `assert`
+  (they now survive `python -O`).
+- Five trusted-artifact `np.load` calls no longer pass `allow_pickle=True` (the artifacts
+  contain no object arrays).
+- `--display-norm` default restored to `full` with explicit choices (the undocumented
+  `per-frame` sentinel silently routed to autoscale).
+- Reader-facing condition names are MET-FAB / MET-INLB across CLIs, reports, figures, and
+  output paths; ALP/BET survive only as stored schema and filename tokens, translated at the
+  boundary.
+- `tomli` declared as a conditional dependency for Python < 3.11; the deliberately sparse
+  dependency list is now explained in `pyproject.toml` itself.
+- Documentation realigned with the implementation across README (iteration tag, synthetic-
+  recovery wording, structure listing, experimental-versus-synthetic terminology),
+  PROJECT_CONTEXT (C-species diffusivity, reversible B ↔ C, the ten-parameter θ, SCOPE
+  marginalization, module list), VALIDATION (split-suffixed artifact paths, pool-mode scoping,
+  six-leg smoke criteria, dispatcher-only dry-run wording, a new assurance roadmap),
+  DETECTOR_WORKFLOW (implemented mirror analysis, wrapper inventory, experimental-data-reuse
+  statement), the HPC guide (analysis wrappers, Goethe GPU recipe, EXIT_BARRIER/LR knobs,
+  fleet sync), and the analysis companions (flags matched to their argparse definitions).
+
 ## 0.4.14 - 2026-08-14
 
 Three workflow-general Analysis diagnostics, each built once as a workflow-agnostic kernel +

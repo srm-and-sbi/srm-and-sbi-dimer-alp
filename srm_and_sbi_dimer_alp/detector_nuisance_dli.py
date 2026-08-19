@@ -368,22 +368,14 @@ _SGM_WEISZFELD_ITERS = 2000
 def sample_geometric_median(vecs_abs, range_abs):
     """Index (and method) of the collection member closest to the geometric median, in prior-range-
     normalized absolute space -- the correlation-preserving median VECTOR (an actual member, so its
-    joint correlations are intact). Exact medoid when tractable, else Weiszfeld's iteration snapped
-    to the nearest member. (Ramirez Sierra & Sokolowski 2025; see DETECTOR_WORKFLOW.md.)"""
-    from scipy.spatial.distance import pdist, squareform     # lazy: keep the sampling path numpy-only
-    m = np.asarray(vecs_abs, dtype=float) / range_abs
-    if m.shape[0] <= _SGM_EXACT_MEDOID_CAPACITY:
-        return int(np.argmin(squareform(pdist(m)).sum(0))), "exact_medoid"
-    y = m.mean(0)
-    for _ in range(_SGM_WEISZFELD_ITERS):
-        dist = np.maximum(np.linalg.norm(m - y, axis=1), 1e-12)
-        weight = 1.0 / dist
-        y_next = (weight[:, None] * m).sum(0) / weight.sum()
-        if np.linalg.norm(y_next - y) < 1e-10:
-            y = y_next
-            break
-        y = y_next
-    return int(np.argmin(np.linalg.norm(m - y, axis=1))), "weiszfeld_snap"
+    joint correlations are intact). (Ramirez Sierra & Sokolowski 2025; see DETECTOR_WORKFLOW.md.)
+
+    Delegates to the workflow-agnostic kernel so the imaging nuisance construction, the detector
+    analysis, and the biology Experiment analysis all share ONE implementation; a divergence between
+    them would make two reports' "median vector" mean different things under the same name.
+    """
+    from .sample_geometric_median import sample_geometric_median as _sgm
+    return _sgm(vecs_abs, range_abs)
 
 
 def _per_window_sgm_labeled(flat_log, labels, range_abs):

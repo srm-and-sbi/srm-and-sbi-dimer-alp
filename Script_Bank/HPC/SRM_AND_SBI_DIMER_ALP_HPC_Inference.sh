@@ -16,10 +16,14 @@
 # allocates a whole node (8 GPUs on the reference cluster; 4 GH200 on JUPITER).
 # Overridable via --export: TRAIN_TASKS, TEST_TASKS, EPOCHS, TOTAL_TIME, BATCH,
 #   HEARTBEAT (within-epoch progress: a line every N batches; default ~4/epoch),
+#   LR (per-run starting/peak learning rate, forwarded as --learning-rate; unset =
+#     the default peak, learning_rate_minimum*max_factor = 1.28e-03),
 #   RESURRECT (set 1 to load the existing checkpoint and continue training from it
 #     -- continue a run stopped by the wall, or add epochs; unset = fresh run),
 #   SRM_AND_SBI_GPUS (cap the GPUs used; default = all allocated; set 1 to force
-#     the original single-GPU path even on a multi-GPU allocation).
+#     the original single-GPU path even on a multi-GPU allocation),
+#   EXIT_BARRIER (seconds; raises torch-elastic's 300 s exit barrier so straggler
+#     ranks are not killed; default 3600 -- the job wall time is the real bound).
 # Also honored from the environment (read directly by the Python):
 #   SRM_AND_SBI_NO_SYNC_BN=1 -> skip SyncBatchNorm under DDP (each rank keeps its
 #     own local batch statistics). DEFAULT (unset) keeps SyncBatchNorm ON, which
@@ -118,6 +122,14 @@ INFER_ARGS=( --tasks "$TRAIN_TASKS" --test-tasks "$TEST_TASKS" --epochs "$EPOCHS
              --total-time-seconds "$TOTAL_TIME" "${BATCH_ARG[@]}" "${HEARTBEAT_ARG[@]}" "${RESURRECT_ARG[@]}" "${LR_ARG[@]}" )
 
 echo "=== Inference | train_tasks=${TRAIN_TASKS} test_tasks=${TEST_TASKS} epochs=${EPOCHS} time=${TOTAL_TIME}s batch=${BATCH:-default} resurrect=${RESURRECT:-0} nodes=${NNODES} gpus_per_node=${GPUS} world_size=$((NNODES * GPUS)) seed=None | node $(hostname) ==="
+
+# torch-elastic's exit barrier defaults to 300 s: the ranks that finish first wait only five
+# minutes for the rest and then tear down the rendezvous -- which KILLS any rank still
+# working, discarding its results. The sharded stages are embarrassingly parallel and
+# routinely skewed (a rank drawing two tasks takes twice as long as one drawing a single
+# task), so five minutes is far tighter than the real spread and the teardown destroys
+# completed work. Raise it well past any plausible skew; the job wall time is the real bound.
+export TORCHELASTIC_EXIT_BARRIER_TIMEOUT="${EXIT_BARRIER:-3600}"
 
 if [ "${NNODES:-1}" -gt 1 ]; then
     # Multi-node data-parallel: srun places ONE torchrun launcher per node, each
