@@ -106,10 +106,14 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   low end of a wide-ranged parameter is the question — a linear axis compresses the counts' 1-316
   support so that structure below ~20 receptors falls into two bins. The spacing is part of the
   filename (`..._pooled.png` vs `..._pooled_log.png`), so the two views coexist and neither
-  silently overwrites the other.
+  silently overwrites the other. Tick labels are plain absolute values under both spacings, and the
+  log axis is labeled at the decades and their 2x and 5x subdivisions rather than at the decades
+  alone, which over a two-decade prior left the axis nearly unlabeled.
 - **Marginal centers of the pooled mixture** (`median-pooled`, `mean-pooled`, `geomean-pooled`, via
-  `--pooled-mark`), drawn dashed on the pooled histogram beside the trajectory medoid and tabulated
-  against it with the ratio. The four existing central estimates all summarize the per-window MAP
+  `--pooled-mark`). The flag selects which single statistic the histogram marks -- it replaces the
+  line rather than adding one, so the figure carries exactly one line per condition and the
+  comparison between all candidates lives in the report's table, tabulated against the medoid with
+  the ratio. The four existing central estimates all summarize the per-window MAP
   vectors; the histogram plots the mixture of posterior draws, and a line on a one-dimensional
   marginal is read as that marginal's center, which the medoid does not claim to be. On kappa_OFF
   the gap is a factor of 1.94 for MET-INLB (1.81 /s against 3.51 /s), so the medoid alone invited

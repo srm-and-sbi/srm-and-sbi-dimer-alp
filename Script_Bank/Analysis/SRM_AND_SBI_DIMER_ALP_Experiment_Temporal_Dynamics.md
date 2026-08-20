@@ -92,11 +92,16 @@ one-dimensional histogram is read as the center of *that* histogram. The medoid 
 jointly realized vector chosen to minimize distance in the full parameter space, so a single
 coordinate of it can sit far from that coordinate's marginal center with nothing being wrong.
 
-`median-pooled`, `mean-pooled` and `geomean-pooled` are the marginal centers of the plotted mixture,
-selected with `--pooled-mark` and drawn dashed beside the medoid so the gap between them is visible
-rather than hidden. κ_OFF is the clear case: `median-pooled` is 1.81 /s for MET-INLB against an
-`sgm-trajectory` of 3.51 /s, a factor of 1.94 — the mixture is right-skewed, and a reader shown only
-the medoid on that histogram would reasonably ask why the line sits away from the bulk.
+`median-pooled`, `mean-pooled` and `geomean-pooled` are the marginal centers of the plotted mixture.
+`--pooled-mark` selects **which single one of them, or the medoid, the histogram marks** — it
+replaces the line rather than adding one. The figure carries exactly one line per condition; the
+comparison between all the candidates lives in the report's table, where it can be read without the
+plot paying for it.
+
+κ_OFF is the clear case: `median-pooled` is 1.81 /s for MET-INLB against an `sgm-trajectory` of
+3.51 /s, a factor of 1.94. The mixture is right-skewed, and a reader shown only the medoid on that
+histogram would reasonably ask why the line sits away from the bulk — which is why the marginal
+median is the default mark on this figure, while `--central` continues to govern the time courses.
 
 **Prefer the median.** The median is equivariant under monotone transformation, so the marginal
 median in absolute units and `10 ** median(log10)` are the *same number* — verified equal to 3e-10 —
@@ -193,6 +198,11 @@ choice consistently:
 |---|---|---|---|---|
 | `linear` (default) | uniform in absolute units | **per unit** | the curve `1 / ((log10 hi - log10 lo) · x · ln 10)` | `<key>_temporal_posterior_pooled.png` |
 | `log` | uniform in decades | **per decade** | the flat line `1 / (log10 hi - log10 lo)` | `<key>_temporal_posterior_pooled_log.png` |
+
+Tick labels are plain absolute values under both spacings. The log axis is labeled at the decades
+**and** their 2x and 5x subdivisions (`1, 2, 5, 10, 20, 50, …`), because a log axis labeled only at
+the decades reads as nearly empty over a two-decade prior; the remaining minor ticks carry the scale
+unlabeled.
 | `both` | — | — | — | writes both files |
 
 The spacing is part of the filename, so the two views coexist and a run with one setting cannot
@@ -340,9 +350,10 @@ MACHINE_PROFILE=<profile> python \
 - `--pooled-scale {linear,log,both}` — x-axis spacing for the pooled posterior histogram; both
   spacings label the axis in absolute units. See the table above for what each implies about
   binning, the density's unit, the prior's shape, and which file it writes.
-- `--pooled-mark {median,mean,geometric-mean,none}` — which marginal center of the pooled mixture to
-  mark on the histogram beside the medoid. `median` (default) is equivariant; `mean` is not. See
-  *A fifth statistic* above.
+- `--pooled-mark {median,mean,geometric-mean,trajectory}` — which single statistic the pooled
+  histogram marks per condition. `median` (default) is the marginal median of the plotted mixture
+  and is equivariant; `mean` is not; `geometric-mean` is the mean in the space the prior is uniform
+  in; `trajectory` marks the `--central` family's medoid instead. See *A fifth statistic* above.
 - `--dry-run` — resolve and print the inputs and outputs, then exit without reading data or writing
   anything.
 
