@@ -6,9 +6,10 @@ whether the acquisition itself holds still across a recording — whether the em
 point-spread width, the photobleaching probability, and the flicker rate that a recording presents
 are the same at its end as at its start.
 
-The method, the two Sample-Geometric-Median central estimates, the drift statistics, the two
-uncertainty panels and their limits, the axis convention, and the reference scoping are **identical
-for both workflows** and are documented once in the authoritative companion:
+The method, the four named central estimates (`mean-window`, `sgm-window`, `mean-trajectory`,
+`sgm-trajectory`), the drift statistics and their definitions, the uncertainty figure and its
+limits, the axis convention, and the reference scoping are **identical for both workflows** and are
+documented once in the authoritative companion:
 
 → **`SRM_AND_SBI_DIMER_ALP_Experiment_Temporal_Dynamics.md`**
 
@@ -45,7 +46,7 @@ where `<alias>` is `SRM_AND_SBI_DIMER_ALP_DETECTOR`, so the two workflows' resul
 ```bash
 MACHINE_PROFILE=<profile> python \
     Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Experiment_Temporal_Dynamics.py \
-    --total-time-seconds 2.0 [--params prob_photo_bleach,mu_pc] [--dry-run]
+    --total-time-seconds 2.0 [--central sgm|mean] [--params prob_photo_bleach,mu_pc] [--dry-run]
 ```
 
 CPU only. The recovery annotation appears when a detector MAP-recovery artifact is present for the

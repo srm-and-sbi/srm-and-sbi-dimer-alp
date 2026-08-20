@@ -15,12 +15,22 @@ way either result can be read. The two share the recordings exactly: the experim
 carries no workflow qualifier, so cell index ``c`` is the same acquisition in both.
 
 WHAT IS PLOTTED, AND WHAT IS MEASURED, ARE DELIBERATELY SEPARATE. The drift statistics are fit per
-cell and then aggregated, so they do not depend on the choice of central estimate. The central
-estimate governs only what the figures display, and it is a real recording rather than an average:
-averaging each parameter independently across cells composes a vector whose coordinates never
-co-occurred. The trajectory-level Sample Geometric Median (one cell, whole time course) is the
-headline; the per-time-point SGM is shown alongside with its selected cell annotated, because its
-central cell may change between time points and that change can masquerade as temporal structure.
+cell and then aggregated, so they do not depend on the choice of central estimate; the central
+estimate governs only what the figures display.
+
+THE CENTRAL-ESTIMATE VOCABULARY. Every figure states which of four estimates it draws, and the name
+says which axis was aggregated and how:
+
+    mean-window       mean value vector, aggregated across cells for a given chunk    -> timeseries
+    sgm-window        realized value vector, aggregated across cells for a given chunk -> timeseries
+    mean-trajectory   mean value vector, aggregated across chunks and cells            -> one vector
+    sgm-trajectory    realized value vector, aggregated across chunks and cells        -> one vector
+
+``--central`` selects the FAMILY (``sgm`` or ``mean``) and the pairing is enforced: the timeseries
+uses that family's ``*-window`` estimate and the horizontal summary line its ``*-trajectory``
+counterpart, so one figure never mixes a mean with a medoid. A "mean" estimate aggregates each
+parameter independently, so its coordinates need not have co-occurred in any recording; a "realized"
+estimate is an actual (cell, chunk) window selected as the exact medoid, so its coordinates did.
 
 The per-workflow differences -- parameter table and keys, prior box, alias-qualified paths, display
 names, unit labels, and the external reference values -- are resolved once in
@@ -30,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -186,6 +197,7 @@ class _TemporalSpec:
     fig_dir: object
     tag: str
     reference_source: str = ""
+    reference_short: str = "reference"
 
 
 def _temporal_dynamics_spec(cfg, args) -> _TemporalSpec:
@@ -211,6 +223,7 @@ def _temporal_dynamics_spec(cfg, args) -> _TemporalSpec:
         reference_source=("ThunderSTORM localization fits on the same public recordings "
                           "(DETECTOR_WORKFLOW.md 6.2/6.3/6.5)" if detector else
                           "Li et al., Small 2026, 22, e07115"),
+        reference_short=("ThunderSTORM" if detector else "Li et al. 2026"),
     )
 
 
@@ -223,46 +236,26 @@ def _reference_band(ref):
             float(max(v + s for v, s in zip(vals, sds))), vals)
 
 
-def _dex_axis(ax):
-    """Label the right-hand side in dex, mirroring a log-scaled physical left axis.
+def _apply_reference(ax, ref, source_short):
+    """Draw an external reference: its band, its individual reported values, and its mean.
 
-    The visual spacing is then dex -- the space the priors are declared in and the space drift is
-    measured in -- while the left labels stay in the unit the simulator consumes, so one figure
-    carries both readings instead of duplicating every panel per scale.
-
-    Ticks are placed explicitly at half-dex positions rather than through a functional secondary
-    axis: composing a log10 transform with an already-logarithmic parent scale applies the
-    transform twice and mislabels the axis.
+    The label carries the mean, the numeric bounds, the unit, the source, and the conditions the
+    reference applies to -- everything a reader needs to judge the comparison without leaving the
+    figure. Returns ``(lo, hi)`` so the caller can include the reference in the axis limits.
     """
-    lo, hi = ax.get_ylim()
-    if not (np.isfinite(lo) and np.isfinite(hi)) or lo <= 0:
-        return None
-    sec = ax.twinx()
-    sec.set_yscale("log")
-    sec.set_ylim(lo, hi)
-    dex = np.arange(np.floor(np.log10(lo) * 2) / 2, np.log10(hi) + 0.5, 0.5)
-    dex = dex[(10.0 ** dex >= lo) & (10.0 ** dex <= hi)]
-    sec.set_yticks(10.0 ** dex)
-    sec.set_yticklabels([f"{d:+.1f}" for d in dex], fontsize=8)
-    sec.minorticks_off()
-    sec.set_ylabel("log10 (dex)", fontsize=9)
-    return sec
-
-
-def _apply_reference(ax, ref, displays_present):
-    """Draw an external reference band, its individual values, and its mean. Returns (lo, hi)."""
     r_mean, r_lo, r_hi, r_vals = _reference_band(ref)
     ax.axhspan(r_lo, r_hi, color=REFERENCE_COLOR, alpha=0.25, linewidth=0)
     for v in r_vals:
         ax.axhline(v, color=REFERENCE_COLOR, linestyle=":", linewidth=1.1, alpha=0.75)
     applies = ref.get("applies_to")
-    scope = "" if applies is None else f" [{', '.join(applies)} only]"
+    scope = "both conditions" if applies is None else f"{', '.join(applies)} only"
     ax.axhline(r_mean, color=REFERENCE_COLOR, linestyle="-", linewidth=2.1,
-               label=f"reference {r_mean:.3g} {ref['unit']}{scope}")
+               label=(f"{source_short}: {r_mean:.3g} [{r_lo:.3g}–{r_hi:.3g}] {ref['unit']} "
+                      f"({scope})"))
     if ref.get("upper_biased") is not None:
         ub, ub_lab = ref["upper_biased"]
         ax.axhline(ub, color=REFERENCE_COLOR, linestyle="--", linewidth=1.6, alpha=0.9,
-                   label=f"upper bound {ub:.3g} ({ub_lab})")
+                   label=f"upper bound {ub:.3g} — {ub_lab}, not a target")
         r_hi = max(r_hi, ub)
     return r_lo, r_hi
 
@@ -271,125 +264,112 @@ def _apply_reference(ax, ref, displays_present):
 # Figures
 # =============================================================================
 
-def _figure_trajectory(spec, p_index, key, abs_grid, sgm_b_abs, sgm_b_cells,
-                       sgm_a_abs, sgm_a_cells, x, kinds, drift, recovery_frac):
-    """Central-trajectory figure: SGM headline, per-time SGM companion, retained mean, reference.
+def _figure_trajectory(spec, p_index, key, abs_grid, series, line, family, picks_window,
+                       picks_traj, x, kinds, drift, recovery_frac):
+    """The central-trajectory figure: one curve per condition, its summary line, and the reference.
 
-    Layers, in the order a reader should take them:
-      - faint per-cell trajectories (the ensemble the central estimates summarize);
-      - the TRAJECTORY-LEVEL SGM (thick gold): one real recording's whole time course, so no point
-        on this curve was composed and no step can be a change of cell;
-      - the PER-TIME-POINT SGM (thin gold, dashed): jointly realized within each time point, but
-        its central cell may change between points, so the selected cell is printed in the legend
-        and any change is visible there;
-      - the cross-cell MEAN (thin grey), retained for comparison only: it is the per-dimension
-        composite the SGM replaces, and the gap between the two is itself informative;
-      - the external reference band where one legitimately applies to this parameter.
+    Deliberately sparse. Earlier versions drew several central estimates at once and the figure
+    became unreadable, so exactly one estimate family is drawn: the ``<family>-window`` timeseries
+    (solid) and its paired ``<family>-trajectory`` summary (dashed horizontal), never a mixture.
+    Behind them sit the individual cell trajectories, faint, as the population the estimate
+    summarizes. Three numbers per condition are annotated -- the absolute change over the recording,
+    the fraction of cells agreeing on its direction, and, where a reference legitimately applies,
+    the ratio of the summary line to that reference -- and everything else lives in the report.
     """
     para = spec.table[p_index]
     name = spec.display.get(key, key)
     ref = spec.references.get(key)
-    fig, ax = plt.subplots(figsize=(6.8, 5.4))
+    fig, ax = plt.subplots(figsize=(7.0, 5.2))
     hi, lo = -np.inf, np.inf
 
     for e, kind in enumerate(kinds):
         color = CONDITION_COLOR.get(kind, f"C{e}")
-        data = abs_grid[e, :, :, p_index]                     # (n_cells, n_chunks) absolute
+        data = abs_grid[e, :, :, p_index]
         for c in range(data.shape[0]):
-            ax.plot(x, data[c], color=color, linestyle="-", alpha=0.10, linewidth=0.8)
-        finite = data[np.isfinite(data)]
-        if finite.size:
-            hi = max(hi, float(np.nanpercentile(finite, 90)))
-            lo = min(lo, float(np.nanpercentile(finite, 10)))
+            ax.plot(x, data[c], color=color, linestyle="-", alpha=0.11, linewidth=0.8)
+        fin = data[np.isfinite(data)]
+        if fin.size:                              # robust limits: outlying traces clip
+            hi = max(hi, float(np.nanpercentile(fin, 92)))
+            lo = min(lo, float(np.nanpercentile(fin, 8)))
 
     if ref is not None:
-        r_lo, r_hi = _apply_reference(ax, ref, None)
+        r_lo, r_hi = _apply_reference(ax, ref, spec.reference_short)
         hi, lo = max(hi, r_hi), min(lo, r_lo)
 
+    applies = None if ref is None else ref.get("applies_to")
+    raw_unit = para.get("UNIT")
+    unit_note = (_UNIT_SHORT.get(raw_unit, raw_unit) if raw_unit
+                 else _UNIT_BY_KEY.get(key, ""))
+    notes = []
     for e, kind in enumerate(kinds):
         color = CONDITION_COLOR.get(kind, f"C{e}")
         disp = CONDITION_DISPLAY.get(kind, kind)
-        mean = np.nanmean(abs_grid[e, :, :, p_index], axis=0)
-        ax.plot(x, mean, color=color, linestyle=":", linewidth=1.3, alpha=0.85,
-                label=f"{disp} cross-cell mean (composite)")
-        ax.plot(x, sgm_a_abs[e, :, p_index], color=color, linestyle="--", linewidth=1.5,
-                alpha=0.9, label=f"{disp} per-time SGM (cells {_cells_label(sgm_a_cells[e])})")
-        ax.plot(x, sgm_b_abs[e, :, p_index], color=color, linestyle="-", linewidth=2.8,
-                label=f"{disp} SGM trajectory (cell {sgm_b_cells[e]})")
-        d = drift["median_dex"][e, p_index]
-        ax.annotate(f"{disp}: {d:+.3f} dex / {x[-1] - x[0]:g} s", xy=(0.02, 0.97 - 0.055 * e),
-                    xycoords="axes fraction", fontsize=8, color=color, va="top")
+        ax.plot(x, series[e, :, p_index], color=color, linestyle="-", linewidth=2.6,
+                label=f"{disp} {family}-window")
+        lv = line[e, p_index]
+        ax.axhline(lv, color=color, linestyle="--", linewidth=1.4, alpha=0.9,
+                   label=f"{disp} {family}-trajectory = {lv:.3g}")
+        # Three numbers per condition, in absolute units matching the axis. Rendered BELOW the
+        # axes rather than inside them: in-axes annotations collided with the legend, and neither
+        # can be moved reliably when the legend is auto-placed.
+        note = (f"{disp}: {drift['drift_absolute'][e, p_index]:+.3g} {unit_note} over "
+                f"{x[-1] - x[0]:g} s   ·   "
+                f"{100 * drift['drift_sign_consistency'][e, p_index]:.0f}% of recordings agree on "
+                f"the direction")
+        if ref is not None and (applies is None or disp in applies):
+            r_mean = _reference_band(ref)[0]
+            if np.isfinite(lv) and r_mean:
+                note += f"   ·   {family}-trajectory is {lv / r_mean:.2g}x the reference"
+        notes.append((note, color))
 
     _finish_axes(ax, x, para, spec, lo, hi)
-    title = f"Inferred parameter over the recording — {name} ({para['LABEL']})"
+    title = f"{name} ({para['LABEL']}) over the recording"
     if recovery_frac is not None:
-        title += f"\nheld-out recovery within ±0.3 dex: {recovery_frac[p_index] * 100:.0f}%"
+        title += f"  —  held-out recovery within a factor of 2: {recovery_frac[p_index] * 100:.0f}%"
     ax.set_title(title, fontsize=10.5)
-    ax.legend(fontsize=7, framealpha=0.9, loc="best")
-    fig.tight_layout()
+    ax.legend(fontsize=7.5, framealpha=0.9, loc="best")
+    fig.tight_layout(rect=(0, 0.045 * len(notes), 1, 1))
+    for i, (note, color) in enumerate(notes):
+        fig.text(0.012, 0.012 + 0.042 * (len(notes) - 1 - i), note, fontsize=8, color=color)
     return fig
 
 
-def _figure_posterior(spec, p_index, key, within, between, sgm_b_abs, sgm_b_cells,
-                      x, kinds):
-    """Two-panel uncertainty figure, with the two uncertainties kept apart on purpose.
+def _figure_posterior(spec, p_index, key, within, series, family, x, kinds):
+    """Within-window posterior interval over the recording -- one panel, one quantity.
 
-    Panel (a) WITHIN-WINDOW POSTERIOR SPREAD: at each time, the median across cells of the stored
-    per-window posterior interval -- how uncertain a typical single-window estimate is.
-    Panel (b) BETWEEN-CELL SPREAD: at each time, percentiles across cells of the per-window median
-    -- how much recordings differ from each other, i.e. biological and experimental heterogeneity.
+    At each chunk, the median across cells of that window's stored posterior interval: how uncertain
+    a TYPICAL SINGLE window's estimate is. The ``<family>-window`` timeseries is drawn on top as the
+    anchor, and the reference band where one applies.
 
-    Plotting these on one axis would let a wide posterior masquerade as heterogeneity and vice
-    versa, so they get separate panels sharing one y-axis, with the trajectory-level SGM drawn on
-    both as the common anchor.
-
-    Both panels are built from the STORED FIVE-QUANTILE SUMMARY of each window's posterior, not
-    from posterior samples: they show interval widths, not a density. A pooled posterior density
-    across windows would require the per-window sample clouds, which the Experiment stage does not
-    persist.
+    This is an interval WIDTH built from the stored five-quantile record -- not a posterior density.
+    A density pooled over windows requires the per-window sample clouds, which the Experiment stage
+    does not persist, and this figure does not approximate it.
     """
     para = spec.table[p_index]
     name = spec.display.get(key, key)
     ref = spec.references.get(key)
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 4.9), sharey=True)
+    fig, ax = plt.subplots(figsize=(7.0, 5.0))
     hi, lo = -np.inf, np.inf
-
-    for ax, panel in zip(axes, ("within", "between")):
-        for e, kind in enumerate(kinds):
-            color = CONDITION_COLOR.get(kind, f"C{e}")
-            disp = CONDITION_DISPLAY.get(kind, kind)
-            if panel == "within":
-                q = 10.0 ** within[e, :, p_index, :]          # (n_chunks, 5) absolute
-                ax.fill_between(x, q[:, 0], q[:, 4], color=color, alpha=0.16, linewidth=0,
-                                label=f"{disp} posterior 5–95%")
-                ax.fill_between(x, q[:, 1], q[:, 3], color=color, alpha=0.30, linewidth=0,
-                                label=f"{disp} posterior 25–75%")
-            else:
-                q = 10.0 ** between[e, :, p_index, :]         # (n_chunks, 5) absolute
-                ax.fill_between(x, q[:, 0], q[:, 4], color=color, alpha=0.14, linewidth=0,
-                                hatch="///", edgecolor=color,
-                                label=f"{disp} cells 5–95%")
-                ax.fill_between(x, q[:, 1], q[:, 3], color=color, alpha=0.26, linewidth=0,
-                                label=f"{disp} cells 25–75%")
-            fin = q[np.isfinite(q)]
-            if fin.size:
-                hi = max(hi, float(fin.max()))
-                lo = min(lo, float(fin.min()))
-            ax.plot(x, sgm_b_abs[e, :, p_index], color=color, linestyle="-", linewidth=2.4,
-                    label=f"{disp} SGM trajectory (cell {sgm_b_cells[e]})")
-        if ref is not None:
-            r_lo, r_hi = _apply_reference(ax, ref, None)
-            hi, lo = max(hi, r_hi), min(lo, r_lo)
-
-    axes[0].set_title("(a) within-window posterior spread\n(median across cells of one window's interval)",
-                      fontsize=9.5)
-    axes[1].set_title("(b) between-cell spread\n(percentiles across cells of the per-window median)",
-                      fontsize=9.5)
-    for ax in axes:
-        _finish_axes(ax, x, para, spec, lo, hi)
-    axes[1].set_ylabel("")
-    axes[0].legend(fontsize=6.5, framealpha=0.9, loc="best")
-    fig.suptitle(f"Uncertainty over the recording — {name} ({para['LABEL']})", fontsize=10.5)
+    for e, kind in enumerate(kinds):
+        color = CONDITION_COLOR.get(kind, f"C{e}")
+        disp = CONDITION_DISPLAY.get(kind, kind)
+        q = 10.0 ** within[e, :, p_index, :]
+        ax.fill_between(x, q[:, 0], q[:, 4], color=color, alpha=0.15, linewidth=0,
+                        label=f"{disp} posterior 5–95% (typical window)")
+        ax.fill_between(x, q[:, 1], q[:, 3], color=color, alpha=0.30, linewidth=0,
+                        label=f"{disp} posterior 25–75%")
+        ax.plot(x, series[e, :, p_index], color=color, linestyle="-", linewidth=2.2,
+                label=f"{disp} {family}-window")
+        fin = q[np.isfinite(q)]
+        if fin.size:
+            hi = max(hi, float(np.nanpercentile(fin, 98)))
+            lo = min(lo, float(np.nanpercentile(fin, 2)))
+    if ref is not None:
+        r_lo, r_hi = _apply_reference(ax, ref, spec.reference_short)
+        hi, lo = max(hi, r_hi), min(lo, r_lo)
+    _finish_axes(ax, x, para, spec, lo, hi)
+    ax.set_title(f"Within-window posterior interval — {name} ({para['LABEL']})", fontsize=10.5)
+    ax.legend(fontsize=7, framealpha=0.9, loc="best")
     fig.tight_layout()
     return fig
 
@@ -406,7 +386,15 @@ def _cells_label(cells):
 
 
 def _finish_axes(ax, x, para, spec, lo, hi):
-    """Log-scaled physical y-axis plus the mirrored dex axis, and a time x-axis."""
+    """Linear y-axis in the parameter's own absolute units, with robust limits.
+
+    Absolute units, not log: the readable quantity is the value and its absolute change, and a log
+    axis plus a mirrored decade axis proved to be clutter that obscured both. Limits come from a
+    robust percentile range of the data extended by the reference band, so a few outlying per-cell
+    traces clip instead of compressing the informative region. Decade-space quantities (the fitted
+    drift in dex, the fold change) live in the report table, where a reader can consult them without
+    re-reading the axis.
+    """
     ax.set_xlabel("time [s]")
     ax.set_xlim(float(x[0]), float(x[-1]))
     ax.set_xticks(x)
@@ -414,152 +402,205 @@ def _finish_axes(ax, x, para, spec, lo, hi):
     unit = (_UNIT_SHORT.get(raw_unit, raw_unit) if raw_unit
             else _UNIT_BY_KEY.get(para.get("KEY", ""), "absolute"))
     ax.set_ylabel(f"inferred [{unit}]")
-    if np.isfinite(lo) and np.isfinite(hi) and lo > 0 and hi > lo:
-        ax.set_yscale("log")
-        ax.set_ylim(lo / 1.25, hi * 1.25)
-        _dex_axis(ax)
-    else:
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=9))
-        ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+        pad = 0.10 * (hi - lo)
+        ax.set_ylim(max(0.0, lo - pad), hi + pad)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
 
 
 # =============================================================================
 # Report
 # =============================================================================
 
-def _write_report(spec, meta, results, drift, kinds, sgm_b_cells, sgm_a_cells):
-    """Write the self-contained interpretation report beside the figures."""
+def _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj):
+    """Write the self-contained interpretation report beside the figures.
+
+    Every reported quantity is defined verbatim here, keyed by the same name the figures and the
+    companion note use, so a reader can judge any number without opening the code.
+    """
     displays = [CONDITION_DISPLAY.get(k, k) for k in kinds]
-    L = [f"# Experiment temporal dynamics — {spec.alias} {spec.timing_label}", ""]
-    L.append(f"Generated from `{meta['npz_name']}`. **{meta['n_estimates']} estimates** = "
+    L = [f"# Experiment temporal dynamics — {spec.alias} {spec.timing_label}",
+         f"Run: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}", ""]
+    L.append(f"Generated from `{meta['npz_name']}`. **{meta['n_estimates']} MAP estimates** = "
              f"{len(kinds)} conditions × {meta['n_cells']} recordings × {meta['n_chunks']} "
              f"non-overlapping {meta['step']:g} s windows. Time points: "
              f"{', '.join(f'{t:g}' for t in meta['x'])} s. Conditions: {', '.join(displays)} "
-             f"(stored tokens {', '.join(kinds)}).")
+             f"(stored tokens {', '.join(kinds)}). Central-estimate family: **{family}**.")
     L.append("")
-    L.append("## What this analysis does, and what it cannot do alone")
+    L.append("## What the analysis asks, and what it cannot answer alone")
     L.append("")
-    L.append("The Experiment stage estimates the parameters independently in every window of every "
-             "recording, so stacking the windows along time asks whether an inferred value holds "
-             "still across the recording — a resolution a single whole-recording estimate cannot "
-             "provide. A parameter that is a constant property of the system should be flat; a "
-             "trend is **either real dynamics or an acquisition confound**, and this analysis "
-             "cannot by itself decide which.")
+    L.append("The Experiment stage reports one **MAP estimate per window** — the point estimate it "
+             "optimizes for one (condition, cell, chunk) window. Stacking the windows along time "
+             "asks whether an inferred value holds still across the recording. A parameter that is "
+             "a constant property of the system should be flat; a trend is **either real dynamics "
+             "or an acquisition confound**, and this analysis cannot decide which.")
     L.append("")
-    L.append("That limit is structural, and it is why the analysis exists for both workflows. The "
-             "biology workflow holds the imaging block fixed, so it is blind to imaging drift; the "
-             "detector workflow marginalizes the reaction-diffusion block, so it is blind to "
-             "biological drift. Each workflow's temporal result is therefore the other's "
-             "confound test, and the two read the SAME recordings — the experimental path pattern "
-             "carries no workflow qualifier, so a given recording index is the same acquisition in "
-             "both. Comparing them bounds the confound; neither alone attributes a cause.")
+    L.append("That limit is structural. The biology workflow holds imaging fixed, so it is blind to "
+             "imaging drift; the detector workflow marginalizes the reaction-diffusion block, so it "
+             "is blind to biological drift. The two read the **same recordings** — the experimental "
+             "path pattern carries no workflow qualifier, so a given recording index is the same "
+             "acquisition in both — which makes each the other's control. Neither attributes a "
+             "cause on its own.")
     L.append("")
-    L.append("## The central estimate is a real recording, not an average")
+    L.append("## The central estimate — exactly what was aggregated")
     L.append("")
-    L.append("Averaging each parameter independently across recordings composes a vector whose "
-             "coordinates never co-occurred in any recording. Two Sample Geometric Median "
-             "estimates are used instead, and they answer different questions:")
+    L.append("A timeseries needs one vector per chunk, so the **cell** axis is aggregated; a single "
+             "summary line needs one vector overall, so the **cell and chunk** axes are. Crossing "
+             "that with the choice of estimator gives four, named for what they aggregate:")
     L.append("")
-    L.append("- **SGM trajectory (headline, thick line).** The one recording whose ENTIRE time "
-             "course is most central, selected as the medoid over recordings of the flattened "
-             "(time × parameter) trajectory in prior-range-normalized absolute space. Every point "
-             "comes from the same acquisition, so no plotted value is a composite and **no step "
-             "can be an artifact of switching between recordings**.")
-    L.append("- **Per-time-point SGM (companion, dashed).** The medoid recording at each time "
-             "independently. Its coordinates are jointly realized within a time point, but **the "
-             "selected recording may change between time points**, and such a change can look "
-             "like temporal structure. The selected recordings are therefore printed in the "
-             "legend, and where more than one appears the curve must be read with that in mind.")
-    L.append("- **Cross-cell mean (dotted, retained for comparison).** The per-dimension composite "
-             "the SGM replaces. The gap between it and the SGM trajectory is itself informative: "
-             "where they separate, the composite is asserting a combination no recording produced.")
+    L.append("| name | definition | drawn as |")
+    L.append("|---|---|---|")
+    L.append("| `mean-window` | Mean value vector, aggregated across cells for a given chunk, of "
+             "the MAP estimate vectors computed for (chunk, cell) pairs. Each parameter is averaged "
+             "independently. | timeseries |")
+    L.append("| `sgm-window` | Realized value vector, aggregated across cells for a given chunk, "
+             "minimizing the summed normalized distance to the other cells' vectors at that chunk, "
+             "of the MAP estimate vectors computed for (chunk, cell) pairs. | timeseries |")
+    L.append("| `mean-trajectory` | Mean value vector, aggregated across chunks and cells, of the "
+             "MAP estimate vectors computed for (chunk, cell) pairs. | horizontal line |")
+    L.append("| `sgm-trajectory` | Realized value vector, aggregated across chunks and cells, "
+             "minimizing the summed normalized distance to all other (chunk, cell) vectors. | "
+             "horizontal line |")
     L.append("")
-    L.append("Both SGM variants are computed on the **full parameter vector**, never on a plotted "
-             "subset, so restricting the figures with `--params` cannot change which recording is "
-             "central.")
+    L.append(f"This run drew the **{family}-window** timeseries with the **{family}-trajectory** "
+             f"summary line. The pairing is enforced, so the curve and the line are always the same "
+             f"estimator.")
     L.append("")
-    L.append("## Drift over the recording (measured per recording, independent of the display)")
+    L.append("**Distance metric** (both `sgm-*` estimates): absolute values `10**theta`, each "
+             "parameter divided by its absolute prior width `10**high - 10**low` so no parameter "
+             "dominates, Euclidean, **exact medoid** — the member minimizing the summed distance to "
+             "every other member of the set. Selection is on **all parameters jointly**, so a "
+             "selected vector is internally coherent; consequently the value it reports for one "
+             "parameter is that jointly-central window's value, not that parameter's own median.")
     L.append("")
-    L.append("Each recording's own estimate is regressed on time in log10 and reported as the "
-             "total change over the observed span, in dex. Aggregating per-recording fits by their "
-             "median keeps one erratic recording from moving the summary, and because the fit is "
-             "per recording **these statistics do not depend on the choice of central estimate** — "
-             "swapping an average for a geometric median changes what is displayed, not what is "
-             "measured.")
+    L.append("A `mean-*` estimate averages each parameter independently, so its coordinates need "
+             "not have co-occurred in any recording. An `sgm-*` estimate is an actual window, so "
+             "its coordinates did.")
     L.append("")
-    hdr = "| Parameter | " + " | ".join(f"{d} drift (dex)" for d in displays) + \
-          " | " + " | ".join(f"{d} |d|>{drift['threshold']:g} / sign / p" for d in displays) + " |"
+    if family == "sgm":
+        L.append("### Which windows were selected")
+        L.append("")
+        for e, kind in enumerate(kinds):
+            disp = CONDITION_DISPLAY.get(kind, kind)
+            L.append(f"- **{disp}** — `sgm-trajectory`: cell {picks_traj[e][0]}, chunk "
+                     f"{picks_traj[e][1]} (one realized window). `sgm-window` selected "
+                     f"{_cells_label(picks_window[e])} across the {meta['n_chunks']} chunks.")
+        L.append("")
+        L.append("`sgm-window` selecting more than one cell is expected and must be read with the "
+                 "curve: **a step between adjacent chunks can be a change of cell rather than a "
+                 "change in time.** `sgm-trajectory` is a single window and carries no such "
+                 "ambiguity, and it is the same quantity the standalone sample-geometric-median "
+                 "analysis reports over the same pooled windows, so the two agree by construction.")
+        L.append("")
+    L.append("## Drift — measured per cell, independent of the display")
+    L.append("")
+    L.append("For every (condition, cell, parameter) an ordinary least-squares line is fit to the "
+             "stored **log10** MAP estimate against time (log10 because drift is multiplicative), "
+             "giving a slope and hence fitted endpoints:")
+    L.append("")
+    L.append("```")
+    L.append("change_dex = slope * (t_last - t_first)")
+    L.append("start      = 10 ** (fitted value at t_first)")
+    L.append("end        = 10 ** (fitted value at t_last)")
+    L.append("```")
+    L.append("")
+    L.append("Because the fit is per cell, **none of these statistics depends on the central "
+             "estimate the figures draw**: swapping a mean for a medoid changes what is displayed, "
+             "not what is measured.")
+    L.append("")
+    L.append("| name | definition |")
+    L.append("|---|---|")
+    L.append("| `drift-absolute` | Median across cells of `end - start`, in the parameter's own "
+             "units. **Annotated on the figure.** |")
+    L.append("| `drift-sign-consistency` | Fraction of cells whose change shares the sign of the "
+             "median change. **Annotated on the figure.** |")
+    L.append("| `drift-fold` | Median across cells of `end / start`, a multiplicative factor. |")
+    L.append("| `drift-dex` | Median across cells of `change_dex`, in log10 units. |")
+    L.append(f"| `drift-material-fraction` | Fraction of cells whose `|change_dex|` exceeds "
+             f"{drift['threshold']:g} dex (a factor of two). |")
+    L.append("| `drift-wilcoxon-p` | Two-sided signed-rank test that the per-cell changes are "
+             "centered at zero. A **detectability** statement, not a magnitude. |")
+    L.append("| `reference-ratio` | The `*-trajectory` value divided by the reference mean, where a "
+             "reference applies to that condition. |")
+    L.append("| `reference-verdict` | Whether the `*-trajectory` value lies inside the reference "
+             "band. |")
+    L.append("")
+    hdr = ("| Parameter | " + " | ".join(f"{d}: {family}-traj" for d in displays) + " | " +
+           " | ".join(f"{d}: drift-absolute / fold / dex / sign / >2x / p" for d in displays) +
+           " | reference |")
     L.append(hdr)
-    L.append("|" + "---|" * (1 + 2 * len(displays)))
+    L.append("|" + "---|" * (1 + 2 * len(displays) + 1))
     for r in results:
-        e_i = r["p_index"]
-        dv = " | ".join(f"{drift['median_dex'][e, e_i]:+.3f}" for e in range(len(kinds)))
-        ds = " | ".join(f"{100 * drift['frac_material'][e, e_i]:.0f}% / "
-                        f"{100 * drift['sign_consistency'][e, e_i]:.0f}% / "
-                        f"{drift['wilcoxon_p'][e, e_i]:.1e}" for e in range(len(kinds)))
-        L.append(f"| {r['name']} ({r['label']}) | {dv} | {ds} |")
+        i = r["p_index"]
+        traj = " | ".join(f"{line[e, i]:.4g}" for e in range(len(kinds)))
+        stats = " | ".join(
+            f"{drift['drift_absolute'][e, i]:+.3g} / {drift['drift_fold'][e, i]:.2f}x / "
+            f"{drift['drift_dex'][e, i]:+.3f} / {100 * drift['drift_sign_consistency'][e, i]:.0f}% / "
+            f"{100 * drift['drift_material_fraction'][e, i]:.0f}% / "
+            f"{drift['drift_wilcoxon_p'][e, i]:.1e}" for e in range(len(kinds)))
+        ref = spec.references.get(r["key"])
+        if ref is None:
+            rcol = "—"
+        else:
+            r_mean, r_lo, r_hi, _ = _reference_band(ref)
+            applies = ref.get("applies_to")
+            parts = []
+            for e, kind in enumerate(kinds):
+                disp = CONDITION_DISPLAY.get(kind, kind)
+                if applies is not None and disp not in applies:
+                    continue
+                v = line[e, i]
+                inside = "inside" if (np.isfinite(v) and r_lo <= v <= r_hi) else "outside"
+                parts.append(f"{disp} {v / r_mean:.2g}x, {inside}")
+            rcol = (f"{r_mean:.3g} [{r_lo:.3g}–{r_hi:.3g}] {ref['unit']}; " + "; ".join(parts)
+                    if parts else f"{r_mean:.3g} {ref['unit']} (no applicable condition)")
+        L.append(f"| {r['name']} ({r['label']}) | {traj} | {stats} | {rcol} |")
     L.append("")
-    L.append(f"`|d|>{drift['threshold']:g}` is the fraction of recordings whose drift exceeds "
-             f"{drift['threshold']:g} dex (the same practical bar the recovery tables use for a "
-             f"factor of two); `sign` is the fraction sharing the median's direction; `p` is a "
-             f"two-sided Wilcoxon signed-rank test that the per-recording drifts are centered at "
-             f"zero. A large drift with high sign-consistency and a small p is a coherent "
-             f"within-recording trend, not scatter.")
+    L.append("**A time-aggregated summary of a drifting parameter summarizes a non-stationary "
+             "process.** Where `drift-absolute` is large and `drift-sign-consistency` high, the "
+             "`*-trajectory` line — and any reference comparison drawn against it — is a summary "
+             "over that drift, not a measurement of a constant.")
     L.append("")
-    L.append("## Uncertainty figures — two quantities, deliberately not combined")
+    L.append("## Uncertainty figure")
     L.append("")
-    L.append("Each `<key>_temporal_posterior.png` carries two panels sharing one axis:")
+    L.append("`<key>_temporal_posterior.png` shows, at each chunk, the **median across cells of "
+             "that window's stored posterior interval** — how uncertain a typical single window's "
+             "estimate is. It is an interval **width** built from the stored five-quantile record, "
+             "**not a posterior density**: a density pooled over windows would require the "
+             "per-window sample clouds, which the Experiment stage does not persist, and this "
+             "figure does not approximate it.")
     L.append("")
-    L.append("- **(a) within-window posterior spread** — at each time, the median across "
-             "recordings of that window's stored posterior interval. This is how uncertain a "
-             "typical *single* window's estimate is.")
-    L.append("- **(b) between-cell spread** — at each time, percentiles across recordings of the "
-             "per-window median. This is how much recordings differ from each other.")
-    L.append("")
-    L.append("They are separated because plotting them together would let a wide posterior "
-             "masquerade as heterogeneity, or heterogeneity as posterior width — a conflation that "
-             "would misstate what the data supports.")
-    L.append("")
-    L.append("**What these panels are built from.** The stored per-window five-quantile summary "
-             "(5, 25, 50, 75, 95%), not posterior samples. They therefore show interval *widths*; "
-             "they are not a posterior *density*. A pooled density across windows would require "
-             "the per-window sample clouds, which the Experiment stage does not persist — that "
-             "remains an extension, and this analysis does not approximate it.")
-    L.append("")
-    L.append("## Central estimates selected (provenance)")
-    L.append("")
-    for e, kind in enumerate(kinds):
-        disp = CONDITION_DISPLAY.get(kind, kind)
-        L.append(f"- **{disp}** — SGM trajectory: recording {sgm_b_cells[e]} "
-                 f"(one recording, all time points). Per-time-point SGM selected "
-                 f"{_cells_label(sgm_a_cells[e])}.")
+    L.append("When a parameter's interval spans essentially its whole prior, the posterior is "
+             "returning the prior and the point estimate is the prior's center regardless of the "
+             "data.")
     L.append("")
     if spec.references:
         L.append("## External reference values")
         L.append("")
         L.append(f"Source: {spec.reference_source}. A reference is drawn only on the parameters it "
-                 f"legitimately constrains, and only for the conditions it applies to — several "
-                 f"are valid for the monomer control alone, and drawing them against the dimer "
-                 f"condition would invite a false comparison.")
+                 f"constrains and only for the conditions it applies to; drawing it elsewhere would "
+                 f"invite a false comparison.")
         L.append("")
         for k, ref in spec.references.items():
-            scope = "both conditions" if ref.get("applies_to") is None \
-                else ", ".join(ref["applies_to"]) + " only"
+            scope = ("both conditions" if ref.get("applies_to") is None
+                     else ", ".join(ref["applies_to"]) + " only")
             L.append(f"- **{spec.display.get(k, k)}** ({scope}): {ref['note']}")
         L.append("")
         missing = [k for k in spec.keys if k not in spec.references]
         if missing:
             L.append(f"No external reference exists for: "
                      f"{', '.join(spec.display.get(k, k) for k in missing)}. These are read on "
-                     f"their internal evidence alone (drift, recovery, and posterior width).")
+                     f"their internal evidence alone — drift, recovery, and posterior width.")
             L.append("")
     L.append("## How to read a parameter")
     L.append("")
     L.append("Trust a parameter on experimental data when it recovers well on held-out synthetic "
-             "data **and** is stationary where the model says it should be **and** its posterior is "
-             "narrow relative to its prior. A parameter that recovers poorly carries no signal "
-             "regardless of how smooth its trajectory looks, and a posterior that spans its prior "
-             "is reporting the prior back.")
+             "data, **and** is stationary where the model says it should be, **and** its posterior "
+             "is narrow relative to its prior. A parameter that recovers poorly carries no signal "
+             "however smooth its trajectory looks, and a posterior that spans its prior is "
+             "reporting the prior back. A parameter that drifts is not thereby discredited — the "
+             "drift may be the acquisition's, which is what the other workflow's run measures.")
     L.append("")
     (spec.fig_dir / "report.md").write_text("\n".join(L), encoding="utf-8")
 
@@ -615,20 +656,21 @@ def run_temporal_dynamics(cfg, args):
     abs_grid = 10.0 ** grid
     x = step * np.arange(n_chunks)
 
-    sgm_b, sgm_b_cells, sgm_b_methods = tdk.central_trajectory_sgm(
-        grid, spec.prior_low, spec.prior_high)
-    sgm_a, sgm_a_cells = tdk.central_per_time_sgm(grid, spec.prior_low, spec.prior_high)
+    # The chosen family fixes BOTH the timeseries and its summary line, so a figure never mixes a
+    # mean with a medoid. Every kernel function below already returns ABSOLUTE units.
+    family = args.central
+    if family == "sgm":
+        series, picks_window = tdk.sgm_window(grid, spec.prior_low, spec.prior_high)
+        line, picks_traj = tdk.sgm_trajectory(grid, spec.prior_low, spec.prior_high)
+    else:
+        series, picks_window = tdk.mean_window(grid), None
+        line, picks_traj = tdk.mean_trajectory(grid), None
     drift = tdk.drift_statistics(grid, x)
-    # The kernel works in log10 (the space priors and drift live in); the figures plot absolute
-    # values on a log-scaled axis, where a negative log10 value cannot be drawn at all. Convert
-    # here, once, so no figure can silently receive the wrong space.
-    sgm_b_abs = 10.0 ** sgm_b
-    sgm_a_abs = 10.0 ** sgm_a
 
-    within = between = None
+    within = None
     if quant is not None and quant.size:
         qgrid, _, _ = tdk.reshape_to_grid(quant, kind_index, cell, chunk, len(kinds))
-        within, between = tdk.quantile_summaries(qgrid)
+        within = tdk.within_window_interval(qgrid)
 
     recovery_frac = None
     if spec.recovery_npz.exists():
@@ -640,13 +682,15 @@ def run_temporal_dynamics(cfg, args):
     print(f"\nLoaded {inferred_log10.shape[0]} estimates: {len(kinds)} conditions x "
           f"{n_cells} recordings x {n_chunks} windows.")
     print(f"  time points        : {[float(t) for t in x]} s")
-    print(f"  SGM trajectory     : " + ", ".join(
-        f"{CONDITION_DISPLAY.get(k, k)}=recording {sgm_b_cells[e]} ({sgm_b_methods[e]})"
-        for e, k in enumerate(kinds)))
-    print(f"  per-time SGM cells : " + ", ".join(
-        f"{CONDITION_DISPLAY.get(k, k)}=[{_cells_label(sgm_a_cells[e])}]"
-        for e, k in enumerate(kinds)))
-    print(f"  posterior panels   : "
+    print(f"  central estimate   : {family}-window (timeseries) + {family}-trajectory (line)")
+    if family == "sgm":
+        print("  sgm-window cells   : " + ", ".join(
+            f"{CONDITION_DISPLAY.get(k, k)}=[{_cells_label(picks_window[e])}]"
+            for e, k in enumerate(kinds)))
+        print("  sgm-trajectory     : " + ", ".join(
+            f"{CONDITION_DISPLAY.get(k, k)}=(cell {picks_traj[e][0]}, chunk {picks_traj[e][1]})"
+            for e, k in enumerate(kinds)))
+    print(f"  posterior panel    : "
           f"{'on (stored quantiles)' if within is not None else 'off (no posterior_quantiles)'}")
     print(f"  recovery annotation: {'on' if recovery_frac is not None else 'off'}\n")
 
@@ -656,14 +700,13 @@ def run_temporal_dynamics(cfg, args):
     for p_index, key in enumerate(spec.keys):
         if wanted is not None and key not in wanted:
             continue
-        fig = _figure_trajectory(spec, p_index, key, abs_grid, sgm_b_abs, sgm_b_cells,
-                                 sgm_a_abs, sgm_a_cells, x, kinds, drift, recovery_frac)
+        fig = _figure_trajectory(spec, p_index, key, abs_grid, series, line, family,
+                                 picks_window, picks_traj, x, kinds, drift, recovery_frac)
         fig.savefig(str(spec.fig_dir / f"{key}_temporal.png"), dpi=180)
         plt.close(fig)
         note = ""
         if within is not None:
-            figp = _figure_posterior(spec, p_index, key, within, between, sgm_b_abs, sgm_b_cells,
-                                     x, kinds)
+            figp = _figure_posterior(spec, p_index, key, within, series, family, x, kinds)
             figp.savefig(str(spec.fig_dir / f"{key}_temporal_posterior.png"), dpi=180)
             plt.close(figp)
             note = " + posterior"
@@ -675,7 +718,7 @@ def run_temporal_dynamics(cfg, args):
     meta = {"npz_name": spec.npz_path.name, "n_estimates": int(inferred_log10.shape[0]),
             "n_cells": n_cells, "n_chunks": n_chunks, "step": step,
             "x": [float(t) for t in x]}
-    _write_report(spec, meta, results, drift, kinds, sgm_b_cells, sgm_a_cells)
+    _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj)
     print(f"  wrote report.md\n\nDone: {len(results)} parameter(s) in {spec.fig_dir}")
     return 0
 
@@ -689,6 +732,13 @@ def build_parser(description):
                    help="spacing between consecutive windows on the time axis. Default: the run "
                         "duration (non-overlapping windows). Set this only if the Experiment run "
                         "used overlapping windows, in which case the true spacing is the step.")
+    p.add_argument("--central", choices=tdk.CENTRAL_FAMILIES, default="sgm",
+                   help="central-estimate family. 'sgm' (default) draws the sgm-window timeseries "
+                        "(a realized value vector aggregated across cells for each chunk) with the "
+                        "sgm-trajectory summary line (a realized value vector aggregated across "
+                        "chunks and cells); 'mean' draws the mean-window timeseries and the "
+                        "mean-trajectory line, each parameter averaged independently. The pairing "
+                        "is enforced so a figure never mixes a mean with a medoid.")
     p.add_argument("--params", type=str, default=None,
                    help="comma-separated parameter keys to plot (default: all). Filters the "
                         "FIGURES only -- the central estimates are computed on the full parameter "

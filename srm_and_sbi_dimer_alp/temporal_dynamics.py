@@ -1,40 +1,47 @@
 """Temporal-dynamics kernel: how inferred parameters behave across one recording.
 
-Workflow-agnostic numerics shared by the biology and detector temporal analyses. Nothing here
-knows which parameters it is describing: every function takes arrays, a prior box, and a time
-axis. Pure numpy (plus the shared geometric-median kernel and a lazy scipy import for the sign
-test), so it imports and unit-tests without a machine profile.
+Workflow-agnostic numerics shared by the biology and detector temporal analyses. Nothing here knows
+which parameters it is describing: every function takes arrays, a prior box, and a time axis. Pure
+numpy (plus the shared geometric-median kernel and a lazy scipy import for the sign test), so it
+imports and unit-tests without a machine profile.
 
-WHAT THE ANALYSIS ASKS. The Experiment stage estimates parameters independently in every
-non-overlapping window of every recording. Stacking those windows along time turns a stage that
-reports one number per recording into a time series, which answers a question the stage cannot:
-does the inferred value hold still across the recording? A parameter that is a constant property
-of the system should be flat. A trend is either real dynamics or an acquisition confound, and the
-two are not distinguishable from one workflow's estimates alone.
+WHAT THE ANALYSIS ASKS. The Experiment stage estimates the parameters independently in every
+non-overlapping window of every recording, reporting one MAP estimate per window. Stacking those
+windows along time asks a question the stage cannot: does the inferred value hold still across the
+recording? A parameter that is a constant property of the system should be flat. A trend is either
+real dynamics or an acquisition confound, and one workflow's estimates cannot distinguish them.
 
-THE CENTRAL ESTIMATE IS A REAL RECORDING, NOT AN AVERAGE. Summarizing many cells at one time
-point by averaging each parameter independently composes a vector whose coordinates never
-co-occurred in any cell -- the same defect the Sample Geometric Median exists to remove
-(Ramirez Sierra & Sokolowski, Mach. Learn.: Sci. Technol. 6, 015004, 2025). Two SGM-based central
-estimates are provided instead, and they answer different questions:
+THE ONE ARRAY EVERYTHING STARTS FROM. All functions here operate on the MAP grid
 
-  - :func:`central_trajectory_sgm` (**trajectory-level**) selects the ONE cell whose ENTIRE time
-    course is most central, by taking the medoid over cells of the flattened
-    (time x parameter) trajectory. The result is a real recording's real time course: every
-    plotted point comes from the same acquisition, so an apparent temporal change cannot be an
-    artifact of switching between cells. This is the headline central estimate.
-  - :func:`central_per_time_sgm` (**per-time-point**) selects, at each time independently, the
-    medoid cell across the parameter vector at that time. Its coordinates are jointly realized
-    within each time point, but THE SELECTED CELL CAN CHANGE BETWEEN TIME POINTS, so a step in
-    the trajectory may be a change of cell rather than a change in time. The selected cell index
-    is returned at every time point precisely so that this confound is visible rather than
-    hidden, and it must be reported alongside the curve.
+    G[k, c, t, p]   MAP estimate in log10 space
+      k = condition        c = cell (recording)
+      t = chunk (window)   p = parameter
 
-Both operate on the FULL parameter vector, never a plotted subset: the medoid is a property of
-the joint vector, so restricting the figures to some parameters must not change which cell is
-central. Distances are taken in ABSOLUTE (physical) space normalized by the absolute prior range,
-matching the convention of the geometric-median analysis -- the space where the simulator
-consumes the values, and where dividing by each prior's range makes the dimensions commensurable.
+built by :func:`reshape_to_grid`. Every entry is the MAP point estimate the Experiment stage
+optimized for one (condition, cell, chunk) window -- never a posterior draw and never an average.
+
+THE FOUR CENTRAL ESTIMATES. A timeseries needs one vector per chunk, which means aggregating the
+cell axis; a single summary line needs one vector overall, which means aggregating the cell AND
+chunk axes. Crossing that choice of axis with the choice of estimator gives exactly four, and each
+function below is named for what it aggregates:
+
+    mean-window       mean value vector, aggregated across cells for a given chunk
+    sgm-window        realized value vector, aggregated across cells for a given chunk
+    mean-trajectory   mean value vector, aggregated across chunks and cells
+    sgm-trajectory    realized value vector, aggregated across chunks and cells
+
+"Mean" aggregates each parameter independently, so its coordinates need not have co-occurred in any
+recording. "Realized" selects an actual member of the set -- the exact medoid, the member minimizing
+the summed distance to every other member -- so every coordinate co-occurred in one real window and
+the joint structure is intact (Ramirez Sierra & Sokolowski, Mach. Learn.: Sci. Technol. 6, 015004,
+2025). The two `*-window` functions produce a timeseries; the two `*-trajectory` functions produce a
+single vector, and they pair with their window counterpart so a figure never mixes estimators.
+
+DISTANCES. Both realized estimates use the same metric: absolute (physical) values ``10**G``, each
+parameter divided by its absolute prior width ``10**high - 10**low`` so no parameter dominates,
+Euclidean, exact medoid. Selection is on ALL parameters jointly, so a selected vector is internally
+coherent -- and consequently the value it reports for one parameter is that jointly-central window's
+value, not that parameter's own median.
 """
 from __future__ import annotations
 
@@ -42,28 +49,22 @@ import numpy as np
 
 from .sample_geometric_median import sample_geometric_median
 
-# A drift of this many dex over the recording is called material. It is the same practical bar the
-# recovery tables use for "within a factor of two" (0.3 dex ~ 2x), so a drift that exceeds it moves
-# the estimate by more than the tolerance the recovery is judged against.
+# A change of this many dex over the recording is called material: 0.3 dex is a factor of two, the
+# same practical bar the recovery tables use, so exceeding it moves the estimate by more than the
+# tolerance the recovery is judged against.
 MATERIAL_DRIFT_DEX = 0.3
+
+CENTRAL_FAMILIES = ("sgm", "mean")
 
 
 def reshape_to_grid(values, kind_index, cell, chunk, n_kinds):
     """Scatter flat per-window rows into a dense ``(kind, cell, chunk, ...)`` grid.
 
     The Experiment output stores one flat row per analyzed window. Each row is placed at
-    ``grid[kind_index, cell, chunk]``. Windows never estimated stay NaN and every downstream
-    statistic is nan-aware, so a missing window narrows nothing silently.
+    ``grid[kind_index, cell, chunk]``. Windows never estimated stay NaN and every statistic here is
+    nan-aware, so a missing window narrows nothing silently.
 
-    Args:
-        values: ``(N, ...)`` per-window values (e.g. ``(N, D)`` point estimates or
-            ``(N, D, Q)`` stored quantiles).
-        kind_index, cell, chunk: ``(N,)`` integer labels identifying each row's condition,
-            recording, and window.
-        n_kinds: number of conditions.
-
-    Returns:
-        ``(grid, n_cells, n_chunks)``.
+    Returns ``(grid, n_cells, n_chunks)``.
     """
     values = np.asarray(values, dtype=float)
     kind_index = np.asarray(kind_index, dtype=int)
@@ -77,7 +78,7 @@ def reshape_to_grid(values, kind_index, cell, chunk, n_kinds):
 
 
 def _range_abs(prior_low, prior_high):
-    """Absolute prior width per parameter, the normalizer for every distance here."""
+    """Absolute prior width per parameter -- the normalizer for every distance here."""
     lo = np.asarray(prior_low, dtype=float)
     hi = np.asarray(prior_high, dtype=float)
     span = 10.0 ** hi - 10.0 ** lo
@@ -85,58 +86,35 @@ def _range_abs(prior_low, prior_high):
     return span
 
 
-def central_trajectory_sgm(grid_log10, prior_low, prior_high):
-    """Trajectory-level SGM: the one cell per condition whose whole time course is most central.
+# =============================================================================
+# The four central estimates
+# =============================================================================
 
-    Each cell contributes its complete ``(n_chunks, D)`` trajectory, flattened to a single
-    ``n_chunks * D`` vector after each parameter is divided by its absolute prior range so no
-    parameter dominates the distance. The medoid of those vectors is a real cell, and the returned
-    trajectory is that cell's stored rows verbatim.
+def mean_window(grid_log10):
+    """**mean-window**: mean value vector, aggregated across cells for a given chunk.
 
-    Cells with any missing window are excluded from the selection, because a partial trajectory
-    cannot be compared on equal footing with complete ones; if every cell of a condition is
-    incomplete, that condition's entry is NaN and its index is -1.
+    For each condition, chunk, and parameter independently, the arithmetic mean over cells of the
+    absolute MAP values. Each parameter is averaged on its own, so the resulting vector's
+    coordinates need not have co-occurred in any recording.
 
-    Args:
-        grid_log10: ``(n_kinds, n_cells, n_chunks, D)`` point estimates in log10 space.
-        prior_low, prior_high: ``(D,)`` log10 prior bounds.
-
-    Returns:
-        ``(trajectory, cells, methods)`` -- ``trajectory`` ``(n_kinds, n_chunks, D)`` in log10,
-        ``cells`` ``(n_kinds,)`` the selected cell index per condition (-1 if none), ``methods``
-        the medoid method used per condition.
+    Returns ``(n_kinds, n_chunks, D)`` in ABSOLUTE units.
     """
-    grid = np.asarray(grid_log10, dtype=float)
-    n_kinds, n_cells, n_chunks, dim = grid.shape
-    span = _range_abs(prior_low, prior_high)
-    out = np.full((n_kinds, n_chunks, dim), np.nan)
-    picked = np.full(n_kinds, -1, dtype=int)
-    methods = []
-    for k in range(n_kinds):
-        complete = [c for c in range(n_cells) if np.isfinite(grid[k, c]).all()]
-        if not complete:
-            methods.append("none")
-            continue
-        # Absolute space, per-parameter prior-range normalization, then flatten over time.
-        flat = np.stack([(10.0 ** grid[k, c] / span).ravel() for c in complete], axis=0)
-        idx, method = sample_geometric_median(flat, np.ones(flat.shape[1]))
-        picked[k] = complete[idx]
-        methods.append(method)
-        out[k] = grid[k, complete[idx]]
-    return out, picked, methods
+    return np.nanmean(10.0 ** np.asarray(grid_log10, dtype=float), axis=1)
 
 
-def central_per_time_sgm(grid_log10, prior_low, prior_high):
-    """Per-time-point SGM: at each time, the medoid cell across the parameter vector.
+def sgm_window(grid_log10, prior_low, prior_high):
+    """**sgm-window**: realized value vector, aggregated across cells for a given chunk.
 
-    Coordinates within one time point are jointly realized, but the selected cell may differ
-    between time points, so the returned ``cells`` array is part of the result rather than a
-    diagnostic: a change of central cell between adjacent times can masquerade as temporal change
-    and must be shown wherever the curve is shown.
+    At each chunk independently, the exact medoid among that chunk's cell vectors: the cell whose
+    D-dimensional MAP vector minimizes the summed normalized distance to the other cells' vectors at
+    the same chunk. The returned vector is that cell's stored values verbatim.
 
-    Returns:
-        ``(trajectory, cells)`` -- ``(n_kinds, n_chunks, D)`` in log10 and ``(n_kinds, n_chunks)``
-        selected cell indices (-1 where a time point has no complete cell).
+    The selected cell is returned per chunk because **it may differ between chunks**: a step in the
+    resulting series can be a change of cell rather than a change in time, and the caller must show
+    the selections wherever it shows the curve.
+
+    Returns ``(series_abs, cells)`` -- ``(n_kinds, n_chunks, D)`` in ABSOLUTE units and
+    ``(n_kinds, n_chunks)`` selected cell indices (-1 where a chunk has no complete cell).
     """
     grid = np.asarray(grid_log10, dtype=float)
     n_kinds, n_cells, n_chunks, dim = grid.shape
@@ -148,36 +126,99 @@ def central_per_time_sgm(grid_log10, prior_low, prior_high):
             rows = [c for c in range(n_cells) if np.isfinite(grid[k, c, t]).all()]
             if not rows:
                 continue
-            block = np.stack([10.0 ** grid[k, c, t] for c in rows], axis=0)
+            block = 10.0 ** np.stack([grid[k, c, t] for c in rows], axis=0)
             idx, _method = sample_geometric_median(block, span)
             picked[k, t] = rows[idx]
-            out[k, t] = grid[k, rows[idx], t]
+            out[k, t] = block[idx]
     return out, picked
 
+
+def mean_trajectory(grid_log10):
+    """**mean-trajectory**: mean value vector, aggregated across chunks and cells.
+
+    For each condition and parameter independently, the arithmetic mean over every (cell, chunk)
+    window of the absolute MAP values -- the grand mean over both axes. This is the single-vector
+    counterpart of :func:`mean_window`.
+
+    Returns ``(n_kinds, D)`` in ABSOLUTE units.
+    """
+    g = 10.0 ** np.asarray(grid_log10, dtype=float)
+    return np.nanmean(g.reshape(g.shape[0], -1, g.shape[3]), axis=1)
+
+
+def sgm_trajectory(grid_log10, prior_low, prior_high):
+    """**sgm-trajectory**: realized value vector, aggregated across chunks and cells.
+
+    The exact medoid among ALL (cell, chunk) window vectors of a condition: the single window whose
+    D-dimensional MAP vector minimizes the summed normalized distance to every other window vector.
+    The result is one genuinely realized vector, drawn from one specific cell at one specific chunk,
+    and it is the single-vector counterpart of :func:`sgm_window`.
+
+    This is the same quantity the standalone sample-geometric-median analysis reports over the same
+    pooled windows, so the two analyses agree by construction.
+
+    Returns ``(vector_abs, picks)`` -- ``(n_kinds, D)`` in ABSOLUTE units and a list of
+    ``(cell, chunk)`` tuples naming the selected window per condition (``(-1, -1)`` if none).
+    """
+    grid = np.asarray(grid_log10, dtype=float)
+    n_kinds, n_cells, n_chunks, dim = grid.shape
+    span = _range_abs(prior_low, prior_high)
+    out = np.full((n_kinds, dim), np.nan)
+    picks = []
+    for k in range(n_kinds):
+        rows, labels = [], []
+        for c in range(n_cells):
+            for t in range(n_chunks):
+                if np.isfinite(grid[k, c, t]).all():
+                    rows.append(10.0 ** grid[k, c, t])
+                    labels.append((c, t))
+        if not rows:
+            picks.append((-1, -1))
+            continue
+        block = np.stack(rows, axis=0)
+        idx, _method = sample_geometric_median(block, span)
+        out[k] = block[idx]
+        picks.append(labels[idx])
+    return out, picks
+
+
+# =============================================================================
+# Drift statistics -- fit per cell, so independent of the central-estimate choice
+# =============================================================================
 
 def drift_statistics(grid_log10, times, threshold=MATERIAL_DRIFT_DEX):
     """Per-cell linear drift of each parameter across the recording, aggregated per condition.
 
-    For every (condition, cell, parameter) an ordinary least-squares line is fit to the stored
-    log10 estimate against time and reported as the total change over the observed span
-    (``slope * (t_last - t_first)``), i.e. in dex across the recording. Working in log10 makes the
-    drift multiplicative and comparable across parameters of different units, and a per-cell fit
-    followed by a median over cells is robust: one erratic recording cannot move the summary.
+    For every (condition, cell, parameter) an ordinary least-squares line is fit to the stored log10
+    MAP estimate against time -- log10 because drift is multiplicative -- giving a slope and hence a
+    fitted start and end value:
 
-    These statistics are independent of any central-estimate choice -- they are computed per cell,
-    so swapping an average for a geometric median changes what is DISPLAYED, not what is measured.
+        change_dex = slope * (t_last - t_first)
+        start      = 10 ** intercept_at_t_first
+        end        = 10 ** (intercept_at_t_first + change_dex)
 
-    Returns a dict of ``(n_kinds, D)`` arrays: ``median_dex`` (median per-cell drift),
-    ``frac_material`` (fraction of cells whose |drift| exceeds ``threshold``), ``sign_consistency``
-    (fraction of cells sharing the median's sign), ``wilcoxon_p`` (two-sided signed-rank test that
-    the per-cell drifts are centered at zero; NaN when scipy is unavailable or fewer than six
-    cells), and ``per_cell`` ``(n_kinds, n_cells, D)``.
+    Every reported statistic aggregates those per-cell fits, so **none of them depends on which
+    central estimate the figures display**: swapping a mean for a medoid changes what is drawn, not
+    what is measured. Named results, all shaped ``(n_kinds, D)`` unless noted:
+
+        drift_absolute          median across cells of (end - start), in the parameter's own units
+        drift_sign_consistency  fraction of cells whose change shares the median's sign
+        drift_fold              median across cells of (end / start), a multiplicative factor
+        drift_dex               median across cells of change_dex, in log10 units
+        drift_material_fraction fraction of cells whose |change_dex| exceeds ``threshold``
+        drift_wilcoxon_p        two-sided signed-rank p that per-cell change_dex is centered at
+                                zero -- a DETECTABILITY statement, not a magnitude; NaN when scipy
+                                is unavailable or fewer than six cells contribute
+        start_median, end_median  median across cells of the fitted endpoints, absolute units
+        change_dex_per_cell     ``(n_kinds, n_cells, D)`` the underlying per-cell changes
     """
     grid = np.asarray(grid_log10, dtype=float)
     t = np.asarray(times, dtype=float)
     n_kinds, n_cells, n_chunks, dim = grid.shape
     span = float(t[-1] - t[0]) if n_chunks > 1 else 0.0
-    per_cell = np.full((n_kinds, n_cells, dim), np.nan)
+    change = np.full((n_kinds, n_cells, dim), np.nan)
+    start = np.full((n_kinds, n_cells, dim), np.nan)
+    end = np.full((n_kinds, n_cells, dim), np.nan)
     for k in range(n_kinds):
         for c in range(n_cells):
             for p in range(dim):
@@ -185,47 +226,52 @@ def drift_statistics(grid_log10, times, threshold=MATERIAL_DRIFT_DEX):
                 ok = np.isfinite(y)
                 if ok.sum() < 2:
                     continue
-                slope = np.polyfit(t[ok], y[ok], 1)[0]
-                per_cell[k, c, p] = slope * span
-    median = np.nanmedian(per_cell, axis=1)
-    with np.errstate(invalid="ignore"):
-        frac = np.nanmean(np.abs(per_cell) > threshold, axis=1)
-        sign = np.nanmean(np.sign(per_cell) == np.sign(median)[:, None, :], axis=1)
+                slope, intercept = np.polyfit(t[ok], y[ok], 1)
+                d = slope * span
+                change[k, c, p] = d
+                start[k, c, p] = 10.0 ** (intercept + slope * t[0])
+                end[k, c, p] = 10.0 ** (intercept + slope * t[0] + d)
+    median_dex = np.nanmedian(change, axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sign = np.nanmean(np.sign(change) == np.sign(median_dex)[:, None, :], axis=1)
+        material = np.nanmean(np.abs(change) > threshold, axis=1)
+        fold = np.nanmedian(end / start, axis=1)
     pvals = np.full((n_kinds, dim), np.nan)
     try:
         from scipy.stats import wilcoxon
         for k in range(n_kinds):
             for p in range(dim):
-                v = per_cell[k, :, p]
+                v = change[k, :, p]
                 v = v[np.isfinite(v)]
                 if v.size >= 6 and np.any(v != 0):
                     pvals[k, p] = float(wilcoxon(v)[1])
     except ImportError:
         pass
-    return {"median_dex": median, "frac_material": frac, "sign_consistency": sign,
-            "wilcoxon_p": pvals, "per_cell": per_cell, "threshold": float(threshold)}
+    return {
+        "drift_absolute": np.nanmedian(end - start, axis=1),
+        "drift_sign_consistency": sign,
+        "drift_fold": fold,
+        "drift_dex": median_dex,
+        "drift_material_fraction": material,
+        "drift_wilcoxon_p": pvals,
+        "start_median": np.nanmedian(start, axis=1),
+        "end_median": np.nanmedian(end, axis=1),
+        "change_dex_per_cell": change,
+        "threshold": float(threshold),
+    }
 
 
-def quantile_summaries(quant_grid_log10):
-    """Separate the two uncertainties a per-window quantile grid contains.
+def within_window_interval(quant_grid_log10):
+    """Median across cells, per chunk, of the stored per-window posterior quantile levels.
 
-    A ``(n_kinds, n_cells, n_chunks, D, Q)`` grid of stored per-window posterior quantiles mixes
-    two distinct quantities, and conflating them would overstate what the data says:
+    Summarizes how uncertain a TYPICAL SINGLE window's estimate is: for each condition, chunk, and
+    quantile level, the median over cells of that level. Taking the median of a level across cells
+    (rather than pooling) keeps the reported interval the interval of one typical window instead of
+    an envelope over recordings.
 
-      - **within-window posterior spread** -- how uncertain ONE window's estimate is. Summarized
-        per time point as the median across cells of each quantile level, so the reported interval
-        is a typical window's interval rather than an envelope over cells.
-      - **between-cell spread** -- how much the point estimates differ ACROSS recordings at the
-        same time, i.e. biological and experimental heterogeneity. Summarized per time point as
-        percentiles across cells of the per-window median (the ``Q50`` level).
+    This is an interval WIDTH summary of the stored five-quantile record, not a posterior density:
+    a density pooled over windows would require the per-window sample clouds.
 
-    Returns ``(within, between)``: ``within`` ``(n_kinds, n_chunks, D, Q)`` and ``between``
-    ``(n_kinds, n_chunks, D, 5)`` at the 5th, 25th, 50th, 75th, and 95th percentile across cells.
+    Returns ``(n_kinds, n_chunks, D, Q)`` in log10 space.
     """
-    q = np.asarray(quant_grid_log10, dtype=float)
-    n_kinds, n_cells, n_chunks, dim, nq = q.shape
-    within = np.nanmedian(q, axis=1)                              # median over cells, per level
-    mid = nq // 2                                                 # the stored median level
-    between = np.nanpercentile(q[:, :, :, :, mid], [5, 25, 50, 75, 95], axis=1)
-    between = np.moveaxis(between, 0, -1)                         # -> (kind, chunk, D, 5)
-    return within, between
+    return np.nanmedian(np.asarray(quant_grid_log10, dtype=float), axis=1)

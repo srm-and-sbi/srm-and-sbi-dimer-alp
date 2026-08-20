@@ -38,82 +38,100 @@ Run both and compare: a flat imaging trajectory pushes a biology trend toward ge
 drifting one identifies a live confound and localizes it to a channel. **Neither result attributes a
 cause on its own**, and no wording in either report should be read as if it did.
 
-## The central estimate is a real recording, not an average
+## The central estimate — exactly what is aggregated
 
-Summarizing many recordings at one time point by averaging each parameter independently composes a
-vector whose coordinates never co-occurred in any recording — the defect the Sample Geometric
-Median exists to remove. Distances are taken in **absolute (physical) space normalized by the
-absolute prior range**: the space the simulator consumes, with each dimension divided by its prior
-width so no parameter dominates. Three curves are drawn per condition:
+Everything starts from one array: the Experiment stage's **MAP estimate per window**, the point
+estimate it optimizes for one (condition, cell, chunk) window — never a posterior draw, never an
+average.
 
-| curve | what it is | what to watch |
+A timeseries needs one vector per chunk, so the **cell** axis is aggregated. A single summary line
+needs one vector overall, so the **cell and chunk** axes are. Crossing that with the choice of
+estimator gives exactly four, each named for what it aggregates:
+
+| name | definition | drawn as |
 |---|---|---|
-| **SGM trajectory** (thick, headline) | the medoid over recordings of the flattened (time × parameter) course — **one real recording for all time points** | nothing on this curve is composed, and **no step can be an artifact of switching recordings** |
-| **per-time-point SGM** (dashed, companion) | the medoid recording at each time independently | coordinates are jointly realized within a time point, but **the selected recording can change between time points**, and such a change can look like temporal structure |
-| **cross-recording mean** (dotted, comparison) | the per-dimension composite the SGM replaces | where it separates from the SGM trajectory it is asserting a combination no recording produced |
+| `mean-window` | Mean value vector, aggregated **across cells** for a given chunk, of the MAP estimate vectors computed for (chunk, cell) pairs. Each parameter is averaged independently. | timeseries |
+| `sgm-window` | Realized value vector, aggregated **across cells** for a given chunk, minimizing the summed normalized distance to the other cells' vectors at that chunk, of the MAP estimate vectors computed for (chunk, cell) pairs. | timeseries |
+| `mean-trajectory` | Mean value vector, aggregated **across chunks and cells**, of the MAP estimate vectors computed for (chunk, cell) pairs. | horizontal line |
+| `sgm-trajectory` | Realized value vector, aggregated **across chunks and cells**, minimizing the summed normalized distance to all other (chunk, cell) vectors. | horizontal line |
 
-The per-time-point switching is not hypothetical: in practice this variant selects **several distinct
-recordings across the time points of a single run**. Its selected recordings are therefore printed in
-the figure legend and listed in the report, so the switching is visible wherever the curve is shown.
+`--central` selects the **family**, and the pairing is enforced: `sgm` draws the `sgm-window`
+timeseries with the `sgm-trajectory` line, `mean` draws `mean-window` with `mean-trajectory`. A
+figure therefore never mixes a mean with a medoid. `mean-trajectory` is the historical grand mean,
+preserved under a name that says what it is.
 
-Two consequences worth stating plainly. First, the SGM trajectory is typically **noisier** than the
-mean — a single recording's window-to-window estimates fluctuate, whereas an average smooths. The
-mean's smoothness is an artifact of averaging, not evidence of a smooth underlying process. Second,
-both SGM variants are computed on the **full parameter vector**, never on a plotted subset, so
-`--params` filters the figures only and cannot change which recording is central.
+**Distance metric** (both `sgm-*`): absolute values `10**theta`, each parameter divided by its
+absolute prior width `10**high - 10**low` so no parameter dominates, Euclidean, **exact medoid** —
+the member minimizing the summed distance to every other member of the set. No iteration and no
+synthetic point.
 
-## Drift is measured per recording, independently of the display
+Three properties worth stating plainly:
 
-For every (condition, recording, parameter) an ordinary least-squares line is fit to the stored
-log10 estimate against time and reported as the **total change over the observed span, in dex**.
-Working in log10 makes the drift multiplicative and comparable across parameters of different units.
-Per-recording fits are then aggregated by their **median**, so one erratic recording cannot move the
-summary, and reported with:
+- A `mean-*` estimate averages each parameter independently, so its coordinates need not have
+  co-occurred in any recording. An `sgm-*` estimate is an actual window, so its coordinates did.
+- **`sgm-window` can select a different cell at different chunks** (measured: several distinct cells
+  across the chunks of a single run), so a step between adjacent chunks can be a change of cell
+  rather than a change in time. The selected cells are listed in the report and must be read with
+  the curve. `sgm-trajectory` is a single window and carries no such ambiguity.
+- All `sgm-*` estimates select on **all parameters jointly**, so the value drawn for one parameter
+  is that jointly-central window's value, not that parameter's own median. That is the point — the
+  vector is internally coherent — but it means a curve can sit away from its parameter's middle.
 
-- the **fraction of recordings whose |drift| exceeds 0.3 dex** — the same practical bar the recovery
-  tables use for a factor of two, so exceeding it means the estimate moves by more than the
-  tolerance the recovery is judged against;
-- the **sign-consistency**, the fraction of recordings sharing the median's direction;
-- a two-sided **Wilcoxon signed-rank** test that the per-recording drifts are centered at zero.
+`sgm-trajectory` is the same quantity the standalone sample-geometric-median analysis reports over
+the same pooled windows, so the two analyses agree by construction rather than by coincidence.
 
-A large drift with high sign-consistency and a small p-value is a coherent within-recording trend,
-not scatter. Because the fit is per recording, **these statistics do not depend on the choice of
-central estimate**: swapping an average for a geometric median changes what is displayed, not what
-is measured.
+**The choice is not cosmetic.** On the current experimental data the two families differ by factors
+from about 1.05 to 4 depending on the parameter, so which one is reported changes the number a
+reader takes away — and only one of them is a configuration any recording actually produced.
 
-## Uncertainty figures — two quantities, deliberately not combined
+## Drift — measured per cell, independent of the display
 
-Each `<key>_temporal_posterior.png` carries two panels sharing one axis:
+For every (condition, cell, parameter) an ordinary least-squares line is fit to the stored **log10**
+MAP estimate against time — log10 because drift is multiplicative — giving a slope and hence fitted
+endpoints `change_dex = slope * (t_last - t_first)`, `start`, and `end` in absolute units. Because
+the fit is per cell, **none of these statistics depends on the central estimate the figures draw.**
 
-- **(a) within-window posterior spread** — at each time, the median across recordings of that
-  window's stored posterior interval. How uncertain a typical *single* window's estimate is.
-- **(b) between-cell spread** — at each time, percentiles across recordings of the per-window
-  median. How much recordings differ from each other: biological and experimental heterogeneity.
+| name | definition | where |
+|---|---|---|
+| `drift-absolute` | Median across cells of `end - start`, in the parameter's own units | figure + table |
+| `drift-sign-consistency` | Fraction of cells whose change shares the sign of the median change | figure + table |
+| `drift-fold` | Median across cells of `end / start`, a multiplicative factor | table |
+| `drift-dex` | Median across cells of `change_dex`, in log10 units | table |
+| `drift-material-fraction` | Fraction of cells whose `\|change_dex\|` exceeds 0.3 dex (a factor of two) | table |
+| `drift-wilcoxon-p` | Two-sided signed-rank test that the per-cell changes are centered at zero — a **detectability** statement, not a magnitude | table |
+| `reference-ratio` | The `*-trajectory` value divided by the reference mean, where a reference applies to that condition | figure + table |
+| `reference-verdict` | Whether the `*-trajectory` value lies inside the reference band | table |
 
-They are separated because plotting them together would let a wide posterior masquerade as
-heterogeneity, or heterogeneity as posterior width. In practice the two differ substantially, so the
-separation is load-bearing rather than cosmetic.
+Fits happen in log10; results are reported in absolute units because that is what reads. Both facts
+are restated in every generated report so no one has to infer which space produced which number.
 
-**What these panels are built from — and what they are not.** The stored per-window five-quantile
-summary (5, 25, 50, 75, 95 %), which is what the Experiment stage persists. They therefore show
-interval **widths**; they are **not** a posterior **density**. A pooled density across windows — one
-distribution per (condition, parameter) built from the full posterior sample clouds — remains
-unimplemented, because the stage does not persist the per-window samples and five quantiles cannot
-be re-pooled into that distribution. Adding it requires either persisting the per-window sample pool
-in the Experiment stage or a dedicated resampling pass; this analysis does not approximate it.
+**A time-aggregated summary of a drifting parameter summarizes a non-stationary process.** Where
+`drift-absolute` is large and `drift-sign-consistency` high, the `*-trajectory` line — and any
+reference comparison drawn against it — is a summary over that drift, not a measurement of a
+constant.
 
-A diagnostic worth knowing: when a parameter's within-window interval spans essentially its **whole
-prior** while its between-cell spread is nearly flat, the posterior is returning the prior and the
-point estimate is the prior's center regardless of the data. That is a direct picture of
-non-identifiability, and it is visible at a glance in panel (a).
+## Uncertainty figure
+
+`<key>_temporal_posterior.png` shows one quantity: at each chunk, the **median across cells of that
+window's stored posterior interval** — how uncertain a typical single window's estimate is — with the
+`*-window` timeseries drawn on top as the anchor.
+
+**What it is built from, and what it is not.** The stored per-window five-quantile summary
+(5, 25, 50, 75, 95 %), which is what the Experiment stage persists. It therefore shows interval
+**widths**; it is **not** a posterior **density**. A density pooled over windows would require the
+per-window sample clouds, which the stage does not persist, and this figure does not approximate it.
+
+When a parameter's interval spans essentially its whole prior, the posterior is returning the prior
+and the point estimate is the prior's center regardless of the data — a direct picture of
+non-identifiability.
 
 ## Axis convention
 
-The y-axis is **log-scaled in physical units** with a mirrored right-hand axis labeled in **log10
-(dex)**, so one figure carries both readings: the visual spacing is dex — the space the priors are
-declared in and the space drift is measured in — while the left labels stay in the unit the
-simulator consumes. Right-hand ticks are placed explicitly at half-dex positions, because composing
-a log10 transform with an already-logarithmic parent scale would apply the transform twice.
+The y-axis is **linear, in the parameter's own absolute units** — the readable quantities are the
+value and its absolute change. Decade-space quantities (`drift-dex`, `drift-fold`) live in the
+report table instead, so the axis carries one scale and no reader has to translate. Limits come from
+a robust percentile range of the data extended by the reference band, so a few outlying per-cell
+traces clip rather than compressing the informative region.
 
 ## External reference values are scoped
 
@@ -189,6 +207,8 @@ MACHINE_PROFILE=<profile> python \
 - `--chunk-step-seconds` — spacing between consecutive windows on the time axis; defaults to the run
   duration (non-overlapping windows). Set it only if the Experiment run used overlapping windows, in
   which case the true spacing is the step.
+- `--central {sgm,mean}` — the central-estimate family; `sgm` (default) draws `sgm-window` with
+  `sgm-trajectory`, `mean` draws `mean-window` with `mean-trajectory`. The pairing is enforced.
 - `--params` — comma-separated parameter keys to plot. Filters the **figures only**: the central
   estimates are computed on the full parameter vector either way.
 - `--dry-run` — resolve and print the inputs and outputs, then exit without reading data or writing

@@ -29,20 +29,34 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   recordings are printed in the legend and the report). The mean is retained as a dotted comparison
   line, since the gap between it and the SGM is itself informative. Both variants are computed on
   the full parameter vector, so `--params` filters the figures only.
-- **Uncertainty figures with the two uncertainties kept apart.** A second figure per parameter
-  carries the within-window posterior spread (median across recordings of one window's interval) and
-  the between-cell spread (percentiles across recordings of the per-window median) in separate
-  panels, because plotting them together would let a wide posterior masquerade as heterogeneity.
-  They are built from the stored five-quantile summary and therefore show interval **widths**, not a
-  posterior **density**; a pooled density still requires the per-window sample clouds the Experiment
-  stage does not persist, and the analysis does not approximate it.
+- **Uncertainty figure**, one quantity per panel: at each chunk, the median across recordings of
+  that window's stored posterior interval — how uncertain a typical single window's estimate is.
+  Built from the stored five-quantile summary, so it shows interval **widths**, not a posterior
+  **density**; a pooled density requires the per-window sample clouds the Experiment stage does not
+  persist, and the analysis does not approximate it.
 - **Drift statistics** per recording: an OLS fit of log10 estimate against time reported as total
   change in dex, aggregated by median with the fraction exceeding 0.3 dex, the sign-consistency, and
   a two-sided Wilcoxon signed-rank test. Fit per recording, so they are independent of the display
   choice — verified unchanged against the previous implementation.
-- Figures use a log-scaled physical y-axis with a mirrored right-hand axis in log10 (dex), so one
-  panel carries both readings; the dex ticks are placed explicitly because composing a log10
-  transform with an already-logarithmic parent scale applies it twice.
+- **Four named central estimates**, selected as a family by `--central {sgm,mean}` with the pairing
+  enforced so a figure never mixes estimators: `mean-window` (mean value vector, aggregated across
+  cells for a given chunk) and `sgm-window` (realized value vector, same aggregation, exact medoid)
+  give the timeseries; `mean-trajectory` and `sgm-trajectory` (both aggregated across chunks **and**
+  cells) give the horizontal summary line. `mean-trajectory` is the historical grand mean under a
+  name that states what it aggregates, and `sgm-trajectory` is the same quantity the standalone
+  sample-geometric-median analysis reports over the same pooled windows, so the two analyses agree
+  by construction. On the current data the two families differ by factors of about 1.05 to 4
+  depending on the parameter.
+- Figures use a **linear y-axis in absolute units**; decade-space quantities live in the report
+  table. The drift annotations sit below the axes, where they cannot collide with the legend.
+- External reference labels carry the mean, the numeric bounds, the unit, the source, and the
+  conditions the reference applies to, and each figure states the ratio of its summary line to that
+  reference; the report adds an inside/outside verdict against the band.
+- Named, individually defined statistics — `drift-absolute`, `drift-sign-consistency`, `drift-fold`,
+  `drift-dex`, `drift-material-fraction`, `drift-wilcoxon-p`, `reference-ratio`,
+  `reference-verdict` — with the figure carrying the first two plus the reference ratio and the
+  table carrying the rest. Every definition is reproduced verbatim in the generated report, keyed by
+  the same name the figures and the companion use.
 - External reference values are **scoped**: drawn only on the parameters they constrain and only for
   the conditions they describe. The detector references carry their documented caveats — the dimer
   condition's PSF width is dimer-broadened and its localization brightness is a two-label
@@ -51,6 +65,9 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
 
 ### Fixed
 
+- The temporal report is written directly rather than through `DiagnosticReporter`, so it did not
+  inherit the reporter's mandatory UTC stamp and carried no run date. It now stamps the run time
+  like every other report.
 - The detector `Nuisance_DLI` sample-geometric-median analysis carried private copies of the
   typicality and summary-vector numerics, so the computed `sgm_in_box` status did not reach it. Both
   copies now delegate to the shared kernel; verified behavior-preserving, with every numeric value
