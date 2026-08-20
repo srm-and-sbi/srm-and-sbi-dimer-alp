@@ -182,7 +182,11 @@ Upper bounds are drawn as bounds, not targets: a calibration is expected to land
 Trust a parameter on experimental data when it satisfies three independent checks:
 
 1. **it recovers well on held-out synthetic data** — annotated on each figure where a recovery
-   artifact exists for the workflow;
+   artifact exists for the workflow, as the fraction landing inside two nested tolerances of the
+   truth: `[0.50x, 2.00x]` and `[0.71x, 1.41x]`. These are the multiplicative ranges of the log10
+   half-widths ±0.3 and ±0.15 dex that the Evaluation stage reports — a factor of two and a factor
+   of the square root of two — restated as the value range they permit, because that is the form in
+   which a reader can judge whether a parameter is usable;
 2. **it is stationary where the model says it should be** — flat when the underlying property is a
    constant of the system;
 3. **its posterior is narrow relative to its prior** — panel (a) of the uncertainty figure.

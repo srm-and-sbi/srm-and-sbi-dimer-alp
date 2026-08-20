@@ -54,6 +54,33 @@ from .sample_geometric_median import sample_geometric_median
 # tolerance the recovery is judged against.
 MATERIAL_DRIFT_DEX = 0.3
 
+# Held-out recovery tolerances, as log10 half-widths, matching the two nested bands the Evaluation
+# stage reports. Kept separate from MATERIAL_DRIFT_DEX even though the wider one coincides
+# numerically: one is a tolerance on recovery against known truth, the other a threshold on drift
+# across a recording, and conflating them would tie two unrelated decisions to one constant.
+RECOVERY_BANDS_DEX = (0.3, 0.15)
+
+
+def band_label(dex):
+    """Render a log10 half-width as the multiplicative range it means, e.g. ``[0.50x, 2.0x]``.
+
+    A tolerance stated in dex is unreadable without mental arithmetic, and the arithmetic is the
+    interesting part: +/-0.3 dex is "between half and double the truth", +/-0.15 dex is "within
+    roughly a third either way". The range is asymmetric in absolute terms and symmetric in log,
+    which the two multipliers show directly.
+    """
+    lo, hi = 10.0 ** -float(dex), 10.0 ** float(dex)
+    return f"[{lo:.2f}x, {hi:.2f}x]"
+
+
+def recovery_fractions(true_log10, inferred_log10, bands=RECOVERY_BANDS_DEX):
+    """Fraction of held-out videos recovered inside each nested tolerance band, per parameter.
+
+    Returns a list of ``(dex, fractions)`` pairs, one per band, with ``fractions`` shaped ``(D,)``.
+    """
+    err = np.abs(np.asarray(inferred_log10, dtype=float) - np.asarray(true_log10, dtype=float))
+    return [(float(b), np.mean(err <= float(b), axis=0)) for b in bands]
+
 CENTRAL_FAMILIES = ("sgm", "mean")
 
 

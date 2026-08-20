@@ -55,6 +55,11 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   drift statistic unchanged and shifts only the reported endpoints by half a window. Titles wrap
   rather than overflow, and the drift statistics are tabulated in the report instead of annotated on
   the axes.
+- **Both** held-out recovery tolerances are annotated, stated as the multiplicative ranges they
+  mean rather than in log10 half-widths: `[0.50x, 2.00x]` and `[0.71x, 1.41x]` for the ±0.3 and
+  ±0.15 dex bands the Evaluation stage reports. The recovery tolerances are also kept as their own
+  constant rather than reusing the drift threshold, which coincides numerically but decides an
+  unrelated question.
 - External reference labels carry the mean, the numeric bounds, the unit, the source, and the
   conditions the reference applies to, and each figure states the ratio of its summary line to that
   reference; the report adds an inside/outside verdict against the band.

@@ -265,7 +265,7 @@ def _apply_reference(ax, ref, source_short):
 # =============================================================================
 
 def _figure_trajectory(spec, p_index, key, abs_grid, series, line, family, picks_window,
-                       picks_traj, edges, kinds, drift, recovery_frac):
+                       picks_traj, edges, kinds, drift, recovery):
     """The central-trajectory figure: one estimate family, drawn as steps over each window.
 
     Deliberately sparse. Exactly one family is drawn -- the ``<family>-window`` timeseries as a step
@@ -309,8 +309,10 @@ def _figure_trajectory(spec, p_index, key, abs_grid, series, line, family, picks
 
     _finish_axes(ax, edges, para, spec, lo, hi)
     title = f"{name} ({para['LABEL']}) over the recording"
-    if recovery_frac is not None:
-        title += f"\nheld-out recovery within a factor of 2: {recovery_frac[p_index] * 100:.0f}%"
+    if recovery:
+        # Both nested tolerances, stated as the multiplicative ranges they mean rather than in dex.
+        title += "\nheld-out recovery:  " + "  ·  ".join(
+            f"{100 * frac[p_index]:.0f}% within {tdk.band_label(b)}" for b, frac in recovery)
     ax.set_title(title, fontsize=10.5)
     ax.legend(fontsize=7.5, framealpha=0.9, loc="best")
     fig.tight_layout()
@@ -591,6 +593,17 @@ def _write_report(spec, meta, results, drift, kinds, family, line, picks_window,
             L.append("")
     L.append("## How to read a parameter")
     L.append("")
+    if any(r["key"] for r in results):
+        L.append("**Held-out recovery bands.** Where a recovery artifact exists for this workflow, "
+                 "each figure states the fraction of held-out synthetic videos whose inferred value "
+                 "landed inside two nested tolerances of the truth: " +
+                 " and ".join(f"`{tdk.band_label(b)}`" for b in tdk.RECOVERY_BANDS_DEX) +
+                 ". These are the multiplicative ranges of the log10 half-widths " +
+                 " and ".join(f"±{b:g} dex" for b in tdk.RECOVERY_BANDS_DEX) +
+                 " that the Evaluation stage reports — a factor of two and a factor of the square "
+                 "root of two — restated as the value range they permit, since that is what a "
+                 "reader needs in order to judge whether the parameter is usable.")
+        L.append("")
     L.append("Trust a parameter on experimental data when it recovers well on held-out synthetic "
              "data, **and** is stationary where the model says it should be, **and** its posterior "
              "is narrow relative to its prior. A parameter that recovers poorly carries no signal "
@@ -673,12 +686,11 @@ def run_temporal_dynamics(cfg, args):
         qgrid, _, _ = tdk.reshape_to_grid(quant, kind_index, cell, chunk, len(kinds))
         within = tdk.within_window_interval(qgrid)
 
-    recovery_frac = None
+    recovery = None
     if spec.recovery_npz.exists():
         with np.load(str(spec.recovery_npz), allow_pickle=False) as d:
             if "true_log10" in d.files and "inferred_log10" in d.files:
-                err = np.abs(np.asarray(d["inferred_log10"]) - np.asarray(d["true_log10"]))
-                recovery_frac = np.mean(err <= tdk.MATERIAL_DRIFT_DEX, axis=0)
+                recovery = tdk.recovery_fractions(d["true_log10"], d["inferred_log10"])
 
     print(f"\nLoaded {inferred_log10.shape[0]} estimates: {len(kinds)} conditions x "
           f"{n_cells} recordings x {n_chunks} windows.")
@@ -694,7 +706,8 @@ def run_temporal_dynamics(cfg, args):
             for e, k in enumerate(kinds)))
     print(f"  posterior panel    : "
           f"{'on (stored quantiles)' if within is not None else 'off (no posterior_quantiles)'}")
-    print(f"  recovery annotation: {'on' if recovery_frac is not None else 'off'}\n")
+    print(f"  recovery annotation: " + ("off" if recovery is None else
+          ", ".join(f"{tdk.band_label(b)}" for b, _ in recovery)) + "\n")
 
     wanted = [k.strip() for k in args.params.split(",")] if args.params else None
     spec.fig_dir.mkdir(parents=True, exist_ok=True)
@@ -703,7 +716,7 @@ def run_temporal_dynamics(cfg, args):
         if wanted is not None and key not in wanted:
             continue
         fig = _figure_trajectory(spec, p_index, key, abs_grid, series, line, family,
-                                 picks_window, picks_traj, edges, kinds, drift, recovery_frac)
+                                 picks_window, picks_traj, edges, kinds, drift, recovery)
         fig.savefig(str(spec.fig_dir / f"{key}_temporal.png"), dpi=180)
         plt.close(fig)
         note = ""
