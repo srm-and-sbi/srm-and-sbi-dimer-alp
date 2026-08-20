@@ -322,7 +322,8 @@ def posterior_summary(posterior, video_chunk: np.ndarray,
                       train_device: torch.device, vista_device: torch.device,
                       n_samples: int, theta_prex_batch_size: int,
                       pool_mode: str = "bounded",
-                      quantiles=(0.05, 0.25, 0.50, 0.75, 0.95)) -> np.ndarray:
+                      quantiles=(0.05, 0.25, 0.50, 0.75, 0.95),
+                      return_samples: bool = False):
     """Per-parameter posterior quantile summary for one observation (View B).
 
     Complements the MAP point estimate: draws ``n_samples`` from the posterior
@@ -332,9 +333,18 @@ def posterior_summary(posterior, video_chunk: np.ndarray,
     summary (median + IQR, optionally outer quantiles). This captures the
     *within-observation* posterior uncertainty that the MAP mode discards.
 
+    ``return_samples`` additionally hands back the draws the quantiles were computed
+    from. Quantiles describe a marginal per parameter and so discard the joint
+    structure -- the correlations between parameters, and any multimodality -- which is
+    exactly what a pooled sample cloud is needed for downstream. The draws are the
+    same ones the summary used, not a second independent set, so the returned cloud and
+    quantiles are guaranteed consistent with each other.
+
     Returns:
         ``(D, len(quantiles))`` numpy array (log10 space): per parameter, the
-        sampled quantiles in the order given by ``quantiles``.
+        sampled quantiles in the order given by ``quantiles``. With
+        ``return_samples``, the tuple ``(summary, draws)`` where ``draws`` is
+        ``(n_samples, D)`` float32 in log10 space.
     """
     omega = torch.tensor(normalize_video(video_chunk), dtype=torch.float32,
                          device=train_device)
@@ -344,7 +354,10 @@ def posterior_summary(posterior, video_chunk: np.ndarray,
     samples = collect_theta_prex(posterior, flow, vista_device, cond,
                                  n_samples, theta_prex_batch_size, pool_mode)
     arr = samples.detach().cpu().numpy()                       # (n_samples, D)
-    return np.quantile(arr, list(quantiles), axis=0).T         # (D, len(quantiles))
+    summary = np.quantile(arr, list(quantiles), axis=0).T      # (D, len(quantiles))
+    if return_samples:
+        return summary, arr.astype(np.float32)
+    return summary
 
 
 # =============================================================================

@@ -213,6 +213,49 @@ def sgm_trajectory(grid_log10, prior_low, prior_high):
 # Drift statistics -- fit per cell, so independent of the central-estimate choice
 # =============================================================================
 
+def pooled_cloud(cloud_log10, kind_index, n_kinds):
+    """Pool every window's posterior draws within each condition, collapsing the time axis.
+
+    ``cloud_log10`` is ``(N, S, D)``: for each of the ``N`` (recording, window) pairs, the ``S``
+    draws the Experiment stage took from that window's posterior. Selecting one condition and
+    flattening the leading two axes gives ``(n_windows * S, D)`` draws.
+
+    WHAT THIS IS. The pooled set is the equal-weight MIXTURE of the per-window posteriors, so its
+    density answers: for a 2 s window drawn at random from this condition, what values are
+    consistent with it? It is emphatically NOT a joint posterior for the condition. Combining
+    independent observations under Bayes multiplies their likelihoods; pooling draws adds their
+    densities. The mixture is therefore as wide as the spread BETWEEN windows plus the uncertainty
+    WITHIN each one, whereas a genuine joint posterior over 250 windows would be far narrower than
+    any single one of them. Read it as a description of the window-to-window population, never as
+    evidence accumulated across the recording.
+
+    Because the mixture is a population and not an estimate, its mode and median are not the
+    analysis's central estimate: that remains the trajectory-level medoid, which is one jointly
+    realized vector rather than a per-parameter summary of pooled marginals.
+
+    Returns a list of ``n_kinds`` arrays, each ``(n_windows_k * S, D)`` in log10 units.
+    """
+    cloud_log10 = np.asarray(cloud_log10, dtype=float)
+    kind_index = np.asarray(kind_index, dtype=int)
+    out = []
+    for e in range(n_kinds):
+        sel = cloud_log10[kind_index == e]                     # (n_windows_k, S, D)
+        out.append(sel.reshape(-1, sel.shape[-1]) if sel.size else sel.reshape(0, 0))
+    return out
+
+
+def cloud_interval(pooled, quantiles=(0.05, 0.50, 0.95)):
+    """Per-parameter quantiles of a pooled mixture, for the report table.
+
+    Marginal quantiles of a mixture, reported per parameter: they describe each coordinate's spread
+    across the condition, and -- being per-coordinate -- they carry no joint information, which is
+    exactly why they belong in a table beside the medoid rather than replacing it.
+    """
+    if pooled.size == 0:
+        return np.full((3, 0), np.nan)
+    return np.quantile(pooled, list(quantiles), axis=0)         # (len(quantiles), D)
+
+
 def drift_statistics(grid_log10, times, threshold=MATERIAL_DRIFT_DEX):
     """Per-cell linear drift of each parameter across the recording, aggregated per condition.
 

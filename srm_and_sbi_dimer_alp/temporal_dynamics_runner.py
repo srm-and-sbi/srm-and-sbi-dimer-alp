@@ -56,6 +56,11 @@ from .workflow import parameter_keys, parameter_table
 # Conditions are named scientifically wherever a reader sees them; the tokens below survive only
 # as the stored ``kinds`` field of the Experiment output and the recording filenames on disk.
 CONDITION_DISPLAY = {"ALP": "MET-FAB", "BET": "MET-INLB"}
+
+# Bins for the pooled posterior density, spread uniformly over the prior's decades. The pooled set
+# holds hundreds of thousands of draws, so the bin count is not sample-limited; it is chosen for
+# legibility and held fixed so the two conditions and every parameter share one resolution.
+POOLED_BINS = 64
 CONDITION_COLOR = {"ALP": "tab:blue", "BET": "tab:orange"}
 REFERENCE_COLOR = "tab:grey"
 SGM_COLOR = "gold"
@@ -236,26 +241,32 @@ def _reference_band(ref):
             float(max(v + s for v, s in zip(vals, sds))), vals)
 
 
-def _apply_reference(ax, ref, source_short):
+def _apply_reference(ax, ref, source_short, orient="h"):
     """Draw an external reference: its band, its individual reported values, and its mean.
 
     The label carries the mean, the numeric bounds, the unit, the source, and the conditions the
     reference applies to -- everything a reader needs to judge the comparison without leaving the
     figure. Returns ``(lo, hi)`` so the caller can include the reference in the axis limits.
+
+    ``orient`` selects the axis the reference lives on: ``"h"`` for the figures where the parameter
+    value is on y (the time courses), ``"v"`` where it is on x (the pooled density). One definition
+    serves both so a reference cannot be styled or labeled differently between them.
     """
+    span = ax.axhspan if orient == "h" else ax.axvspan
+    line_at = ax.axhline if orient == "h" else ax.axvline
     r_mean, r_lo, r_hi, r_vals = _reference_band(ref)
-    ax.axhspan(r_lo, r_hi, color=REFERENCE_COLOR, alpha=0.25, linewidth=0)
+    span(r_lo, r_hi, color=REFERENCE_COLOR, alpha=0.25, linewidth=0)
     for v in r_vals:
-        ax.axhline(v, color=REFERENCE_COLOR, linestyle=":", linewidth=1.1, alpha=0.75)
+        line_at(v, color=REFERENCE_COLOR, linestyle=":", linewidth=1.1, alpha=0.75)
     applies = ref.get("applies_to")
     scope = "both conditions" if applies is None else f"{', '.join(applies)} only"
-    ax.axhline(r_mean, color=REFERENCE_COLOR, linestyle="-", linewidth=2.1,
-               label=(f"{source_short}: {r_mean:.3g} [{r_lo:.3g}–{r_hi:.3g}] {ref['unit']} "
-                      f"({scope})"))
+    line_at(r_mean, color=REFERENCE_COLOR, linestyle="-", linewidth=2.1,
+            label=(f"{source_short}: {r_mean:.3g} [{r_lo:.3g}–{r_hi:.3g}] {ref['unit']} "
+                   f"({scope})"))
     if ref.get("upper_biased") is not None:
         ub, ub_lab = ref["upper_biased"]
-        ax.axhline(ub, color=REFERENCE_COLOR, linestyle="--", linewidth=1.6, alpha=0.9,
-                   label=f"upper bound {ub:.3g} — {ub_lab}, not a target")
+        line_at(ub, color=REFERENCE_COLOR, linestyle="--", linewidth=1.6, alpha=0.9,
+                label=f"upper bound {ub:.3g} — {ub_lab}, not a target")
         r_hi = max(r_hi, ub)
     return r_lo, r_hi
 
@@ -326,9 +337,9 @@ def _figure_posterior(spec, p_index, key, within, series, family, edges, kinds):
     a TYPICAL SINGLE window's estimate is. Drawn as bands held across each window, matching the
     trajectory figure, with the ``<family>-window`` series on top as the anchor.
 
-    This is an interval WIDTH built from the stored five-quantile record -- not a posterior density.
-    A density pooled over windows requires the per-window sample clouds, which the Experiment stage
-    does not persist, and this figure does not approximate it.
+    This is an interval WIDTH built from the stored five-quantile record -- not a posterior density,
+    and it does not approximate one. The pooled density is a separate figure, drawn from the raw
+    per-window draws when the Experiment stage was run with --dump-posterior-samples.
     """
     para = spec.table[p_index]
     name = spec.display.get(key, key)
@@ -355,6 +366,66 @@ def _figure_posterior(spec, p_index, key, within, series, family, edges, kinds):
     _finish_axes(ax, edges, para, spec, lo, hi)
     ax.set_title(f"Within-window posterior interval\n{name} ({para['LABEL']})", fontsize=10.5)
     ax.legend(fontsize=7, framealpha=0.9, loc="best")
+    fig.tight_layout()
+    return fig
+
+
+def _figure_pooled(spec, p_index, key, pooled, line, family, kinds):
+    """Pooled posterior density over the whole recording -- the classic histogram, time collapsed.
+
+    Every window's draws for a condition are pooled and binned uniformly across the prior's decades,
+    which is where a log-uniform prior is flat, so the plotted height is a density PER DECADE and
+    the prior itself is a horizontal line at ``1 / (hi - lo)``. Drawing that line makes the figure
+    answer the question the time courses cannot: how much has the data narrowed this parameter
+    relative to the prior it started from? A density sitting on the prior line has learned nothing.
+
+    The x axis carries absolute units on a log scale -- absolute because that is the quantity of
+    interest, log-scaled because the prior and the binning are uniform in decades. No dex axis
+    appears: every tick is a value in the parameter's own units.
+
+    The family's trajectory line is marked for reference, with the caveat that it is a MEDOID over
+    windows and not the mode of this mixture; the two answer different questions and need not
+    coincide.
+    """
+    para = spec.table[p_index]
+    name = spec.display.get(key, key)
+    ref = spec.references.get(key)
+    lo, hi = float(spec.prior_low[p_index]), float(spec.prior_high[p_index])
+    edges_log = np.linspace(lo, hi, POOLED_BINS + 1)
+    edges_abs = 10.0 ** edges_log
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.9))
+    for e, kind in enumerate(kinds):
+        draws = pooled[e][:, p_index]
+        draws = draws[np.isfinite(draws)]
+        if draws.size == 0:
+            continue
+        color = CONDITION_COLOR.get(kind, f"C{e}")
+        disp = CONDITION_DISPLAY.get(kind, kind)
+        dens, _ = np.histogram(draws, bins=edges_log, density=True)
+        ax.stairs(dens, edges_abs, color=color, linewidth=2.0, fill=False,
+                  label=f"{disp} pooled ({draws.size:,} draws)")
+        ax.stairs(dens, edges_abs, color=color, alpha=0.16, fill=True, linewidth=0)
+        ax.axvline(float(line[e, p_index]), color=color, linestyle="-", linewidth=1.4, alpha=0.70,
+                   label=f"{disp} {family}-trajectory = {line[e, p_index]:.3g}")
+
+    # The prior it started from: log-uniform, hence flat at 1/(hi-lo) per decade on these bins.
+    ax.axhline(1.0 / (hi - lo), color="0.35", linestyle=(0, (4, 3)), linewidth=1.5,
+               label=f"prior (log-uniform over {10 ** lo:.3g}–{10 ** hi:.3g})")
+    if ref is not None:
+        _apply_reference(ax, ref, spec.reference_short, orient="v")
+
+    raw_unit = para.get("UNIT")
+    unit = (_UNIT_SHORT.get(raw_unit, raw_unit) if raw_unit
+            else _UNIT_BY_KEY.get(para.get("KEY", ""), "absolute"))
+    ax.set_xscale("log")
+    ax.set_xlim(float(edges_abs[0]), float(edges_abs[-1]))
+    ax.set_xlabel(f"inferred [{unit}]")
+    ax.set_ylabel("posterior density [per decade]")
+    ax.set_title(f"Pooled posterior over the recording (time axis collapsed)\n"
+                 f"{name} ({para['LABEL']})", fontsize=10.5)
+    ax.legend(fontsize=7, framealpha=0.9, loc="best")
+    ax.grid(True, which="both", alpha=0.18)
     fig.tight_layout()
     return fig
 
@@ -411,7 +482,8 @@ def _finish_axes(ax, x_edges, para, spec, lo, hi):
 # Report
 # =============================================================================
 
-def _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj):
+def _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj,
+                  pooled=None):
     """Write the self-contained interpretation report beside the figures.
 
     Every reported quantity is defined verbatim here, keyed by the same name the figures and the
@@ -565,14 +637,64 @@ def _write_report(spec, meta, results, drift, kinds, family, line, picks_window,
     L.append("`<key>_temporal_posterior.png` shows, at each chunk, the **median across cells of "
              "that window's stored posterior interval** — how uncertain a typical single window's "
              "estimate is. It is an interval **width** built from the stored five-quantile record, "
-             "**not a posterior density**: a density pooled over windows would require the "
-             "per-window sample clouds, which the Experiment stage does not persist, and this "
-             "figure does not approximate it.")
+             "**not a posterior density**, and it does not approximate one.")
     L.append("")
     L.append("When a parameter's interval spans essentially its whole prior, the posterior is "
              "returning the prior and the point estimate is the prior's center regardless of the "
              "data.")
     L.append("")
+    if pooled is not None:
+        L.append("## Pooled posterior density (time axis collapsed)")
+        L.append("")
+        L.append("`<key>_temporal_pooled.png` is the classic histogram: every window's posterior "
+                 "draws, pooled within a condition, binned uniformly across the prior's decades. "
+                 f"Height is a density **per decade** over {POOLED_BINS} bins, so the log-uniform "
+                 "prior is the flat dashed line at `1 / (log10 hi - log10 lo)` and the distance "
+                 "between a curve and that line is what the data added.")
+        L.append("")
+        L.append("**How the pooling works, exactly.** The Experiment stage draws "
+                 f"{meta['n_samples_per_window']:,} samples from the posterior of every "
+                 f"(recording, window) pair. For one condition that is {meta['n_cells']} "
+                 f"recordings x {meta['n_chunks']} windows x "
+                 f"{meta['n_samples_per_window']:,} draws, and all of them enter one histogram "
+                 "with equal weight.")
+        L.append("")
+        L.append("**What that mixture does and does not mean.** Equal-weight pooling makes the "
+                 "**mixture** of the per-window posteriors. Its density answers: for a single "
+                 "window drawn at random from this condition, which values are consistent with "
+                 "it? It is **not** a joint posterior for the condition — combining independent "
+                 "observations under Bayes multiplies likelihoods, whereas pooling draws adds "
+                 "densities. The mixture is therefore as wide as the between-window spread plus "
+                 "the within-window uncertainty, while a genuine joint posterior over all windows "
+                 "would be narrower than any single one of them. Read the width as a property of "
+                 "the window population, never as evidence accumulated over the recording.")
+        L.append("")
+        L.append(f"Because it is a population rather than an estimate, the mixture's mode and "
+                 f"median are **not** this analysis's central estimate. That remains "
+                 f"`{family}-trajectory`, marked as a thin vertical line: one jointly realized "
+                 f"vector, which a per-parameter summary of pooled marginals is not. The two "
+                 f"answer different questions and need not coincide.")
+        L.append("")
+        headers = ["parameter", "label"] + [
+            f"{CONDITION_DISPLAY.get(k, k)} {q}" for k in kinds
+            for q in ("p05", "median", "p95")]
+        rows = []
+        for r in results:
+            i = r["p_index"]
+            row = [f"`{r['key']}`", r["label"]]
+            for e in range(len(kinds)):
+                qs = tdk.cloud_interval(pooled[e])[:, i]
+                row += [f"{10.0 ** v:.3g}" for v in qs]
+            rows.append(row)
+        L.append("| " + " | ".join(headers) + " |")
+        L.append("|" + "---|" * len(headers))
+        for row in rows:
+            L.append("| " + " | ".join(row) + " |")
+        L.append("")
+        L.append("Marginal quantiles of the pooled mixture, in absolute units. Per-coordinate by "
+                 "construction, so they carry no joint information — which is why they sit beside "
+                 f"the `{family}-trajectory` vector rather than replacing it.")
+        L.append("")
     if spec.references:
         L.append("## External reference values")
         L.append("")
@@ -655,6 +777,10 @@ def run_temporal_dynamics(cfg, args):
         kinds = [str(k) for k in d["kinds"]]
         quant = (np.asarray(d["posterior_quantiles"], dtype=float)
                  if "posterior_quantiles" in d.files else None)
+        # Raw per-window draws, present only when the Experiment stage ran with
+        # --dump-posterior-samples. Their absence costs the pooled-density figure and nothing else.
+        cloud = (np.asarray(d["posterior_samples_cloud"], dtype=float)
+                 if "posterior_samples_cloud" in d.files else None)
 
     if inferred_log10.shape[1] != len(spec.keys):
         raise ValueError(f"Experiment output has {inferred_log10.shape[1]} parameters but the "
@@ -686,6 +812,10 @@ def run_temporal_dynamics(cfg, args):
         qgrid, _, _ = tdk.reshape_to_grid(quant, kind_index, cell, chunk, len(kinds))
         within = tdk.within_window_interval(qgrid)
 
+    pooled = None
+    if cloud is not None and cloud.size:
+        pooled = tdk.pooled_cloud(cloud, kind_index, len(kinds))
+
     recovery = None
     if spec.recovery_npz.exists():
         with np.load(str(spec.recovery_npz), allow_pickle=False) as d:
@@ -706,6 +836,14 @@ def run_temporal_dynamics(cfg, args):
             for e, k in enumerate(kinds)))
     print(f"  posterior panel    : "
           f"{'on (stored quantiles)' if within is not None else 'off (no posterior_quantiles)'}")
+    if pooled is not None:
+        print(f"  pooled density     : on — " + ", ".join(
+            f"{CONDITION_DISPLAY.get(k, k)} {pooled[e].shape[0]:,} draws"
+            for e, k in enumerate(kinds))
+            + f" ({cloud.shape[1]:,} per window, {POOLED_BINS} bins over the prior)")
+    else:
+        print("  pooled density     : off (no posterior_samples_cloud: re-run the Experiment "
+              "stage with --dump-posterior-samples)")
     print(f"  recovery annotation: " + ("off" if recovery is None else
           ", ".join(f"{tdk.band_label(b)}" for b, _ in recovery)) + "\n")
 
@@ -725,6 +863,11 @@ def run_temporal_dynamics(cfg, args):
             figp.savefig(str(spec.fig_dir / f"{key}_temporal_posterior.png"), dpi=180)
             plt.close(figp)
             note = " + posterior"
+        if pooled is not None:
+            figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds)
+            figq.savefig(str(spec.fig_dir / f"{key}_temporal_pooled.png"), dpi=180)
+            plt.close(figq)
+            note += " + pooled"
         results.append({"p_index": p_index, "key": key,
                         "name": spec.display.get(key, key), "label": spec.table[p_index]["LABEL"]})
         ref_tag = "  [reference]" if key in spec.references else ""
@@ -732,8 +875,10 @@ def run_temporal_dynamics(cfg, args):
 
     meta = {"npz_name": spec.npz_path.name, "n_estimates": int(inferred_log10.shape[0]),
             "n_cells": n_cells, "n_chunks": n_chunks, "step": step,
+            "n_samples_per_window": int(cloud.shape[1]) if cloud is not None else 0,
             "edges": [float(t) for t in edges], "centers": [float(t) for t in centers]}
-    _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj)
+    _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj,
+                  pooled)
     print(f"  wrote report.md\n\nDone: {len(results)} parameter(s) in {spec.fig_dir}")
     return 0
 

@@ -107,7 +107,7 @@ def _aggregate_by_kind(inferred_log10, kind_index, cell_arr, kinds, mode, n_para
 
 def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Path,
                              scores, inferred_log10, kind_index, cell_of, chunk_of,
-                             post_quantiles, kinds, run_start) -> None:
+                             post_quantiles, post_samples, kinds, run_start) -> None:
     """Save the inferred-theta arrays and write the report + figures.
 
     Shared by the single-process path and the ``--merge`` combine step, so both
@@ -128,6 +128,9 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
     # (N, D, 5) posterior quantiles [Q05,Q25,Q50,Q75,Q95] when View B was requested.
     post_arr = np.asarray(post_quantiles)
     post_q = post_arr if (do_posterior and post_arr.size > 0) else None
+    # (N, n_samples, D) raw draws, only when the run was asked to keep them.
+    post_s_arr = np.asarray(post_samples)
+    post_s = post_s_arr if (do_posterior and post_s_arr.size > 0) else None
 
     # ---- Save the inferred-theta arrays ----------------------------------
     save_arrays = dict(
@@ -135,6 +138,8 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
         cell=cell_of, chunk=chunk_of, kinds=np.asarray(kinds))
     if post_q is not None:
         save_arrays["posterior_quantiles"] = post_q
+    if post_s is not None:
+        save_arrays["posterior_samples_cloud"] = post_s
     np.savez_compressed(str(array_path), **save_arrays)
     print(f"\nExperiment MAP arrays saved to {array_path}")
 
@@ -203,7 +208,7 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
 
 
 def _save_shard(topo, out_dir: Path, scores, inferred_log10, kind_index, cell_of,
-                chunk_of, post_quantiles, kinds, run_start) -> None:
+                chunk_of, post_quantiles, post_samples, kinds, run_start) -> None:
     """Write this worker's partial experiment arrays (multi-GPU sharded run)."""
     arrays = dict(
         scores=np.asarray(scores),
@@ -215,6 +220,8 @@ def _save_shard(topo, out_dir: Path, scores, inferred_log10, kind_index, cell_of
     )
     if post_quantiles:
         arrays["posterior_quantiles"] = np.asarray(post_quantiles)
+    if post_samples:
+        arrays["posterior_samples_cloud"] = np.asarray(post_samples)
     path = save_shard(out_dir, topo, arrays, count=len(scores))
     if path is None:
         print(f"\n[rank {topo.rank}/{topo.world_size}] no cells assigned -- "
@@ -237,16 +244,17 @@ def _merge_shards(reporter, args, eval_cfg, draw_spec, out_dir: Path,
         shard_paths,
         concat_keys=["scores", "inferred_log10", "kind_index", "cell", "chunk"],
         first_keys=["kinds"],
-        optional_concat_keys=["posterior_quantiles"])
+        optional_concat_keys=["posterior_quantiles", "posterior_samples_cloud"])
     kinds = [str(k) for k in merged["kinds"]]
     # An absent posterior_quantiles key -> empty array signals "not computed" to
     # write_experiment_outputs.
     post_quantiles = merged.get("posterior_quantiles", np.asarray([]))
+    post_samples = merged.get("posterior_samples_cloud", np.asarray([]))
     print(f"Merged {merged['scores'].shape[0]} estimates from {n_used} shard(s).", flush=True)
     write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path,
                              merged["scores"], merged["inferred_log10"],
                              merged["kind_index"], merged["cell"], merged["chunk"],
-                             post_quantiles, kinds, run_start)
+                             post_quantiles, post_samples, kinds, run_start)
     for shard_path in shard_paths:
         shard_path.unlink()
     print(f"Removed {len(shard_paths)} shard file(s).", flush=True)
@@ -297,6 +305,12 @@ def run_experiment(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
     do_map = args.summary in ("map", "both")
     do_posterior = args.summary in ("posterior", "both")
     posterior_samples = args.posterior_samples or eval_cfg.posterior_samples
+    dump_samples = args.dump_posterior_samples
+    if dump_samples and not do_posterior:
+        raise SystemExit(
+            "--dump-posterior-samples needs the posterior view: pass --summary posterior "
+            "or --summary both. The draws it stores are the ones the posterior summary "
+            "makes, so there is nothing to keep when only the MAP view runs.")
 
     # Video geometry: model-length windows stepped across each long recording.
     n_frames = timing.frame_count
@@ -346,6 +360,12 @@ def run_experiment(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
     print(f"  --summary                 : {args.summary}   (View A map={do_map}, View B posterior={do_posterior})")
     if do_posterior:
         print(f"  --posterior-samples       : {posterior_samples}")
+        n_windows_total = sum(len(cells_by_kind[k]) for k in kinds) * n_chunks
+        mb = n_windows_total * posterior_samples * len(spec.draw_spec) * 4 / 1e6
+        print(f"  --dump-posterior-samples  : {dump_samples}"
+              + (f"   (+{mb:.0f} MB of raw draws: "
+                 f"{n_windows_total} windows x {posterior_samples} x "
+                 f"{len(spec.draw_spec)})" if dump_samples else ""))
     print(f"  --seed                    : {args.seed}")
     print(f"  total MAP estimates       : {total_estimates}")
     print("\nMAP estimate hyperparameters (effective):")
@@ -446,6 +466,7 @@ def run_experiment(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
 
     # ---- MAP estimation over (kind, cell, chunk) -------------------------
     scores, inferred_log10, post_quantiles = [], [], []
+    post_samples = []            # raw draws per window, only under --dump-posterior-samples
     kind_index, cell_of, chunk_of = [], [], []
     shard_note = (f" [shard rank {topo.rank}/{topo.world_size}: {len(my_work)} of "
                   f"{len(flat_work)} cells]" if topo.is_distributed else "")
@@ -487,10 +508,14 @@ def run_experiment(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
                     scores.append(score)
                     inferred_log10.append(theta_log)
                     if do_posterior:
-                        post_quantiles.append(posterior_summary(
+                        summary = posterior_summary(
                             posterior, chunk, device, vista_device,
                             posterior_samples, eval_cfg.theta_prex_batch_size,
-                            pool_mode=pool_mode))
+                            pool_mode=pool_mode, return_samples=dump_samples)
+                        if dump_samples:
+                            summary, cloud = summary
+                            post_samples.append(cloud)
+                        post_quantiles.append(summary)
                     kind_index.append(ki)
                     cell_of.append(cell)
                     chunk_of.append(c)
@@ -516,11 +541,12 @@ def run_experiment(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
     # ---- Write outputs ---------------------------------------------------
     if topo.is_distributed:
         _save_shard(topo, out_dir, scores, inferred_log10, kind_index, cell_of,
-                    chunk_of, post_quantiles, kinds, run_start)
+                    chunk_of, post_quantiles, post_samples, kinds, run_start)
     else:
         write_experiment_outputs(reporter, args, eval_cfg, spec.draw_spec, array_path,
                                  scores, inferred_log10, kind_index, cell_of,
-                                 chunk_of, post_quantiles, kinds, run_start)
+                                 chunk_of, post_quantiles, post_samples, kinds,
+                                 run_start)
 
 
 def build_experiment_parser() -> argparse.ArgumentParser:
@@ -560,6 +586,15 @@ def build_experiment_parser() -> argparse.ArgumentParser:
         help="Which views to render: 'map' (View A: MAP-point distribution per "
              "condition; default), 'posterior' (View B: per-chunk posterior median "
              "+/- IQR per condition), or 'both'. View B draws --posterior-samples per chunk.",
+    )
+    parser.add_argument(
+        "--dump-posterior-samples", action="store_true",
+        help="Additionally store the raw posterior draws for every window, as "
+             "posterior_samples_cloud (n_windows, --posterior-samples, D) in the saved "
+             "npz. Quantiles keep only per-parameter marginals; the raw draws keep the "
+             "joint structure, which is what pooling posteriors across a recording "
+             "needs. Requires --summary posterior or both. Adds roughly "
+             "n_windows * samples * D * 4 bytes.",
     )
     parser.add_argument(
         "--posterior-samples", type=int, default=None,

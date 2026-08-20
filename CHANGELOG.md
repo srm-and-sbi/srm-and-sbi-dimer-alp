@@ -74,6 +74,27 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   per-detection sum, and the two population log-spreads are upper-biased by localization fitting
   error, so their fitted values are drawn as upper bounds rather than targets.
 
+### Added
+
+- **The Experiment stage can keep the raw posterior draws** (`--dump-posterior-samples`), stored as
+  `posterior_samples_cloud` of shape `(n_windows, samples, D)` beside the quantiles it already
+  writes. The five-quantile record keeps per-parameter marginals only, which is enough for an
+  interval but not for a density; the draws keep the joint structure. They are the same draws the
+  quantile summary is computed from, not a second independent set, so the two cannot disagree — a
+  spot check finds the cloud median matching the stored `Q50` to 6e-08. The flag requires the
+  posterior view and refuses the MAP-only run rather than silently storing nothing, and both the
+  shard and `--merge` paths carry the array so a multi-GPU run merges it like every other output.
+- **Pooled posterior density in the temporal-dynamics analysis** (`<key>_temporal_pooled.png`): the
+  classic histogram, with the time axis collapsed by pooling every window's draws within a
+  condition. Binning is uniform across the prior's decades, so height is a density per decade and
+  the log-uniform prior is a flat line the curve can be read against — the distance between them is
+  what the data added, and a density lying on the prior line has learned nothing. The report states
+  the pooling arithmetic explicitly (recordings x windows x draws, equal weight, nothing averaged
+  first) and discloses what the mixture is not: pooling draws ADDS densities where Bayes MULTIPLIES
+  likelihoods, so the result describes the window population and is not a joint posterior for the
+  condition, and its mode is therefore not the analysis's central estimate. That remains the
+  trajectory-level medoid, drawn on the same figure for comparison.
+
 ### Changed
 
 - **The Evaluation stage states its recovery tolerances as multiplicative ranges.** The two

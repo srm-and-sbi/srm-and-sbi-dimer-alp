@@ -117,13 +117,59 @@ window's stored posterior interval** — how uncertain a typical single window's
 `*-window` timeseries drawn on top as the anchor.
 
 **What it is built from, and what it is not.** The stored per-window five-quantile summary
-(5, 25, 50, 75, 95 %), which is what the Experiment stage persists. It therefore shows interval
-**widths**; it is **not** a posterior **density**. A density pooled over windows would require the
-per-window sample clouds, which the stage does not persist, and this figure does not approximate it.
+(5, 25, 50, 75, 95 %). It therefore shows interval **widths**; it is **not** a posterior **density**
+and does not approximate one. The density is a separate figure, described next.
 
 When a parameter's interval spans essentially its whole prior, the posterior is returning the prior
 and the point estimate is the prior's center regardless of the data — a direct picture of
 non-identifiability.
+
+## Pooled posterior density — the classic histogram, time collapsed
+
+`<key>_temporal_pooled.png` answers the question the two time-course figures cannot: across the
+whole recording, what does the posterior actually look like, and how much narrower is it than the
+prior it started from?
+
+**The arithmetic, stated exactly.** The Experiment stage draws `--posterior-samples` (1000 by
+default) samples from the posterior of every `(recording, window)` pair. For one condition that is
+
+```
+25 recordings  x  10 windows  x  1000 draws  =  250,000 draws
+```
+
+and **all of them enter one histogram with equal weight**. Nothing is averaged, selected, or
+re-weighted first; the time axis is collapsed by pooling, not by summarizing.
+
+**What that mixture means — and what it does not.** Equal-weight pooling produces the **mixture** of
+the per-window posteriors. Its density answers: *for a single window drawn at random from this
+condition, which values are consistent with it?* It is **not** a joint posterior for the condition.
+Combining independent observations under Bayes multiplies their likelihoods; pooling draws **adds**
+their densities. The mixture is therefore as wide as the between-window spread **plus** the
+within-window uncertainty, whereas a genuine joint posterior over 250 windows would be far
+**narrower** than any single one of them. Read the width as a property of the window population,
+never as evidence accumulated over the recording.
+
+**It is not the central estimate.** Because the mixture is a population rather than an estimate, its
+mode and median are *not* this analysis's central estimate. That remains `<family>-trajectory` — one
+jointly realized vector — marked on the figure as a thin vertical line. A per-parameter summary of
+pooled marginals is exactly the composite the SGM exists to avoid, so the two are shown together
+and are not expected to coincide.
+
+**Density per decade, and the prior line.** Draws are binned uniformly across the prior's decades,
+which is where a log-uniform prior is flat. Height is therefore a density **per decade** over 64
+bins (a fixed count: with hundreds of thousands of draws the resolution is a legibility choice, not
+a sample-size limit, and holding it fixed keeps conditions and parameters comparable). The prior
+appears as the flat dashed line at `1 / (log10 hi - log10 lo)`, so the gap between a curve and that
+line **is** what the data added. A density lying on the prior line has learned nothing — the same
+non-identifiability the interval figure shows, in the form that makes it quantitative.
+
+**Axis.** Absolute units on a log-scaled axis: absolute because the value is the quantity of
+interest, log-scaled because both the prior and the binning are uniform in decades. Every tick is a
+value in the parameter's own units; no dex axis appears.
+
+**Availability.** This figure needs the raw draws, which the Experiment stage stores only when run
+with `--dump-posterior-samples`. Without them the analysis prints `pooled density: off` and writes
+every other output as usual.
 
 ## Axis and rendering conventions
 
@@ -202,10 +248,14 @@ Written to `<data_bank>/<posit>/<alias>_<timing_label>_MAP_Experiment/temporal_d
 `<alias>` carries the `_DETECTOR` qualifier for that workflow so the two never collide:
 
 - `<key>_temporal.png` — the central-trajectory figure per parameter;
-- `<key>_temporal_posterior.png` — the two-panel uncertainty figure (written only when the
+- `<key>_temporal_posterior.png` — the within-window interval figure (written only when the
   Experiment output carries `posterior_quantiles`);
+- `<key>_temporal_pooled.png` — the pooled posterior density with the prior line (written only when
+  the Experiment output carries `posterior_samples_cloud`, i.e. the stage ran with
+  `--dump-posterior-samples`);
 - `report.md` — the per-run interpretation: the drift table with all four statistics, the selected
-  central recordings for both SGM variants, the reference scoping, and the method's stated limits.
+  central recordings for both SGM variants, the pooled-mixture quantile table when the draws are
+  present, the reference scoping, and the method's stated limits.
 
 ## How to run
 
