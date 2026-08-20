@@ -96,11 +96,17 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   likelihoods, so the result describes the window population and is not a joint posterior for the
   condition, and its mode is therefore not the analysis's central estimate. That remains the
   trajectory-level medoid, drawn on the same figure for comparison. The x axis is in the
-  parameter's absolute units with plain numeric ticks, and `--pooled-scale {log,linear}` chooses its
-  spacing: `log` (default) bins uniformly in decades and draws the log-uniform prior as a flat line,
-  `linear` bins uniformly in absolute units to match the time-course figures and draws the prior as
-  the `1/x` curve the change of variable actually produces — a flat line there would misread the
-  Jacobian as evidence.
+  parameter's absolute units with plain numeric ticks — never powers of ten, never dex — and
+  `--pooled-scale {linear,log,both}` chooses its spacing. `linear` (the default) spaces axis and
+  bins uniformly in absolute units, matching the value axis of the time-course figures, and draws
+  the prior as the `1/x` curve a log-uniform density becomes under `x = 10**y`; a flat line there
+  would misread the Jacobian as evidence, and because that curve diverges toward the lower limit the
+  view scales its y axis to the histogram and lets the prior leave the frame. `log` spaces them
+  uniformly in decades, making the prior a flat reference line, which is the view to read when the
+  low end of a wide-ranged parameter is the question — a linear axis compresses the counts' 1-316
+  support so that structure below ~20 receptors falls into two bins. The spacing is part of the
+  filename (`..._pooled.png` vs `..._pooled_log.png`), so the two views coexist and neither
+  silently overwrites the other.
 - **One definition of the experimental condition naming**, in `experiment_support`
   (`CONDITION_DISPLAY`, its derived inverse `KIND_OF_CONDITION`, `CONDITION_CHOICES`, and the
   `condition_display` / `condition_token` helpers). The `ALP` -> `MET-FAB`, `BET` -> `MET-INLB`

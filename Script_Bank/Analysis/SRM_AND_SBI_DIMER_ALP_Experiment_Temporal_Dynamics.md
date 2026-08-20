@@ -162,19 +162,27 @@ units**, with plain numeric ticks — never powers of ten, never dex. `--pooled-
 axis is spaced, and the binning, the density's unit, and the prior's shape all follow from that one
 choice consistently:
 
-| `--pooled-scale` | bins | height is a density | the prior is drawn as |
-|---|---|---|---|
-| `log` (default) | uniform in decades | **per decade** | the flat line `1 / (log10 hi - log10 lo)` |
-| `linear` | uniform in absolute units | **per unit** | the curve `1 / ((log10 hi - log10 lo) · x · ln 10)` |
+| `--pooled-scale` | axis and bins | height is a density | the prior is drawn as | file |
+|---|---|---|---|---|
+| `linear` (default) | uniform in absolute units | **per unit** | the curve `1 / ((log10 hi - log10 lo) · x · ln 10)` | `<key>_temporal_posterior_pooled.png` |
+| `log` | uniform in decades | **per decade** | the flat line `1 / (log10 hi - log10 lo)` | `<key>_temporal_posterior_pooled_log.png` |
+| `both` | — | — | — | writes both files |
 
-Both use 64 bins — a fixed count, because with hundreds of thousands of draws the resolution is a
-legibility choice rather than a sample-size limit, and holding it fixed keeps conditions and
-parameters comparable.
+The spacing is part of the filename, so the two views coexist and a run with one setting cannot
+silently overwrite the other. Both use 64 bins — a fixed count, because with hundreds of thousands
+of draws the resolution is a legibility choice rather than a sample-size limit, and holding it fixed
+keeps conditions and parameters comparable.
 
-`log` is the default because it resolves the whole prior range evenly: a count parameter supported on
-1–316 stays legible across its entire support, and the prior is a flat line the curve can be read
-against directly. `linear` matches the linear value axis the time-course figures use, which is the
-right choice when absolute differences are what matter and the parameter's range is narrow.
+`linear` is the default because it matches the value axis of the time-course figures and reads
+directly in the parameter's units, which is what a reader wants when absolute differences are the
+question.
+
+**When to use `log` instead.** A linear axis spends its width in proportion to absolute value, so
+for a parameter supported over orders of magnitude it compresses the low end into a few bins. The
+three counts span 1–316: structure below ~20 receptors that is plainly visible under `log` spacing
+collapses into the first two bins under `linear`. Whenever the low end of a wide-ranged parameter is
+the question — as it is for any statement about few-receptor cells — read the `_log` file, or pass
+`--pooled-scale both` and read them together.
 
 **Why the prior is not a flat line under `linear` spacing.** A log-uniform density is flat in
 `y = log10(x)`, not in `x`. Changing variable gives `p(x) = p(y) · |dy/dx| = 1 / ((hi - lo) · x ·
@@ -302,9 +310,9 @@ MACHINE_PROFILE=<profile> python \
   `sgm-trajectory`, `mean` draws `mean-window` with `mean-trajectory`. The pairing is enforced.
 - `--params` — comma-separated parameter keys to plot. Filters the **figures only**: the central
   estimates are computed on the full parameter vector either way.
-- `--pooled-scale {log,linear}` — x-axis spacing for the pooled posterior histogram; both are in
-  absolute units. See the table above for what each implies about binning, the density's unit, and
-  the prior's shape.
+- `--pooled-scale {linear,log,both}` — x-axis spacing for the pooled posterior histogram; both
+  spacings label the axis in absolute units. See the table above for what each implies about
+  binning, the density's unit, the prior's shape, and which file it writes.
 - `--dry-run` — resolve and print the inputs and outputs, then exit without reading data or writing
   anything.
 

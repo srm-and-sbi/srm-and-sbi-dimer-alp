@@ -62,6 +62,9 @@ from .experiment_support import CONDITION_DISPLAY  # noqa: F401  (re-exported fo
 # holds hundreds of thousands of draws, so the bin count is not sample-limited; it is chosen for
 # legibility and held fixed so the two conditions and every parameter share one resolution.
 POOLED_BINS = 64
+
+# Which x-axis spacings each --pooled-scale choice renders. Both label the axis in absolute units.
+POOLED_SCALES = {"linear": ("linear",), "log": ("log",), "both": ("linear", "log")}
 CONDITION_COLOR = {"ALP": "tab:blue", "BET": "tab:orange"}
 REFERENCE_COLOR = "tab:grey"
 SGM_COLOR = "gold"
@@ -887,8 +890,8 @@ def run_temporal_dynamics(cfg, args):
         print(f"  pooled density     : on — " + ", ".join(
             f"{CONDITION_DISPLAY.get(k, k)} {pooled[e].shape[0]:,} draws"
             for e, k in enumerate(kinds))
-            + f" ({cloud.shape[1]:,} per window, {POOLED_BINS} "
-              f"{args.pooled_scale}-spaced bins over the prior)")
+            + f" ({cloud.shape[1]:,} per window, {POOLED_BINS} bins over the prior, "
+              f"{'/'.join(POOLED_SCALES[args.pooled_scale])}-spaced)")
     else:
         print("  pooled density     : off (no posterior_samples_cloud: re-run the Experiment "
               "stage with --dump-posterior-samples)")
@@ -912,11 +915,14 @@ def run_temporal_dynamics(cfg, args):
             plt.close(figp)
             note = " + posterior"
         if pooled is not None:
-            figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds,
-                                  scale=args.pooled_scale)
-            figq.savefig(str(spec.fig_dir / f"{key}_temporal_posterior_pooled.png"), dpi=180)
-            plt.close(figq)
-            note += " + pooled"
+            # The spacing is part of the filename, so the two views coexist and a run with a
+            # different --pooled-scale cannot silently overwrite the other one.
+            for scale in POOLED_SCALES[args.pooled_scale]:
+                figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale=scale)
+                stem = f"{key}_temporal_posterior_pooled" + ("" if scale == "linear" else "_log")
+                figq.savefig(str(spec.fig_dir / f"{stem}.png"), dpi=180)
+                plt.close(figq)
+            note += " + pooled(" + ", ".join(POOLED_SCALES[args.pooled_scale]) + ")"
         results.append({"p_index": p_index, "key": key,
                         "name": spec.display.get(key, key), "label": spec.table[p_index]["LABEL"]})
         ref_tag = "  [reference]" if key in spec.references else ""
@@ -949,14 +955,20 @@ def build_parser(description):
                         "chunks and cells); 'mean' draws the mean-window timeseries and the "
                         "mean-trajectory line, each parameter averaged independently. The pairing "
                         "is enforced so a figure never mixes a mean with a medoid.")
-    p.add_argument("--pooled-scale", choices=("log", "linear"), default="log",
-                   help="x-axis spacing for the pooled posterior histogram; both are in the "
-                        "parameter's absolute units. 'log' (default) bins uniformly in decades, so "
-                        "the whole prior range is resolved evenly and the log-uniform prior is a "
-                        "flat reference line (density per decade). 'linear' bins uniformly in "
-                        "absolute units, matching the linear value axis of the time-course figures, "
-                        "and draws the prior as the 1/x curve a log-uniform density becomes under "
-                        "that change of variable (density per unit).")
+    p.add_argument("--pooled-scale", choices=("linear", "log", "both"), default="linear",
+                   help="x-axis SPACING for the pooled posterior histogram. Both spacings label the "
+                        "axis in the parameter's own absolute units; this chooses how those units "
+                        "are laid out. 'linear' (default) spaces the axis and the bins uniformly in "
+                        "absolute units, matching the value axis of the time-course figures, and "
+                        "draws the prior as the 1/x curve a log-uniform density becomes under that "
+                        "change of variable (density per unit); it writes "
+                        "<key>_temporal_posterior_pooled.png. 'log' spaces them uniformly in "
+                        "decades, which resolves a wide prior evenly and makes the log-uniform "
+                        "prior a flat reference line (density per decade); it writes "
+                        "<key>_temporal_posterior_pooled_log.png. 'both' writes both files. For a "
+                        "parameter spanning orders of magnitude (the counts span 1-316) the linear "
+                        "axis compresses the low end, so 'log' or 'both' is the better choice when "
+                        "the low end is the question.")
     p.add_argument("--params", type=str, default=None,
                    help="comma-separated parameter keys to plot (default: all). Filters the "
                         "FIGURES only -- the central estimates are computed on the full parameter "
