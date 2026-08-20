@@ -107,6 +107,18 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   support so that structure below ~20 receptors falls into two bins. The spacing is part of the
   filename (`..._pooled.png` vs `..._pooled_log.png`), so the two views coexist and neither
   silently overwrites the other.
+- **Marginal centers of the pooled mixture** (`median-pooled`, `mean-pooled`, `geomean-pooled`, via
+  `--pooled-mark`), drawn dashed on the pooled histogram beside the trajectory medoid and tabulated
+  against it with the ratio. The four existing central estimates all summarize the per-window MAP
+  vectors; the histogram plots the mixture of posterior draws, and a line on a one-dimensional
+  marginal is read as that marginal's center, which the medoid does not claim to be. On kappa_OFF
+  the gap is a factor of 1.94 for MET-INLB (1.81 /s against 3.51 /s), so the medoid alone invited
+  exactly the question of why the line sat away from the bulk. Showing both makes the skew the
+  explanation rather than a puzzle. The median is the default because it is equivariant -- the
+  marginal median in absolute units equals `10 ** median(log10)`, verified to 3e-10 -- whereas the
+  arithmetic mean differs from the geometric mean by a factor of 2.1 on the same parameter, which
+  reports the choice of basis as much as the posterior. All three are per-coordinate composites and
+  describe a marginal, never the condition's parameter vector.
 - **One definition of the experimental condition naming**, in `experiment_support`
   (`CONDITION_DISPLAY`, its derived inverse `KIND_OF_CONDITION`, `CONDITION_CHOICES`, and the
   `condition_display` / `condition_token` helpers). The `ALP` -> `MET-FAB`, `BET` -> `MET-INLB`

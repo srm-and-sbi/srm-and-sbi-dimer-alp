@@ -256,6 +256,57 @@ def cloud_interval(pooled, quantiles=(0.05, 0.50, 0.95)):
     return np.quantile(pooled, list(quantiles), axis=0)         # (len(quantiles), D)
 
 
+def pooled_summary(pooled, statistic="median"):
+    """Marginal central value of a pooled mixture, per parameter, in ABSOLUTE units.
+
+    The 2x2 of central estimates -- ``{mean, sgm} x {window, trajectory}`` -- all summarize the set
+    of per-window MAP vectors. This summarizes the pooled posterior DRAWS instead, which is a
+    different object: the mixture is where the probability mass is, while the MAP set is where the
+    per-window modes are, and the two need not agree. Naming follows the same scheme:
+    ``median-pooled`` and ``mean-pooled``.
+
+    WHY THIS EXISTS. A vertical line drawn on a one-dimensional marginal histogram is read as the
+    center of THAT histogram. The trajectory-level medoid is not: it is one jointly realized vector
+    chosen to minimize distance in the full parameter space, so any single coordinate of it can sit
+    far from that coordinate's marginal center -- correctly, but not in a way a marginal plot
+    communicates. These statistics are the marginal centers of the plotted distribution, and are the
+    honest thing to mark on it.
+
+    WHAT IS LOST. Being per-coordinate, they are composites: the returned vector's coordinates come
+    from different draws and need never have co-occurred, which is precisely the defect the geometric
+    median exists to avoid. Use them to describe a marginal, never as the condition's parameter
+    vector.
+
+    ``statistic``:
+        ``"median"``  the marginal median. Equivariant under monotone transformation, so the median
+                      in absolute units and ``10 ** median(log10)`` are the SAME number and the
+                      answer does not depend on the space it was computed in. This is the default
+                      for that reason.
+        ``"mean"``    the arithmetic mean in absolute units. NOT equivariant: it differs from the
+                      geometric mean ``10 ** mean(log10)`` by a factor that grows with the spread,
+                      and for a log-uniform prior that factor is large. Provided because it is what
+                      "the mean of the posterior" usually names, but it reports a property of the
+                      chosen basis as much as of the posterior.
+        ``"geometric-mean"`` ``10 ** mean(log10)``, the mean in the space the prior is uniform in.
+
+    Returns an ``(n_kinds, D)`` array in absolute units.
+    """
+    if statistic not in ("median", "mean", "geometric-mean"):
+        raise ValueError(f"statistic={statistic!r}; expected 'median', 'mean' or 'geometric-mean'.")
+    out = []
+    for draws_log10 in pooled:
+        if draws_log10.size == 0:
+            out.append(np.full(draws_log10.shape[-1:], np.nan))
+            continue
+        if statistic == "median":
+            out.append(np.median(10.0 ** draws_log10, axis=0))
+        elif statistic == "mean":
+            out.append(np.mean(10.0 ** draws_log10, axis=0))
+        else:
+            out.append(10.0 ** np.mean(draws_log10, axis=0))
+    return np.asarray(out)
+
+
 def drift_statistics(grid_log10, times, threshold=MATERIAL_DRIFT_DEX):
     """Per-cell linear drift of each parameter across the recording, aggregated per condition.
 

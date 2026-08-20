@@ -84,6 +84,33 @@ the same pooled windows, so the two analyses agree by construction rather than b
 from about 1.05 to 4 depending on the parameter, so which one is reported changes the number a
 reader takes away — and only one of them is a configuration any recording actually produced.
 
+### A fifth statistic, on a different object: the pooled marginals
+
+The four above all summarize the set of per-window **MAP vectors**. The pooled posterior histogram
+plots something else — the **mixture of the per-window posterior draws** — and a vertical line on a
+one-dimensional histogram is read as the center of *that* histogram. The medoid is not: it is one
+jointly realized vector chosen to minimize distance in the full parameter space, so a single
+coordinate of it can sit far from that coordinate's marginal center with nothing being wrong.
+
+`median-pooled`, `mean-pooled` and `geomean-pooled` are the marginal centers of the plotted mixture,
+selected with `--pooled-mark` and drawn dashed beside the medoid so the gap between them is visible
+rather than hidden. κ_OFF is the clear case: `median-pooled` is 1.81 /s for MET-INLB against an
+`sgm-trajectory` of 3.51 /s, a factor of 1.94 — the mixture is right-skewed, and a reader shown only
+the medoid on that histogram would reasonably ask why the line sits away from the bulk.
+
+**Prefer the median.** The median is equivariant under monotone transformation, so the marginal
+median in absolute units and `10 ** median(log10)` are the *same number* — verified equal to 3e-10 —
+and the answer does not depend on the space it was computed in. The arithmetic mean is not: for
+κ_OFF MET-FAB it is 4.68 /s in absolute units against a geometric mean of 2.22 /s, a factor of 2.1
+that comes from the choice of basis alone. For quantities with a log-uniform prior the arithmetic
+mean partly reports the parameterization, which is why it is available but not the default.
+
+**What all three give up.** Being per-coordinate, they are composites: the returned vector's
+coordinates come from different draws and need never have co-occurred — precisely the defect the
+geometric median exists to avoid. They describe a **marginal**. They are never the condition's
+parameter vector, and the medoid remains the answer to "which single configuration is
+representative".
+
 ## Drift — measured per cell, independent of the display
 
 For every (condition, cell, parameter) an ordinary least-squares line is fit to the stored **log10**
@@ -313,6 +340,9 @@ MACHINE_PROFILE=<profile> python \
 - `--pooled-scale {linear,log,both}` — x-axis spacing for the pooled posterior histogram; both
   spacings label the axis in absolute units. See the table above for what each implies about
   binning, the density's unit, the prior's shape, and which file it writes.
+- `--pooled-mark {median,mean,geometric-mean,none}` — which marginal center of the pooled mixture to
+  mark on the histogram beside the medoid. `median` (default) is equivariant; `mean` is not. See
+  *A fifth statistic* above.
 - `--dry-run` — resolve and print the inputs and outputs, then exit without reading data or writing
   anything.
 

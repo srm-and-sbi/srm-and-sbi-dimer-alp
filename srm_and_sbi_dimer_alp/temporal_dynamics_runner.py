@@ -374,7 +374,8 @@ def _figure_posterior(spec, p_index, key, within, series, family, edges, kinds):
     return fig
 
 
-def _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale="log"):
+def _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale="log",
+                   mark=None, mark_name=""):
     """Pooled posterior density over the whole recording -- the classic histogram, time collapsed.
 
     Every window's draws for a condition are pooled into one histogram. Drawing the prior on the
@@ -397,9 +398,16 @@ def _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale="log")
                   wrong, and would make every parameter look as though its low end had been
                   disfavored by the data when it was only the change of variable.
 
-    The family's trajectory line is marked for reference, with the caveat that it is a MEDOID over
-    windows and not the mode of this mixture; the two answer different questions and need not
-    coincide.
+    Two vertical marks are drawn, and the distinction between them is the point:
+
+    ``mark``   the MARGINAL center of the distribution actually plotted (``median-pooled`` by
+               default). A line on a one-dimensional histogram is read as that histogram's center,
+               so this is the honest thing to put there.
+    ``line``   the family's trajectory-level estimate, a MEDOID over windows: one jointly realized
+               vector, whose individual coordinates can sit far from their marginal centers without
+               anything being wrong. It is kept on the figure precisely so the gap between the two is
+               visible rather than hidden -- where they separate, the mixture is skewed and the
+               reader should know which question each answers.
     """
     para = spec.table[p_index]
     name = spec.display.get(key, key)
@@ -431,6 +439,10 @@ def _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale="log")
         peak = max(peak, float(np.nanmax(dens)) if dens.size else 0.0)
         ax.axvline(float(line[e, p_index]), color=color, linestyle="-", linewidth=1.4, alpha=0.70,
                    label=f"{disp} {family}-trajectory = {line[e, p_index]:.3g}")
+        if mark is not None and np.isfinite(mark[e, p_index]):
+            ax.axvline(float(mark[e, p_index]), color=color, linestyle=(0, (5, 2)), linewidth=2.0,
+                       alpha=0.95,
+                       label=f"{disp} {mark_name} = {mark[e, p_index]:.3g}")
 
     # The prior it started from. Flat per decade; a 1/x curve per absolute unit, because that is what
     # a log-uniform density becomes under x = 10**y -- drawing it flat here would be wrong.
@@ -528,7 +540,7 @@ def _finish_axes(ax, x_edges, para, spec, lo, hi):
 # =============================================================================
 
 def _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj,
-                  pooled=None):
+                  pooled=None, pooled_mark_name=""):
     """Write the self-contained interpretation report beside the figures.
 
     Every reported quantity is defined verbatim here, keyed by the same name the figures and the
@@ -745,6 +757,50 @@ def _write_report(spec, meta, results, drift, kinds, family, line, picks_window,
                  "construction, so they carry no joint information — which is why they sit beside "
                  f"the `{family}-trajectory` vector rather than replacing it.")
         L.append("")
+        L.append("### Marginal centers versus the trajectory medoid")
+        L.append("")
+        L.append("A vertical line on a one-dimensional histogram is read as the center of that "
+                 "histogram, so the figure marks a **marginal** center of the plotted mixture "
+                 f"(`{pooled_mark_name or 'median-pooled'}`) and keeps `{family}-trajectory` beside "
+                 "it. The two answer different questions and the table below is where the gap "
+                 "between them can be checked parameter by parameter.")
+        L.append("")
+        L.append("- `median-pooled` — marginal median of the pooled draws. **Equivariant**: the "
+                 "median in absolute units and `10 ** median(log10)` are the same number, so this "
+                 "value does not depend on the space it was computed in.")
+        L.append("- `mean-pooled` — arithmetic mean in absolute units. **Not equivariant**: it "
+                 "differs from `geomean-pooled` by a factor that grows with the spread, so for a "
+                 "log-uniform prior it partly reports the choice of basis rather than the "
+                 "posterior. Reported because it is what \"the mean of the posterior\" usually "
+                 "names, not because it is the better summary.")
+        L.append("- `geomean-pooled` — `10 ** mean(log10)`, the mean taken in the space the prior "
+                 "is uniform in.")
+        L.append(f"- `{family}-trajectory` — the medoid: one jointly realized vector. Its "
+                 "coordinates are a real recording's values and need **not** be marginally "
+                 "central; a large `ratio` below means the mixture is skewed for that parameter, "
+                 "not that the medoid is wrong.")
+        L.append("")
+        med = tdk.pooled_summary(pooled, "median")
+        mea = tdk.pooled_summary(pooled, "mean")
+        geo = tdk.pooled_summary(pooled, "geometric-mean")
+        heads = ["parameter", "condition", "median-pooled", "mean-pooled", "geomean-pooled",
+                 f"{family}-trajectory", "ratio traj/median"]
+        L.append("| " + " | ".join(heads) + " |")
+        L.append("|" + "---|" * len(heads))
+        for r in results:
+            i = r["p_index"]
+            for e, kind in enumerate(kinds):
+                ratio = (line[e, i] / med[e, i]) if med[e, i] else float("nan")
+                L.append("| " + " | ".join([
+                    f"`{r['key']}`", CONDITION_DISPLAY.get(kind, kind),
+                    f"{med[e, i]:.3g}", f"{mea[e, i]:.3g}", f"{geo[e, i]:.3g}",
+                    f"{line[e, i]:.3g}", f"{ratio:.2f}x"]) + " |")
+        L.append("")
+        L.append("All values in the parameter's absolute units. Every entry except "
+                 f"`{family}-trajectory` is a per-coordinate composite: its coordinates come from "
+                 "different draws and need never have co-occurred, so use them to describe a "
+                 "marginal and never as the condition's parameter vector.")
+        L.append("")
     if spec.references:
         L.append("## External reference values")
         L.append("")
@@ -863,8 +919,12 @@ def run_temporal_dynamics(cfg, args):
         within = tdk.within_window_interval(qgrid)
 
     pooled = None
+    pooled_mark, pooled_mark_name = None, ""
     if cloud is not None and cloud.size:
         pooled = tdk.pooled_cloud(cloud, kind_index, len(kinds))
+        if args.pooled_mark != "none":
+            pooled_mark = tdk.pooled_summary(pooled, args.pooled_mark)
+            pooled_mark_name = f"{args.pooled_mark}-pooled"
 
     recovery = None
     if spec.recovery_npz.exists():
@@ -895,6 +955,10 @@ def run_temporal_dynamics(cfg, args):
     else:
         print("  pooled density     : off (no posterior_samples_cloud: re-run the Experiment "
               "stage with --dump-posterior-samples)")
+    if pooled_mark is not None:
+        print(f"  pooled marginal    : {pooled_mark_name} — " + ", ".join(
+            f"{CONDITION_DISPLAY.get(k, k)} {pooled_mark[e, 0]:.3g}(first param)"
+            for e, k in enumerate(kinds)))
     print(f"  recovery annotation: " + ("off" if recovery is None else
           ", ".join(f"{tdk.band_label(b)}" for b, _ in recovery)) + "\n")
 
@@ -918,7 +982,8 @@ def run_temporal_dynamics(cfg, args):
             # The spacing is part of the filename, so the two views coexist and a run with a
             # different --pooled-scale cannot silently overwrite the other one.
             for scale in POOLED_SCALES[args.pooled_scale]:
-                figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale=scale)
+                figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale=scale,
+                                      mark=pooled_mark, mark_name=pooled_mark_name)
                 stem = f"{key}_temporal_posterior_pooled" + ("" if scale == "linear" else "_log")
                 figq.savefig(str(spec.fig_dir / f"{stem}.png"), dpi=180)
                 plt.close(figq)
@@ -934,7 +999,7 @@ def run_temporal_dynamics(cfg, args):
             "pooled_scale": args.pooled_scale,
             "edges": [float(t) for t in edges], "centers": [float(t) for t in centers]}
     _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj,
-                  pooled)
+                  pooled, pooled_mark_name)
     print(f"  wrote report.md\n\nDone: {len(results)} parameter(s) in {spec.fig_dir}")
     return 0
 
@@ -969,6 +1034,18 @@ def build_parser(description):
                         "parameter spanning orders of magnitude (the counts span 1-316) the linear "
                         "axis compresses the low end, so 'log' or 'both' is the better choice when "
                         "the low end is the question.")
+    p.add_argument("--pooled-mark", choices=("median", "mean", "geometric-mean", "none"),
+                   default="median",
+                   help="Which MARGINAL center of the pooled posterior to mark on the histogram, "
+                        "alongside the trajectory-level medoid. 'median' (default) is the marginal "
+                        "median: it is equivariant, so the value does not depend on whether it is "
+                        "computed in absolute or log10 units. 'mean' is the arithmetic mean in "
+                        "absolute units, which is NOT equivariant -- it differs from the geometric "
+                        "mean by a factor that grows with the spread, so it partly reports the "
+                        "choice of basis; 'geometric-mean' is that counterpart, the mean in the "
+                        "space the prior is uniform in. 'none' marks only the medoid. All of them "
+                        "are per-coordinate composites and describe a marginal, never the "
+                        "condition's parameter vector.")
     p.add_argument("--params", type=str, default=None,
                    help="comma-separated parameter keys to plot (default: all). Filters the "
                         "FIGURES only -- the central estimates are computed on the full parameter "
