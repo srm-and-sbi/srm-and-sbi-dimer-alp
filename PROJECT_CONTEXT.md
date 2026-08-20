@@ -599,6 +599,21 @@ rather than a single monolithic support file. The modules and their roles:
   posterior-predictive video comparison: render a synthetic video at the
   parameters inferred from one real recording and put the two side by side; its
   two namespaced Analysis shims share it.
+- **`temporal_dynamics.py`** — the workflow-agnostic temporal-dynamics kernel:
+  scatters the per-window Experiment estimates into a (condition, recording,
+  window) grid; forms the two Sample-Geometric-Median central estimates (the
+  trajectory-level medoid, one real recording across the whole time course, and
+  the per-time-point medoid, whose selected recording may change between time
+  points); fits the per-recording drift in dex with its sign-consistency and
+  signed-rank test; and separates the within-window posterior spread from the
+  between-cell spread so the two are never conflated.
+- **`temporal_dynamics_runner.py`** — the shared engine for the temporal-dynamics
+  analysis (does an inferred value hold still across a recording?); its two
+  namespaced Analysis shims share it. Both workflows must be run to interpret
+  either: biology holds imaging fixed and so is blind to imaging drift, the
+  detector marginalizes the reaction-diffusion block and so is blind to
+  biological drift, and the two read the same recordings — each is the other's
+  control, and neither attributes a cause alone.
 - **`io.py`** — file I/O: transparent loading of `.zarr`/`.npy`/`.npz`, video
   and theta-set writing, and bit-depth conversion. All paths come from the
   configuration helpers, never hardcoded.

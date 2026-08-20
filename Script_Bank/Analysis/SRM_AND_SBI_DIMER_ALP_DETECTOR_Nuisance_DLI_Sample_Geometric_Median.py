@@ -58,6 +58,7 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from srm_and_sbi_dimer_alp import detector_nuisance_dli as ndli
+from srm_and_sbi_dimer_alp import sample_geometric_median as sgm_kernel
 from srm_and_sbi_dimer_alp import detector_parameterization as det
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.parameterization import PARAMETERS, RunTiming
@@ -141,21 +142,11 @@ def _resolve(total_time_seconds):
 # shared with the Nuisance_DLI build's sgm_percentiles selection so both use one implementation.
 
 
-def _typicality(vecs_abs, range_abs, point_abs, rng):
-    """Local density and Mahalanobis distance of a single point relative to the cloud, in prior-range-
-    normalized absolute space. Density is a subsampled Gaussian-kernel estimate; both are relative reads."""
-    m = vecs_abs / range_abs
-    x = point_abs / range_abs
-    mean = m.mean(0)
-    cov_inv = np.linalg.pinv(np.cov(m, rowvar=False))
-    maha = float(np.sqrt((x - mean) @ cov_inv @ (x - mean)))
-    from scipy.stats import gaussian_kde
-    sub = m if m.shape[0] <= _KDE_SUBSAMPLE else m[rng.choice(m.shape[0], _KDE_SUBSAMPLE, replace=False)]
-    try:
-        density = float(gaussian_kde(sub.T)(x.reshape(-1, 1))[0])
-    except np.linalg.LinAlgError:
-        density = float("nan")
-    return maha, density
+# The typicality read and the summary-vector construction are the shared kernel's
+# (srm_and_sbi_dimer_alp.sample_geometric_median): one implementation repo-wide, so a fix
+# there — such as computing the SGM's in-box status instead of asserting it — cannot miss
+# this consumer. Private copies of both lived here and drifted from the kernel.
+_typicality = sgm_kernel.typicality
 
 
 def _per_window_sgm(flat_log, labels, cache_path, range_abs):
@@ -285,38 +276,8 @@ def _load_collection(args, R):
     return vecs, keys, choice, mode, vecs.shape[0], source + suffix
 
 
-def _summary_vectors(pool_log, low, high, rng):
-    """Compute the SGM and vector-of-medians (absolute + log10) for the full pool and the in-box
-    subcollection, plus the typicality of each vector of medians. Returns a list of per-variant dicts."""
-    a_low, a_high = 10.0 ** low, 10.0 ** high
-    a_range = a_high - a_low
-    in_box = np.all((pool_log >= low) & (pool_log <= high), axis=1)
-    variants = [("unrestricted", np.ones(pool_log.shape[0], dtype=bool)),
-                ("bounded_in_box", in_box)]
-    out = []
-    for name, mask in variants:
-        subset_log = pool_log[mask]
-        if subset_log.shape[0] == 0:
-            out.append(dict(variant=name, n=0))
-            continue
-        subset_abs = 10.0 ** subset_log
-        idx, method = ndli.sample_geometric_median(subset_abs, a_range)
-        sgm_abs = subset_abs[idx]
-        vom_abs = np.median(subset_abs, axis=0)
-        maha_s, dens_s = _typicality(subset_abs, a_range, sgm_abs, rng)
-        maha_v, dens_v = _typicality(subset_abs, a_range, vom_abs, rng)
-        out.append(dict(
-            variant=name, n=int(subset_log.shape[0]), method=method,
-            sgm_abs=sgm_abs, sgm_log=np.log10(sgm_abs), sgm_in_box=True,
-            vom_abs=vom_abs, vom_log=np.log10(vom_abs),
-            vom_in_box=bool(np.all((np.log10(vom_abs) >= low) & (np.log10(vom_abs) <= high))),
-            box_dist=float(np.linalg.norm((sgm_abs - vom_abs) / a_range)),
-            maha_sgm=maha_s, maha_vom=maha_v,
-            density_ratio=(dens_v / dens_s if dens_s and np.isfinite(dens_s) else float("nan"))))
-    return out, in_box
+_summary_vectors = sgm_kernel.summary_vectors
 
-
-# ---- figures (object API; each returns a Figure, never saves) ----------------------------------
 
 def _figure_plane(pool_log, results, keys, low, high, xi, yi, rng):
     idx = (np.arange(pool_log.shape[0]) if pool_log.shape[0] <= _FIGURE_SUBSAMPLE

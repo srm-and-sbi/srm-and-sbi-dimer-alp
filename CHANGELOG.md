@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.16 - 2026-08-20
+
+The temporal-dynamics analysis becomes workflow-general, gains a correlation-preserving central
+estimate and an uncertainty view, and supplies the confound test neither workflow can run on itself.
+
+### Added
+
+- **Temporal dynamics for both workflows.** New workflow-agnostic kernel `temporal_dynamics.py`
+  and shared engine `temporal_dynamics_runner.py`, with the biology entry point reduced to a thin
+  shim and a new `..._DETECTOR_Experiment_Temporal_Dynamics.py`. The analysis stacks the Experiment
+  stage's per-window estimates along time to ask whether an inferred value holds still across a
+  recording. Running it for both workflows is not symmetry for its own sake: biology holds imaging
+  fixed and is therefore blind to imaging drift, the detector marginalizes the reaction-diffusion
+  block and is blind to biological drift, and the two read the same recordings — so each is the
+  other's control, and neither attributes a cause alone.
+- **Sample-Geometric-Median central estimates, replacing the cross-recording mean.** Averaging each
+  parameter independently across recordings composes a vector whose coordinates never co-occurred.
+  Two SGM variants are provided instead, in prior-range-normalized absolute space: the
+  **trajectory-level** medoid (one real recording across the whole time course — the headline, so no
+  step can be an artifact of switching recordings) and the **per-time-point** medoid (jointly
+  realized within a time point, but its selected recording can change between them, so the selected
+  recordings are printed in the legend and the report). The mean is retained as a dotted comparison
+  line, since the gap between it and the SGM is itself informative. Both variants are computed on
+  the full parameter vector, so `--params` filters the figures only.
+- **Uncertainty figures with the two uncertainties kept apart.** A second figure per parameter
+  carries the within-window posterior spread (median across recordings of one window's interval) and
+  the between-cell spread (percentiles across recordings of the per-window median) in separate
+  panels, because plotting them together would let a wide posterior masquerade as heterogeneity.
+  They are built from the stored five-quantile summary and therefore show interval **widths**, not a
+  posterior **density**; a pooled density still requires the per-window sample clouds the Experiment
+  stage does not persist, and the analysis does not approximate it.
+- **Drift statistics** per recording: an OLS fit of log10 estimate against time reported as total
+  change in dex, aggregated by median with the fraction exceeding 0.3 dex, the sign-consistency, and
+  a two-sided Wilcoxon signed-rank test. Fit per recording, so they are independent of the display
+  choice — verified unchanged against the previous implementation.
+- Figures use a log-scaled physical y-axis with a mirrored right-hand axis in log10 (dex), so one
+  panel carries both readings; the dex ticks are placed explicitly because composing a log10
+  transform with an already-logarithmic parent scale applies it twice.
+- External reference values are **scoped**: drawn only on the parameters they constrain and only for
+  the conditions they describe. The detector references carry their documented caveats — the dimer
+  condition's PSF width is dimer-broadened and its localization brightness is a two-label
+  per-detection sum, and the two population log-spreads are upper-biased by localization fitting
+  error, so their fitted values are drawn as upper bounds rather than targets.
+
+### Fixed
+
+- The detector `Nuisance_DLI` sample-geometric-median analysis carried private copies of the
+  typicality and summary-vector numerics, so the computed `sgm_in_box` status did not reach it. Both
+  copies now delegate to the shared kernel; verified behavior-preserving, with every numeric value
+  in its report unchanged.
+- Documentation realigned with the implementation: the temporal-dynamics companion rewritten as the
+  authoritative note for both workflows (the two central estimates and the per-time-point switching
+  confound, the display-independence of the drift statistics, the quantile-widths-not-density limit,
+  the two-panel separation, the axis convention, the cross-workflow confound logic, and the scoped
+  references), a new detector pointer companion, the two new modules added to the package layout in
+  `PROJECT_CONTEXT.md`, and `DETECTOR_WORKFLOW.md` extended with the detector analysis in its
+  inventory, the within-recording evidence bearing on `prob_photo_bleach` (a measured
+  non-stationarity of the inferred parameter, not a measurement of true bleaching kinetics), a
+  finer within-recording check for the flicker rate, and within-recording non-stationarity as a
+  realism gap the pooled embedding distance cannot localize.
+
 ## 0.4.15 - 2026-08-19
 
 Correctness, calibration-report, and consistency release: video-granularity sharding for the
