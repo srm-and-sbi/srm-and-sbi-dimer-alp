@@ -34,6 +34,7 @@ import torch._dynamo
 from srm_and_sbi_dimer_alp import artifacts
 from srm_and_sbi_dimer_alp.diagnostics import DiagnosticReporter
 from srm_and_sbi_dimer_alp.evaluation import (
+    band_label,
     map_estimate,
     posterior_coverage_table,
     posterior_summary,
@@ -139,9 +140,13 @@ def write_recovery_outputs(reporter, args, eval_cfg, draw_spec, recovery_array_p
                                    guide, guide_tight)
     reporter.table(
         "MAP recovery (per parameter, log10 units)", headers, rows,
-        note=f"error = inferred - true in log10 units; 'within +/-{guide:g}' "
-             f"(factor 2) and 'within +/-{guide_tight:g}' (factor sqrt(2)) are the "
-             "fractions of EVAL videos recovered inside each nested tolerance band.")
+        note=f"error = inferred - true in log10 units. The two 'within' columns are "
+             f"the fractions of EVAL videos recovered inside each nested tolerance "
+             f"band, stated as the multiplicative range the band permits: "
+             f"{band_label(guide)} is +/-{guide:g} in log10 (a factor of two) and "
+             f"{band_label(guide_tight)} is +/-{guide_tight:g} (a factor of the "
+             f"square root of two). A value inside {band_label(guide_tight)} is "
+             f"also inside {band_label(guide)}.")
 
     # View B: posterior calibration (coverage of truth by credible intervals).
     if post_q is not None:

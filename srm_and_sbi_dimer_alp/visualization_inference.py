@@ -13,6 +13,10 @@ overlays, etc.) can be added here as further analyses are developed.
 
 import numpy as np
 
+# Shared with the Evaluation report so a tolerance is written the same way in the table and on the
+# figure; derived from the guide value passed in, never hardcoded, so a reconfigured band stays true.
+from .temporal_dynamics import band_label
+
 
 def plot_loss_curves(losses_train: np.ndarray,
                      losses_test: np.ndarray,
@@ -203,10 +207,10 @@ def _draw_error_axis(ax, true_log10, inferred_log10, prior_range=None,
     ax.axhline(0.0, color="k", linestyle="--", alpha=0.75)
     # Factor-2 band (0.3 = log10 2) and the tighter factor-sqrt(2) band (0.15 = log10 sqrt 2).
     ax.axhline(+error_guide, color="k", linestyle=":", alpha=0.60,
-               label=rf"$\pm${error_guide:g} (factor 2)")
+               label=rf"$\pm${error_guide:g} = {band_label(error_guide)}")
     ax.axhline(-error_guide, color="k", linestyle=":", alpha=0.60)
     ax.axhline(+error_guide_tight, color="k", linestyle=(0, (1, 3)), alpha=0.45,
-               label=rf"$\pm${error_guide_tight:g} (factor $\sqrt{{2}}$)")
+               label=rf"$\pm${error_guide_tight:g} = {band_label(error_guide_tight)}")
     ax.axhline(-error_guide_tight, color="k", linestyle=(0, (1, 3)), alpha=0.45)
     ax.scatter(x, error, s=7, color="tab:blue", alpha=0.25)
     centers, q05, q25, q50, q75, q95 = _conditional_quantiles(

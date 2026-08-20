@@ -35,6 +35,9 @@ import numpy as np
 import torch
 
 from .inference_support import normalize_video
+# band_label lives in the temporal-dynamics kernel (pure numpy, no machine profile) so the
+# recovery tolerances render identically wherever they are reported -- one definition, not two.
+from .temporal_dynamics import band_label
 
 
 # =============================================================================
@@ -462,12 +465,16 @@ def recovery_table(parameterization, true_log10: np.ndarray,
 
     One row per learnable parameter, with the error statistics from
     ``recovery_stats``. Two "within" columns report the fraction recovered inside
-    the +/-guide band (0.3 ~= log10(2), factor 2) and the tighter +/-guide_tight
-    band (0.15 ~= log10(sqrt(2)), factor sqrt(2)). ``parameterization`` is the
+    the +/-guide band and the tighter, nested +/-guide_tight band. Both columns are
+    headed by the multiplicative range the tolerance permits rather than its log10
+    half-width -- ``[0.50x, 2.00x]`` for 0.3 dex and ``[0.71x, 1.41x]`` for 0.15 --
+    because that is the form in which a reader can judge whether a parameter is
+    usable, without doing the arithmetic first. ``parameterization`` is the
     learnable-only ``PARAMETERIZATION`` list (its order matches the theta columns).
     """
     headers = ["parameter", "label", "n", "median err", "MAE", "RMSE",
-               "q95|err|", f"within +/-{guide:g}", f"within +/-{guide_tight:g}"]
+               "q95|err|", f"within {band_label(guide)}",
+               f"within {band_label(guide_tight)}"]
     stats = recovery_stats(true_log10, inferred_log10, guide, guide_tight)
     rows = []
     for para, st in zip(parameterization, stats):

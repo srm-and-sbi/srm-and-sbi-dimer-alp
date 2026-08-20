@@ -74,6 +74,22 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   per-detection sum, and the two population log-spreads are upper-biased by localization fitting
   error, so their fitted values are drawn as upper bounds rather than targets.
 
+### Changed
+
+- **The Evaluation stage states its recovery tolerances as multiplicative ranges.** The two
+  "within" columns of the MAP-recovery table were headed `within +/-0.3` and `within +/-0.15` --
+  log10 half-widths that require mental arithmetic before they can be judged. They are now headed
+  `within [0.50x, 2.00x]` and `within [0.71x, 1.41x]`, the value ranges those tolerances actually
+  permit, and the table note explains the correspondence and the nesting. The error-axis figure's
+  guide lines keep their dex position, since that is the coordinate they occupy on a log10 error
+  axis, but their labels now carry the range as well. This is the same wording the temporal-dynamics
+  figures use, so a tolerance reads identically wherever it is reported.
+- `band_label` is defined once, in the temporal-dynamics kernel, and imported by the Evaluation
+  module and the inference visualizations. The kernel is the only one of the three that imports
+  without a machine profile, which fixes the direction of the dependency. The figure labels derive
+  from the guide value passed in rather than hardcoding `[0.50x, 2.00x]`, so a reconfigured band
+  cannot silently produce a label that contradicts the line it names.
+
 ### Fixed
 
 - The temporal report is written directly rather than through `DiagnosticReporter`, so it did not
