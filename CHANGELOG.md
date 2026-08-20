@@ -48,7 +48,13 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   by construction. On the current data the two families differ by factors of about 1.05 to 4
   depending on the parameter.
 - Figures use a **linear y-axis in absolute units**; decade-space quantities live in the report
-  table. The drift annotations sit below the axes, where they cannot collide with the legend.
+  table. Series are drawn as **steps held across each window** rather than lines between chunk
+  points, which would imply an interpolation the analysis never computed, so the time axis spans the
+  recording's true extent (ten 2 s windows reach 20 s, not 18) and the per-recording traces and
+  posterior bands share the rendering. The drift regression uses window centres, which leaves every
+  drift statistic unchanged and shifts only the reported endpoints by half a window. Titles wrap
+  rather than overflow, and the drift statistics are tabulated in the report instead of annotated on
+  the axes.
 - External reference labels carry the mean, the numeric bounds, the unit, the source, and the
   conditions the reference applies to, and each figure states the ratio of its summary line to that
   reference; the report adds an inside/outside verdict against the band.

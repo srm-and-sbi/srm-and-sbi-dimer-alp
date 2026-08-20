@@ -265,28 +265,26 @@ def _apply_reference(ax, ref, source_short):
 # =============================================================================
 
 def _figure_trajectory(spec, p_index, key, abs_grid, series, line, family, picks_window,
-                       picks_traj, x, kinds, drift, recovery_frac):
-    """The central-trajectory figure: one curve per condition, its summary line, and the reference.
+                       picks_traj, edges, kinds, drift, recovery_frac):
+    """The central-trajectory figure: one estimate family, drawn as steps over each window.
 
-    Deliberately sparse. Earlier versions drew several central estimates at once and the figure
-    became unreadable, so exactly one estimate family is drawn: the ``<family>-window`` timeseries
-    (solid) and its paired ``<family>-trajectory`` summary (dashed horizontal), never a mixture.
-    Behind them sit the individual cell trajectories, faint, as the population the estimate
-    summarizes. Three numbers per condition are annotated -- the absolute change over the recording,
-    the fraction of cells agreeing on its direction, and, where a reference legitimately applies,
-    the ratio of the summary line to that reference -- and everything else lives in the report.
+    Deliberately sparse. Exactly one family is drawn -- the ``<family>-window`` timeseries as a step
+    held across each window, and its paired ``<family>-trajectory`` summary as a horizontal line --
+    never a mixture, with the individual recordings faint behind them. Numbers are confined to the
+    legend and the report: annotating drift statistics on the axes added clutter without helping
+    anyone read the data.
     """
     para = spec.table[p_index]
     name = spec.display.get(key, key)
     ref = spec.references.get(key)
-    fig, ax = plt.subplots(figsize=(7.0, 5.2))
+    fig, ax = plt.subplots(figsize=(7.0, 5.0))
     hi, lo = -np.inf, np.inf
 
     for e, kind in enumerate(kinds):
         color = CONDITION_COLOR.get(kind, f"C{e}")
         data = abs_grid[e, :, :, p_index]
         for c in range(data.shape[0]):
-            ax.plot(x, data[c], color=color, linestyle="-", alpha=0.11, linewidth=0.8)
+            ax.step(edges, _step(data[c]), where="post", color=color, alpha=0.11, linewidth=0.8)
         fin = data[np.isfinite(data)]
         if fin.size:                              # robust limits: outlying traces clip
             hi = max(hi, float(np.nanpercentile(fin, 92)))
@@ -297,49 +295,34 @@ def _figure_trajectory(spec, p_index, key, abs_grid, series, line, family, picks
         hi, lo = max(hi, r_hi), min(lo, r_lo)
 
     applies = None if ref is None else ref.get("applies_to")
-    raw_unit = para.get("UNIT")
-    unit_note = (_UNIT_SHORT.get(raw_unit, raw_unit) if raw_unit
-                 else _UNIT_BY_KEY.get(key, ""))
-    notes = []
+    r_mean = None if ref is None else _reference_band(ref)[0]
     for e, kind in enumerate(kinds):
         color = CONDITION_COLOR.get(kind, f"C{e}")
         disp = CONDITION_DISPLAY.get(kind, kind)
-        ax.plot(x, series[e, :, p_index], color=color, linestyle="-", linewidth=2.6,
-                label=f"{disp} {family}-window")
+        ax.step(edges, _step(series[e, :, p_index]), where="post", color=color,
+                linewidth=2.6, label=f"{disp} {family}-window")
         lv = line[e, p_index]
-        ax.axhline(lv, color=color, linestyle="--", linewidth=1.4, alpha=0.9,
-                   label=f"{disp} {family}-trajectory = {lv:.3g}")
-        # Three numbers per condition, in absolute units matching the axis. Rendered BELOW the
-        # axes rather than inside them: in-axes annotations collided with the legend, and neither
-        # can be moved reliably when the legend is auto-placed.
-        note = (f"{disp}: {drift['drift_absolute'][e, p_index]:+.3g} {unit_note} over "
-                f"{x[-1] - x[0]:g} s   ·   "
-                f"{100 * drift['drift_sign_consistency'][e, p_index]:.0f}% of recordings agree on "
-                f"the direction")
-        if ref is not None and (applies is None or disp in applies):
-            r_mean = _reference_band(ref)[0]
-            if np.isfinite(lv) and r_mean:
-                note += f"   ·   {family}-trajectory is {lv / r_mean:.2g}x the reference"
-        notes.append((note, color))
+        lab = f"{disp} {family}-trajectory = {lv:.3g}"
+        if r_mean and (applies is None or disp in applies) and np.isfinite(lv):
+            lab += f"  ({lv / r_mean:.2g}x reference)"
+        ax.axhline(lv, color=color, linestyle="--", linewidth=1.4, alpha=0.9, label=lab)
 
-    _finish_axes(ax, x, para, spec, lo, hi)
+    _finish_axes(ax, edges, para, spec, lo, hi)
     title = f"{name} ({para['LABEL']}) over the recording"
     if recovery_frac is not None:
-        title += f"  —  held-out recovery within a factor of 2: {recovery_frac[p_index] * 100:.0f}%"
+        title += f"\nheld-out recovery within a factor of 2: {recovery_frac[p_index] * 100:.0f}%"
     ax.set_title(title, fontsize=10.5)
     ax.legend(fontsize=7.5, framealpha=0.9, loc="best")
-    fig.tight_layout(rect=(0, 0.045 * len(notes), 1, 1))
-    for i, (note, color) in enumerate(notes):
-        fig.text(0.012, 0.012 + 0.042 * (len(notes) - 1 - i), note, fontsize=8, color=color)
+    fig.tight_layout()
     return fig
 
 
-def _figure_posterior(spec, p_index, key, within, series, family, x, kinds):
-    """Within-window posterior interval over the recording -- one panel, one quantity.
+def _figure_posterior(spec, p_index, key, within, series, family, edges, kinds):
+    """Within-window posterior interval over the recording -- one panel, one quantity, as steps.
 
     At each chunk, the median across cells of that window's stored posterior interval: how uncertain
-    a TYPICAL SINGLE window's estimate is. The ``<family>-window`` timeseries is drawn on top as the
-    anchor, and the reference band where one applies.
+    a TYPICAL SINGLE window's estimate is. Drawn as bands held across each window, matching the
+    trajectory figure, with the ``<family>-window`` series on top as the anchor.
 
     This is an interval WIDTH built from the stored five-quantile record -- not a posterior density.
     A density pooled over windows requires the per-window sample clouds, which the Experiment stage
@@ -348,17 +331,17 @@ def _figure_posterior(spec, p_index, key, within, series, family, x, kinds):
     para = spec.table[p_index]
     name = spec.display.get(key, key)
     ref = spec.references.get(key)
-    fig, ax = plt.subplots(figsize=(7.0, 5.0))
+    fig, ax = plt.subplots(figsize=(7.0, 4.9))
     hi, lo = -np.inf, np.inf
     for e, kind in enumerate(kinds):
         color = CONDITION_COLOR.get(kind, f"C{e}")
         disp = CONDITION_DISPLAY.get(kind, kind)
         q = 10.0 ** within[e, :, p_index, :]
-        ax.fill_between(x, q[:, 0], q[:, 4], color=color, alpha=0.15, linewidth=0,
-                        label=f"{disp} posterior 5–95% (typical window)")
-        ax.fill_between(x, q[:, 1], q[:, 3], color=color, alpha=0.30, linewidth=0,
-                        label=f"{disp} posterior 25–75%")
-        ax.plot(x, series[e, :, p_index], color=color, linestyle="-", linewidth=2.2,
+        ax.fill_between(edges, _step(q[:, 0]), _step(q[:, 4]), step="post", color=color,
+                        alpha=0.15, linewidth=0, label=f"{disp} posterior 5–95% (typical window)")
+        ax.fill_between(edges, _step(q[:, 1]), _step(q[:, 3]), step="post", color=color,
+                        alpha=0.30, linewidth=0, label=f"{disp} posterior 25–75%")
+        ax.step(edges, _step(series[e, :, p_index]), where="post", color=color, linewidth=2.2,
                 label=f"{disp} {family}-window")
         fin = q[np.isfinite(q)]
         if fin.size:
@@ -367,8 +350,8 @@ def _figure_posterior(spec, p_index, key, within, series, family, x, kinds):
     if ref is not None:
         r_lo, r_hi = _apply_reference(ax, ref, spec.reference_short)
         hi, lo = max(hi, r_hi), min(lo, r_lo)
-    _finish_axes(ax, x, para, spec, lo, hi)
-    ax.set_title(f"Within-window posterior interval — {name} ({para['LABEL']})", fontsize=10.5)
+    _finish_axes(ax, edges, para, spec, lo, hi)
+    ax.set_title(f"Within-window posterior interval\n{name} ({para['LABEL']})", fontsize=10.5)
     ax.legend(fontsize=7, framealpha=0.9, loc="best")
     fig.tight_layout()
     return fig
@@ -385,7 +368,20 @@ def _cells_label(cells):
            ("…" if len(uniq) > 6 else "")
 
 
-def _finish_axes(ax, x, para, spec, lo, hi):
+def _step(y):
+    """Extend a per-chunk series so a step plot holds each value across its whole window.
+
+    Each estimate summarizes one window, not an instant, so the honest rendering is a piecewise
+    constant held from the window's start to its end -- straight lines between chunk points would
+    draw an interpolation the analysis never computed. Paired with ``edges`` (one more point than
+    chunks) and ``where="post"``, this repeats the last value so the final window is drawn to the
+    recording's true end.
+    """
+    y = np.asarray(y, dtype=float)
+    return np.append(y, y[-1])
+
+
+def _finish_axes(ax, x_edges, para, spec, lo, hi):
     """Linear y-axis in the parameter's own absolute units, with robust limits.
 
     Absolute units, not log: the readable quantity is the value and its absolute change, and a log
@@ -396,8 +392,8 @@ def _finish_axes(ax, x, para, spec, lo, hi):
     re-reading the axis.
     """
     ax.set_xlabel("time [s]")
-    ax.set_xlim(float(x[0]), float(x[-1]))
-    ax.set_xticks(x)
+    ax.set_xlim(float(x_edges[0]), float(x_edges[-1]))
+    ax.set_xticks(x_edges)
     raw_unit = para.get("UNIT")
     unit = (_UNIT_SHORT.get(raw_unit, raw_unit) if raw_unit
             else _UNIT_BY_KEY.get(para.get("KEY", ""), "absolute"))
@@ -424,8 +420,8 @@ def _write_report(spec, meta, results, drift, kinds, family, line, picks_window,
          f"Run: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}", ""]
     L.append(f"Generated from `{meta['npz_name']}`. **{meta['n_estimates']} MAP estimates** = "
              f"{len(kinds)} conditions × {meta['n_cells']} recordings × {meta['n_chunks']} "
-             f"non-overlapping {meta['step']:g} s windows. Time points: "
-             f"{', '.join(f'{t:g}' for t in meta['x'])} s. Conditions: {', '.join(displays)} "
+             f"non-overlapping {meta['step']:g} s windows spanning "
+             f"[{meta['edges'][0]:g}, {meta['edges'][-1]:g}) s. Conditions: {', '.join(displays)} "
              f"(stored tokens {', '.join(kinds)}). Central-estimate family: **{family}**.")
     L.append("")
     L.append("## What the analysis asks, and what it cannot answer alone")
@@ -654,7 +650,12 @@ def run_temporal_dynamics(cfg, args):
     grid, n_cells, n_chunks = tdk.reshape_to_grid(
         inferred_log10, kind_index, cell, chunk, len(kinds))
     abs_grid = 10.0 ** grid
-    x = step * np.arange(n_chunks)
+    # A chunk is a WINDOW, not an instant. Edges span the recording's true extent (n_chunks*step,
+    # e.g. 0..20 s for ten 2 s windows) and drive the step plots; the drift fit uses window CENTRES,
+    # which is where each estimate's information actually sits. The fitted slope, and hence every
+    # drift statistic, is identical either way -- only the reported endpoints shift by half a window.
+    edges = step * np.arange(n_chunks + 1)
+    centers = step * (np.arange(n_chunks) + 0.5)
 
     # The chosen family fixes BOTH the timeseries and its summary line, so a figure never mixes a
     # mean with a medoid. Every kernel function below already returns ABSOLUTE units.
@@ -665,7 +666,7 @@ def run_temporal_dynamics(cfg, args):
     else:
         series, picks_window = tdk.mean_window(grid), None
         line, picks_traj = tdk.mean_trajectory(grid), None
-    drift = tdk.drift_statistics(grid, x)
+    drift = tdk.drift_statistics(grid, centers)
 
     within = None
     if quant is not None and quant.size:
@@ -681,7 +682,8 @@ def run_temporal_dynamics(cfg, args):
 
     print(f"\nLoaded {inferred_log10.shape[0]} estimates: {len(kinds)} conditions x "
           f"{n_cells} recordings x {n_chunks} windows.")
-    print(f"  time points        : {[float(t) for t in x]} s")
+    print(f"  windows            : " + ", ".join(
+        f"[{edges[i]:g},{edges[i + 1]:g})" for i in range(n_chunks)) + " s")
     print(f"  central estimate   : {family}-window (timeseries) + {family}-trajectory (line)")
     if family == "sgm":
         print("  sgm-window cells   : " + ", ".join(
@@ -701,12 +703,12 @@ def run_temporal_dynamics(cfg, args):
         if wanted is not None and key not in wanted:
             continue
         fig = _figure_trajectory(spec, p_index, key, abs_grid, series, line, family,
-                                 picks_window, picks_traj, x, kinds, drift, recovery_frac)
+                                 picks_window, picks_traj, edges, kinds, drift, recovery_frac)
         fig.savefig(str(spec.fig_dir / f"{key}_temporal.png"), dpi=180)
         plt.close(fig)
         note = ""
         if within is not None:
-            figp = _figure_posterior(spec, p_index, key, within, series, family, x, kinds)
+            figp = _figure_posterior(spec, p_index, key, within, series, family, edges, kinds)
             figp.savefig(str(spec.fig_dir / f"{key}_temporal_posterior.png"), dpi=180)
             plt.close(figp)
             note = " + posterior"
@@ -717,7 +719,7 @@ def run_temporal_dynamics(cfg, args):
 
     meta = {"npz_name": spec.npz_path.name, "n_estimates": int(inferred_log10.shape[0]),
             "n_cells": n_cells, "n_chunks": n_chunks, "step": step,
-            "x": [float(t) for t in x]}
+            "edges": [float(t) for t in edges], "centers": [float(t) for t in centers]}
     _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj)
     print(f"  wrote report.md\n\nDone: {len(results)} parameter(s) in {spec.fig_dir}")
     return 0

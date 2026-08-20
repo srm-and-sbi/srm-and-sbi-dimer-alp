@@ -125,13 +125,28 @@ When a parameter's interval spans essentially its whole prior, the posterior is 
 and the point estimate is the prior's center regardless of the data — a direct picture of
 non-identifiability.
 
-## Axis convention
+## Axis and rendering conventions
 
-The y-axis is **linear, in the parameter's own absolute units** — the readable quantities are the
-value and its absolute change. Decade-space quantities (`drift-dex`, `drift-fold`) live in the
-report table instead, so the axis carries one scale and no reader has to translate. Limits come from
-a robust percentile range of the data extended by the reference band, so a few outlying per-cell
-traces clip rather than compressing the informative region.
+**Linear, absolute units.** The y-axis carries the parameter's own absolute units — the readable
+quantities are the value and its absolute change. Decade-space quantities (`drift-dex`,
+`drift-fold`) live in the report table instead, so the axis carries one scale and no reader has to
+translate. Limits come from a robust percentile range of the data extended by the reference band, so
+a few outlying per-recording traces clip rather than compressing the informative region.
+
+**Steps, not lines.** Each estimate summarizes a *window*, not an instant, so every series is drawn
+as a piecewise constant held from its window's start to its end. Straight lines between chunk points
+would draw an interpolation the analysis never computed. The time axis therefore spans the
+recording's true extent — ten 2 s windows reach **20 s**, not 18 — and the same rendering applies to
+the per-recording traces and to the posterior bands.
+
+**Windows are fit at their centres.** The drift regression uses each window's centre time, which is
+where its information sits. The fitted slope is identical to using window starts, so every drift
+statistic is unaffected; only the reported endpoints shift by half a window.
+
+**Numbers live in the report, not on the axes.** The figure carries the reference label with its
+bounds and the `*-trajectory` value with its ratio to the reference. The drift statistics are
+tabulated in `report.md` rather than annotated on the plot, where they added clutter without helping
+anyone read the data.
 
 ## External reference values are scoped
 
