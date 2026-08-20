@@ -47,7 +47,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")            # headless: build and save figures without a display
 import matplotlib.pyplot as plt
-from matplotlib.ticker import AutoMinorLocator, MaxNLocator
+from matplotlib.ticker import AutoMinorLocator, FuncFormatter, MaxNLocator
 
 from . import temporal_dynamics as tdk
 from .parameterization import PARAMETERS, RunTiming
@@ -55,7 +55,8 @@ from .workflow import parameter_keys, parameter_table
 
 # Conditions are named scientifically wherever a reader sees them; the tokens below survive only
 # as the stored ``kinds`` field of the Experiment output and the recording filenames on disk.
-CONDITION_DISPLAY = {"ALP": "MET-FAB", "BET": "MET-INLB"}
+# Condition naming (stored token <-> scientific name) has ONE definition, in experiment_support.
+from .experiment_support import CONDITION_DISPLAY  # noqa: F401  (re-exported for figures)
 
 # Bins for the pooled posterior density, spread uniformly over the prior's decades. The pooled set
 # holds hundreds of thousands of draws, so the bin count is not sample-limited; it is chosen for
@@ -370,18 +371,28 @@ def _figure_posterior(spec, p_index, key, within, series, family, edges, kinds):
     return fig
 
 
-def _figure_pooled(spec, p_index, key, pooled, line, family, kinds):
+def _figure_pooled(spec, p_index, key, pooled, line, family, kinds, scale="log"):
     """Pooled posterior density over the whole recording -- the classic histogram, time collapsed.
 
-    Every window's draws for a condition are pooled and binned uniformly across the prior's decades,
-    which is where a log-uniform prior is flat, so the plotted height is a density PER DECADE and
-    the prior itself is a horizontal line at ``1 / (hi - lo)``. Drawing that line makes the figure
-    answer the question the time courses cannot: how much has the data narrowed this parameter
-    relative to the prior it started from? A density sitting on the prior line has learned nothing.
+    Every window's draws for a condition are pooled into one histogram. Drawing the prior on the
+    same axes makes the figure answer what the time courses cannot: how much has the data narrowed
+    this parameter relative to the prior it started from? A density lying on the prior has learned
+    nothing.
 
-    The x axis carries absolute units on a log scale -- absolute because that is the quantity of
-    interest, log-scaled because the prior and the binning are uniform in decades. No dex axis
-    appears: every tick is a value in the parameter's own units.
+    The x axis is in the parameter's own ABSOLUTE units either way -- ticks are plain values, never
+    powers of ten and never dex. ``scale`` chooses how that axis is spaced, and the binning, the
+    density's unit, and the prior's shape all follow from it consistently:
+
+    ``"log"``     bins uniform in decades, which is where a log-uniform prior is flat. Height is a
+                  density PER DECADE and the prior is the horizontal line ``1 / (hi - lo)``. This
+                  resolves the whole prior range evenly, so a parameter spanning 1..316 is legible
+                  across its entire support.
+    ``"linear"``  bins uniform in absolute units, matching the linear value axis the time-course
+                  figures use. Height is a density PER UNIT. The prior is then NOT flat: pushing a
+                  log-uniform density through ``x = 10**y`` gives ``p(x) = 1 / ((hi - lo) x ln 10)``,
+                  a 1/x curve, and that curve is what gets drawn. A flat line here would be simply
+                  wrong, and would make every parameter look as though its low end had been
+                  disfavored by the data when it was only the change of variable.
 
     The family's trajectory line is marked for reference, with the caveat that it is a MEDOID over
     windows and not the mode of this mixture; the two answer different questions and need not
@@ -391,10 +402,15 @@ def _figure_pooled(spec, p_index, key, pooled, line, family, kinds):
     name = spec.display.get(key, key)
     ref = spec.references.get(key)
     lo, hi = float(spec.prior_low[p_index]), float(spec.prior_high[p_index])
-    edges_log = np.linspace(lo, hi, POOLED_BINS + 1)
-    edges_abs = 10.0 ** edges_log
+    log_bins = scale == "log"
+    if log_bins:
+        edges_log = np.linspace(lo, hi, POOLED_BINS + 1)
+        edges = 10.0 ** edges_log                       # absolute edges, log-spaced
+    else:
+        edges = np.linspace(10.0 ** lo, 10.0 ** hi, POOLED_BINS + 1)
 
     fig, ax = plt.subplots(figsize=(7.4, 4.9))
+    peak = 0.0
     for e, kind in enumerate(kinds):
         draws = pooled[e][:, p_index]
         draws = draws[np.isfinite(draws)]
@@ -402,26 +418,52 @@ def _figure_pooled(spec, p_index, key, pooled, line, family, kinds):
             continue
         color = CONDITION_COLOR.get(kind, f"C{e}")
         disp = CONDITION_DISPLAY.get(kind, kind)
-        dens, _ = np.histogram(draws, bins=edges_log, density=True)
-        ax.stairs(dens, edges_abs, color=color, linewidth=2.0, fill=False,
+        # Bin in the space the axis is spaced in, so the plotted height is a density with respect to
+        # the axis actually shown: per decade of log10 value, or per absolute unit.
+        dens, _ = (np.histogram(draws, bins=edges_log, density=True) if log_bins
+                   else np.histogram(10.0 ** draws, bins=edges, density=True))
+        ax.stairs(dens, edges, color=color, linewidth=2.0, fill=False,
                   label=f"{disp} pooled ({draws.size:,} draws)")
-        ax.stairs(dens, edges_abs, color=color, alpha=0.16, fill=True, linewidth=0)
+        ax.stairs(dens, edges, color=color, alpha=0.16, fill=True, linewidth=0)
+        peak = max(peak, float(np.nanmax(dens)) if dens.size else 0.0)
         ax.axvline(float(line[e, p_index]), color=color, linestyle="-", linewidth=1.4, alpha=0.70,
                    label=f"{disp} {family}-trajectory = {line[e, p_index]:.3g}")
 
-    # The prior it started from: log-uniform, hence flat at 1/(hi-lo) per decade on these bins.
-    ax.axhline(1.0 / (hi - lo), color="0.35", linestyle=(0, (4, 3)), linewidth=1.5,
-               label=f"prior (log-uniform over {10 ** lo:.3g}–{10 ** hi:.3g})")
+    # The prior it started from. Flat per decade; a 1/x curve per absolute unit, because that is what
+    # a log-uniform density becomes under x = 10**y -- drawing it flat here would be wrong.
+    prior_label = f"prior (log-uniform over {10 ** lo:.3g}–{10 ** hi:.3g})"
+    if log_bins:
+        ax.axhline(1.0 / (hi - lo), color="0.35", linestyle=(0, (4, 3)), linewidth=1.5,
+                   label=prior_label)
+    else:
+        grid = np.linspace(10.0 ** lo, 10.0 ** hi, 512)
+        ax.plot(grid, 1.0 / ((hi - lo) * grid * np.log(10.0)), color="0.35",
+                linestyle=(0, (4, 3)), linewidth=1.5, label=prior_label)
     if ref is not None:
         _apply_reference(ax, ref, spec.reference_short, orient="v")
 
     raw_unit = para.get("UNIT")
     unit = (_UNIT_SHORT.get(raw_unit, raw_unit) if raw_unit
             else _UNIT_BY_KEY.get(para.get("KEY", ""), "absolute"))
-    ax.set_xscale("log")
-    ax.set_xlim(float(edges_abs[0]), float(edges_abs[-1]))
+    ax.set_xlim(float(edges[0]), float(edges[-1]))
+    if log_bins:
+        ax.set_xscale("log")
+        # Plain absolute tick values (1, 10, 100), not 10^n: the axis reads in the parameter's units.
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
+        ax.xaxis.set_minor_formatter(FuncFormatter(lambda v, _pos: ""))
+    else:
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        ax.xaxis.set_minor_locator(AutoMinorLocator(2))
     ax.set_xlabel(f"inferred [{unit}]")
-    ax.set_ylabel("posterior density [per decade]")
+    ax.set_ylabel(f"posterior density [per decade]" if log_bins
+                  else f"posterior density [per {unit}]")
+    if not log_bins and peak > 0.0:
+        # Scale to the DATA, not to the prior. Per absolute unit the log-uniform prior diverges as
+        # 1/x toward the lower limit, and letting that spike set the limit flattens the posterior
+        # into the axis. The prior curve simply leaves the top of the frame where it exceeds the
+        # data, which costs nothing: the region where the comparison is informative is the region
+        # where the two are of comparable height.
+        ax.set_ylim(0.0, 1.15 * peak)
     ax.set_title(f"Pooled posterior over the recording (time axis collapsed)\n"
                  f"{name} ({para['LABEL']})", fontsize=10.5)
     ax.legend(fontsize=7, framealpha=0.9, loc="best")
@@ -646,11 +688,16 @@ def _write_report(spec, meta, results, drift, kinds, family, line, picks_window,
     if pooled is not None:
         L.append("## Pooled posterior density (time axis collapsed)")
         L.append("")
-        L.append("`<key>_temporal_pooled.png` is the classic histogram: every window's posterior "
-                 "draws, pooled within a condition, binned uniformly across the prior's decades. "
-                 f"Height is a density **per decade** over {POOLED_BINS} bins, so the log-uniform "
-                 "prior is the flat dashed line at `1 / (log10 hi - log10 lo)` and the distance "
-                 "between a curve and that line is what the data added.")
+        L.append("`<key>_temporal_posterior_pooled.png` is the classic histogram: every window's "
+                 "posterior draws, pooled within a condition, in the parameter's absolute units. "
+                 f"This run used {POOLED_BINS} **{meta['pooled_scale']}-spaced** bins. With "
+                 "`log` spacing the bins are uniform across the prior's decades, height is a "
+                 "density **per decade**, and the log-uniform prior is the flat dashed line at "
+                 "`1 / (log10 hi - log10 lo)`. With `linear` spacing the bins are uniform in "
+                 "absolute units, height is a density **per unit**, and the prior is drawn as the "
+                 "`1 / x` curve a log-uniform density becomes under `x = 10**y` — not a flat line, "
+                 "which would misread the change of variable as evidence. Either way the distance "
+                 "between a curve and the prior is what the data added.")
         L.append("")
         L.append("**How the pooling works, exactly.** The Experiment stage draws "
                  f"{meta['n_samples_per_window']:,} samples from the posterior of every "
@@ -840,7 +887,8 @@ def run_temporal_dynamics(cfg, args):
         print(f"  pooled density     : on — " + ", ".join(
             f"{CONDITION_DISPLAY.get(k, k)} {pooled[e].shape[0]:,} draws"
             for e, k in enumerate(kinds))
-            + f" ({cloud.shape[1]:,} per window, {POOLED_BINS} bins over the prior)")
+            + f" ({cloud.shape[1]:,} per window, {POOLED_BINS} "
+              f"{args.pooled_scale}-spaced bins over the prior)")
     else:
         print("  pooled density     : off (no posterior_samples_cloud: re-run the Experiment "
               "stage with --dump-posterior-samples)")
@@ -864,8 +912,9 @@ def run_temporal_dynamics(cfg, args):
             plt.close(figp)
             note = " + posterior"
         if pooled is not None:
-            figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds)
-            figq.savefig(str(spec.fig_dir / f"{key}_temporal_pooled.png"), dpi=180)
+            figq = _figure_pooled(spec, p_index, key, pooled, line, family, kinds,
+                                  scale=args.pooled_scale)
+            figq.savefig(str(spec.fig_dir / f"{key}_temporal_posterior_pooled.png"), dpi=180)
             plt.close(figq)
             note += " + pooled"
         results.append({"p_index": p_index, "key": key,
@@ -876,6 +925,7 @@ def run_temporal_dynamics(cfg, args):
     meta = {"npz_name": spec.npz_path.name, "n_estimates": int(inferred_log10.shape[0]),
             "n_cells": n_cells, "n_chunks": n_chunks, "step": step,
             "n_samples_per_window": int(cloud.shape[1]) if cloud is not None else 0,
+            "pooled_scale": args.pooled_scale,
             "edges": [float(t) for t in edges], "centers": [float(t) for t in centers]}
     _write_report(spec, meta, results, drift, kinds, family, line, picks_window, picks_traj,
                   pooled)
@@ -899,6 +949,14 @@ def build_parser(description):
                         "chunks and cells); 'mean' draws the mean-window timeseries and the "
                         "mean-trajectory line, each parameter averaged independently. The pairing "
                         "is enforced so a figure never mixes a mean with a medoid.")
+    p.add_argument("--pooled-scale", choices=("log", "linear"), default="log",
+                   help="x-axis spacing for the pooled posterior histogram; both are in the "
+                        "parameter's absolute units. 'log' (default) bins uniformly in decades, so "
+                        "the whole prior range is resolved evenly and the log-uniform prior is a "
+                        "flat reference line (density per decade). 'linear' bins uniformly in "
+                        "absolute units, matching the linear value axis of the time-course figures, "
+                        "and draws the prior as the 1/x curve a log-uniform density becomes under "
+                        "that change of variable (density per unit).")
     p.add_argument("--params", type=str, default=None,
                    help="comma-separated parameter keys to plot (default: all). Filters the "
                         "FIGURES only -- the central estimates are computed on the full parameter "

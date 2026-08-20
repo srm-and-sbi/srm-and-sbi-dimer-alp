@@ -69,8 +69,8 @@ _FIGURE_SUBSAMPLE = 5000         # cap on scatter points drawn per figure
 
 # Conditions are named scientifically wherever a reader sees them. "ALP"/"BET" survive only as the
 # stored `kinds` field of the pools, a data-schema artifact, and are translated at the boundary.
-KIND_OF_CONDITION = {"MET-FAB": "ALP", "MET-INLB": "BET"}
-CONDITION_CHOICES = ("pooled", "MET-FAB", "MET-INLB")
+# Condition naming has ONE definition, in the package's experiment_support module.
+from srm_and_sbi_dimer_alp.experiment_support import CONDITION_CHOICES, KIND_OF_CONDITION
 _NUISANCE_DLI_BUILD = "Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_DETECTOR_Nuisance_DLI.py"
 
 

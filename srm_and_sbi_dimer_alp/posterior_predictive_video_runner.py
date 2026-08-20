@@ -42,7 +42,8 @@ from .workflow import parameter_keys as _wf_keys, parameter_table
 
 # Conditions are named scientifically wherever a reader sees them; the tokens below survive only as
 # the stored ``kinds`` field of the MAP database and the recording filenames on disk.
-KIND_OF_CONDITION = {"MET-FAB": "ALP", "MET-INLB": "BET"}
+# Condition naming (stored token <-> scientific name) has ONE definition, in experiment_support.
+from .experiment_support import KIND_OF_CONDITION
 
 def _clip_span_token(n_frames, frame_time):
     """The clip's own duration as a label token (e.g. 1000 frames @ 0.02 s -> ``20S``); the

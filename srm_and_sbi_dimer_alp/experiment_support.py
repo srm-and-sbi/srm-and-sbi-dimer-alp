@@ -36,6 +36,34 @@ import tifffile
 from .io import convert_video_dtype
 
 
+# =============================================================================
+# Experimental conditions: one definition of the naming, for the whole codebase
+# =============================================================================
+# The recordings were namespaced "ALP"/"BET" when they were written, and those tokens are frozen
+# into the data-file names (Experiment_<KIND>_Cell_<n>_<span>S_RAW.tif) and into the `kinds` field of
+# every Experiment output. They are a data-schema artifact and carry no scientific meaning, so they
+# are translated at the boundary and never reach a reader: on the command line, in reports, in
+# figure legends, and in output directory names the conditions are MET-FAB (the monomer control) and
+# MET-INLB (the dimer condition).
+#
+# This mapping previously existed as five independent copies across the package and the Analysis
+# scripts, which is exactly the arrangement in which one copy quietly acquires a different spelling
+# from the rest. There is now one literal; both directions and the CLI choices derive from it.
+CONDITION_DISPLAY = {"ALP": "MET-FAB", "BET": "MET-INLB"}        # stored token -> scientific name
+KIND_OF_CONDITION = {v: k for k, v in CONDITION_DISPLAY.items()}  # scientific name -> stored token
+CONDITION_CHOICES = ("pooled", *KIND_OF_CONDITION)                # for --condition style arguments
+
+
+def condition_display(kind):
+    """Scientific name for a stored condition token, passing unknown tokens through unchanged."""
+    return CONDITION_DISPLAY.get(kind, kind)
+
+
+def condition_token(condition):
+    """Stored condition token for a scientific name, passing unknown names through unchanged."""
+    return KIND_OF_CONDITION.get(condition, condition)
+
+
 def discover_cells(experiment_dir, kind, span):
     """Return the sorted cell indices with a recording on disk for a given kind.
 

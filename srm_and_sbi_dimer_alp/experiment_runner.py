@@ -44,6 +44,7 @@ from srm_and_sbi_dimer_alp.evaluation import (
     _theta_repr,
 )
 from srm_and_sbi_dimer_alp.experiment_support import (
+    condition_display,
     discover_cells,
     load_shards,
     merge_shard_arrays,
@@ -147,6 +148,11 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
     inferred_by_kind = _aggregate_by_kind(
         inferred_log10, kind_index, cell_of, kinds,
         args.aggregation, len(draw_spec))
+    # Everything a reader sees carries the scientific condition name. The stored `kinds` field keeps
+    # the "ALP"/"BET" tokens, because those are the data-file namespace and the schema downstream
+    # analyses key on; only the presentation is translated.
+    shown = [condition_display(k) for k in kinds]
+    inferred_shown = {condition_display(k): v for k, v in inferred_by_kind.items()}
     agg_desc = ("pooled over (cell x chunk)" if args.aggregation == "pooled"
                 else "one point per cell (median over its chunks)")
     reporter.check("estimates_nonempty", n_estimates > 0,
@@ -156,15 +162,15 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
     reporter.stat("total_estimates", n_estimates,
                   note="number of (cell, chunk) windows MAP-estimated across all conditions.")
     reporter.stat("aggregation", args.aggregation, note=f"report distribution view: {agg_desc}.")
-    for kind in kinds:
-        reporter.stat(f"n[{kind}]", int(inferred_by_kind[kind].shape[0]),
-                      note=f"estimates for condition {kind}.")
+    for kind, name in zip(kinds, shown):
+        reporter.stat(f"n[{name}]", int(inferred_by_kind[kind].shape[0]),
+                      note=f"estimates for condition {name} (stored as '{kind}').")
     if n_estimates:
         reporter.stat("mean_log_prob", float(np.mean(scores)),
                       note="mean MAP log-density at the optimized mode (optimization "
                            "diagnostic; not a calibration/quality metric).")
 
-    headers, rows = experiment_table(draw_spec, inferred_by_kind, kinds)
+    headers, rows = experiment_table(draw_spec, inferred_shown, shown)
     reporter.table("Inferred theta by condition (log10 units)", headers, rows,
                    note=f"no ground truth for real data; values are the distribution "
                         f"of inferred MAP theta per condition ({agg_desc}). Compare "
@@ -179,8 +185,8 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
             key = para["KEY"]
             label = para.get("LABEL") or key
             prior_range = para["PRIOR_RANGE"]
-            values = ({kind: inferred_by_kind[kind][:, i] for kind in kinds}
-                      if do_map else None)
+            values = ({condition_display(kind): inferred_by_kind[kind][:, i]
+                       for kind in kinds} if do_map else None)
             # View B: per chunk, [MAP, posterior median, q25, q75] by kind.
             by_kind_post = None
             if post_q is not None:
@@ -189,7 +195,8 @@ def write_experiment_outputs(reporter, args, eval_cfg, draw_spec, array_path: Pa
                     m = kind_index == ki
                     map_col = inferred_log10[m][:, i:i + 1]               # (n, 1)
                     q_cols = post_q[m][:, i][:, [2, 1, 3]]                # (n, 3): med,q25,q75
-                    by_kind_post[kind] = np.hstack([map_col, q_cols])    # (n, 4)
+                    by_kind_post[condition_display(kind)] = np.hstack(
+                        [map_col, q_cols])                                # (n, 4)
             reporter.save_figure(
                 f"experiment_{key}",
                 figure_experiment_combined(

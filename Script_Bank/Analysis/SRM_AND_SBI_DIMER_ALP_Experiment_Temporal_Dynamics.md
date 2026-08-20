@@ -126,9 +126,11 @@ non-identifiability.
 
 ## Pooled posterior density — the classic histogram, time collapsed
 
-`<key>_temporal_pooled.png` answers the question the two time-course figures cannot: across the
-whole recording, what does the posterior actually look like, and how much narrower is it than the
-prior it started from?
+`<key>_temporal_posterior_pooled.png` answers the question the two time-course figures cannot:
+across the whole recording, what does the posterior actually look like, and how much narrower is it
+than the prior it started from? The name places it with the other posterior figure, since both
+describe posterior uncertainty and differ only in what they collapse: `_temporal_posterior` keeps
+time and shows an interval width, `_temporal_posterior_pooled` collapses time and shows a density.
 
 **The arithmetic, stated exactly.** The Experiment stage draws `--posterior-samples` (1000 by
 default) samples from the posterior of every `(recording, window)` pair. For one condition that is
@@ -155,17 +157,37 @@ jointly realized vector — marked on the figure as a thin vertical line. A per-
 pooled marginals is exactly the composite the SGM exists to avoid, so the two are shown together
 and are not expected to coincide.
 
-**Density per decade, and the prior line.** Draws are binned uniformly across the prior's decades,
-which is where a log-uniform prior is flat. Height is therefore a density **per decade** over 64
-bins (a fixed count: with hundreds of thousands of draws the resolution is a legibility choice, not
-a sample-size limit, and holding it fixed keeps conditions and parameters comparable). The prior
-appears as the flat dashed line at `1 / (log10 hi - log10 lo)`, so the gap between a curve and that
-line **is** what the data added. A density lying on the prior line has learned nothing — the same
-non-identifiability the interval figure shows, in the form that makes it quantitative.
+**Axis: absolute units, two spacings.** The x axis is always in the parameter's own **absolute
+units**, with plain numeric ticks — never powers of ten, never dex. `--pooled-scale` chooses how that
+axis is spaced, and the binning, the density's unit, and the prior's shape all follow from that one
+choice consistently:
 
-**Axis.** Absolute units on a log-scaled axis: absolute because the value is the quantity of
-interest, log-scaled because both the prior and the binning are uniform in decades. Every tick is a
-value in the parameter's own units; no dex axis appears.
+| `--pooled-scale` | bins | height is a density | the prior is drawn as |
+|---|---|---|---|
+| `log` (default) | uniform in decades | **per decade** | the flat line `1 / (log10 hi - log10 lo)` |
+| `linear` | uniform in absolute units | **per unit** | the curve `1 / ((log10 hi - log10 lo) · x · ln 10)` |
+
+Both use 64 bins — a fixed count, because with hundreds of thousands of draws the resolution is a
+legibility choice rather than a sample-size limit, and holding it fixed keeps conditions and
+parameters comparable.
+
+`log` is the default because it resolves the whole prior range evenly: a count parameter supported on
+1–316 stays legible across its entire support, and the prior is a flat line the curve can be read
+against directly. `linear` matches the linear value axis the time-course figures use, which is the
+right choice when absolute differences are what matter and the parameter's range is narrow.
+
+**Why the prior is not a flat line under `linear` spacing.** A log-uniform density is flat in
+`y = log10(x)`, not in `x`. Changing variable gives `p(x) = p(y) · |dy/dx| = 1 / ((hi - lo) · x ·
+ln 10)`, a `1/x` curve, and that curve is what the figure draws. Drawing a flat line there would
+misread the Jacobian as evidence, making every parameter appear to have had its low end disfavored
+by the data when nothing of the kind happened. Under `linear` spacing the y limit is set by the
+histogram rather than by the prior, because the `1/x` curve diverges toward the lower limit and would
+otherwise flatten the posterior into the axis; the prior curve simply leaves the top of the frame
+where it exceeds the data.
+
+Either way, the gap between a curve and the prior **is** what the data added, and a density lying on
+the prior has learned nothing — the same non-identifiability the interval figure shows, in the form
+that makes it quantitative.
 
 **Availability.** This figure needs the raw draws, which the Experiment stage stores only when run
 with `--dump-posterior-samples`. Without them the analysis prints `pooled density: off` and writes
@@ -250,9 +272,9 @@ Written to `<data_bank>/<posit>/<alias>_<timing_label>_MAP_Experiment/temporal_d
 - `<key>_temporal.png` — the central-trajectory figure per parameter;
 - `<key>_temporal_posterior.png` — the within-window interval figure (written only when the
   Experiment output carries `posterior_quantiles`);
-- `<key>_temporal_pooled.png` — the pooled posterior density with the prior line (written only when
-  the Experiment output carries `posterior_samples_cloud`, i.e. the stage ran with
-  `--dump-posterior-samples`);
+- `<key>_temporal_posterior_pooled.png` — the pooled posterior density with the prior drawn on the
+  same axes (written only when the Experiment output carries `posterior_samples_cloud`, i.e. the
+  stage ran with `--dump-posterior-samples`);
 - `report.md` — the per-run interpretation: the drift table with all four statistics, the selected
   central recordings for both SGM variants, the pooled-mixture quantile table when the draws are
   present, the reference scoping, and the method's stated limits.
@@ -280,6 +302,9 @@ MACHINE_PROFILE=<profile> python \
   `sgm-trajectory`, `mean` draws `mean-window` with `mean-trajectory`. The pairing is enforced.
 - `--params` — comma-separated parameter keys to plot. Filters the **figures only**: the central
   estimates are computed on the full parameter vector either way.
+- `--pooled-scale {log,linear}` — x-axis spacing for the pooled posterior histogram; both are in
+  absolute units. See the table above for what each implies about binning, the density's unit, and
+  the prior's shape.
 - `--dry-run` — resolve and print the inputs and outputs, then exit without reading data or writing
   anything.
 

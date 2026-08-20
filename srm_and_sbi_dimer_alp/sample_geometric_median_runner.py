@@ -31,9 +31,9 @@ from .diagnostics import DiagnosticReporter
 # condition) -- on the command line, in the report, and in the output directory names. The tokens
 # "ALP"/"BET" survive ONLY as the stored `kinds` field of the Experiment output, a data-schema
 # artifact of how the recordings were namespaced when they were written; they are translated at the
-# boundary below and never reach anything a reader sees.
-KIND_OF_CONDITION = {"MET-FAB": "ALP", "MET-INLB": "BET"}
-CONDITION_CHOICES = ("pooled", "MET-FAB", "MET-INLB")
+# boundary and never reach anything a reader sees. The mapping itself lives in experiment_support,
+# so every stage and analysis spells these names identically.
+from .experiment_support import CONDITION_CHOICES, KIND_OF_CONDITION
 
 
 @dataclass(frozen=True)

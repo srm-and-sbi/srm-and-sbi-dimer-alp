@@ -42,14 +42,14 @@ from .workflow import parameter_keys, parameter_table
 
 # Conditions are named scientifically wherever a reader sees them. The tokens below survive only as
 # the recording FILENAMES on disk (Experiment_<KEY>_Cell_...), which is why they persist at all.
-KIND_OF_CONDITION = {"MET-FAB": "ALP", "MET-INLB": "BET"}
+# Condition naming (stored token <-> scientific name) has ONE definition, in experiment_support.
+from .experiment_support import CONDITION_DISPLAY, KIND_OF_CONDITION
 
 _FIGURE_SUBSAMPLE = 1000
 
 # ALP/BET are internal keys only — the recording filenames (Experiment_<KEY>_Cell_...) and the
 # --kinds CLI. Every figure and table shows the experimental condition names instead. Same
 # convention as the sibling analysis scripts.
-CONDITION_DISPLAY = {"ALP": "MET-FAB", "BET": "MET-INLB"}
 
 
 def _disp(key):

@@ -84,7 +84,9 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   spot check finds the cloud median matching the stored `Q50` to 6e-08. The flag requires the
   posterior view and refuses the MAP-only run rather than silently storing nothing, and both the
   shard and `--merge` paths carry the array so a multi-GPU run merges it like every other output.
-- **Pooled posterior density in the temporal-dynamics analysis** (`<key>_temporal_pooled.png`): the
+- **Pooled posterior density in the temporal-dynamics analysis**
+  (`<key>_temporal_posterior_pooled.png`, named to sit with the other posterior figure since both
+  describe posterior uncertainty and differ only in whether time is kept or collapsed): the
   classic histogram, with the time axis collapsed by pooling every window's draws within a
   condition. Binning is uniform across the prior's decades, so height is a density per decade and
   the log-uniform prior is a flat line the curve can be read against — the distance between them is
@@ -93,7 +95,21 @@ estimate and an uncertainty view, and supplies the confound test neither workflo
   first) and discloses what the mixture is not: pooling draws ADDS densities where Bayes MULTIPLIES
   likelihoods, so the result describes the window population and is not a joint posterior for the
   condition, and its mode is therefore not the analysis's central estimate. That remains the
-  trajectory-level medoid, drawn on the same figure for comparison.
+  trajectory-level medoid, drawn on the same figure for comparison. The x axis is in the
+  parameter's absolute units with plain numeric ticks, and `--pooled-scale {log,linear}` chooses its
+  spacing: `log` (default) bins uniformly in decades and draws the log-uniform prior as a flat line,
+  `linear` bins uniformly in absolute units to match the time-course figures and draws the prior as
+  the `1/x` curve the change of variable actually produces — a flat line there would misread the
+  Jacobian as evidence.
+- **One definition of the experimental condition naming**, in `experiment_support`
+  (`CONDITION_DISPLAY`, its derived inverse `KIND_OF_CONDITION`, `CONDITION_CHOICES`, and the
+  `condition_display` / `condition_token` helpers). The `ALP` -> `MET-FAB`, `BET` -> `MET-INLB`
+  mapping had accumulated five independent copies across the package and the Analysis scripts, which
+  is precisely the arrangement in which one copy quietly acquires a different spelling. All five now
+  import it, so every consumer shares one object. The Experiment stage's own report, which had never
+  been translated, now names conditions scientifically in its statistics, its table, and its figure
+  legends; the stored `kinds` field keeps the `ALP`/`BET` tokens, because those are the data-file
+  namespace and the schema every downstream analysis keys on.
 
 ### Changed
 
