@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.19 - 2026-08-24
+
+The temporal reduction now reads every input frame. At 5 s @ 50 FPS it was silently discarding the
+last frame of every video.
+
+### Fixed
+
+- **Trailing frames were never read** (`inference_network.py`, `Complex3DCNN`). The first conv block
+  strides time by `s = n_frames // temporal_target_frames` with kernel `max(3, s)`, giving
+  `(n_frames - kernel) // s + 1` output positions — so a non-zero `(n_frames - kernel) % s` leaves
+  the tail past the last window, unread. Over the documented durations (1, 2, 5, 10, 20 s) this hit
+  **5 s only**, where exactly one frame of 250 was discarded from every training, test and evaluation
+  video; 1 s and 2 s are unreduced (`s = 1`) and 10 s / 20 s divide exactly. The kernel is now widened
+  to the smallest value congruent to `n_frames` modulo `s`, so the final window ends on the last
+  frame. At 5 s the kernel goes 3 -> 4 and `T_out` stays 124: the widening removes only the unusable
+  remainder, so sequence length, memory and all downstream compute are unchanged, at a cost of 72
+  parameters in the first conv. Padding was rejected as the alternative — zero or replicated tail
+  frames would bias exactly the temporal-decay quantities the detector workflow infers (bleaching
+  drift, flicker rate).
+- **The invariant that should have caught this now does.** `assert kernel >= stride` rules out gaps
+  between windows but passed for every duration while 5 s dropped a frame. A second assertion
+  computes where the last window actually ends and fails loudly if any input frame would go unread.
+  Verified by full-stack impulse testing (a unit impulse in each input frame, checking whether it
+  influences any output of the whole conv stack) at all five documented durations.
+
+### Changed
+
+- **5 s architectures are not checkpoint-compatible across this version.** `features.0.weight` changes
+  shape from `(8, 1, 3, 3, 3)` to `(8, 1, 4, 3, 3)`, and both the `--resurrect` path and the estimator
+  artifact rebuild load state dicts strictly. A 5 s estimator trained before this version cannot be
+  resurrected, evaluated or applied under it, and vice versa. **1 s, 2 s, 10 s and 20 s are bitwise
+  identical** — verified by comparing freshly constructed networks under a fixed seed (identical
+  weights) and their forward output on a real input tensor (identical) — so the 2 s biology and
+  detector baselines, their checkpoints, and every artifact derived from them are unaffected.
+
+### Documentation
+
+- The `temporal_target_frames` table now lists the documented durations (1, 2, 5, 10, 20 s) rather
+  than an illustrative range, states the widening rule, and demotes the non-monotonic-memory note to
+  a caveat for non-standard durations. `PROJECT_CONTEXT.md` no longer refers to a tail-frame caveat
+  that no longer exists.
+
 ## 0.4.18 - 2026-08-24
 
 Documentation only: the temporal-reduction frame arithmetic is written down, and one overstated

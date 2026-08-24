@@ -666,25 +666,27 @@ class InferenceNetwork:
 
       The target is a FACTOR, not an exact output length. The reduced length is
       the standard conv output size, `T_out = (n_frames - kernel) // s + 1` with
-      `kernel = max(3, s)` and no padding once `s > 1`:
+      no padding once `s > 1`. The kernel starts at `max(3, s)` and is then
+      widened to the smallest value congruent to `n_frames` modulo `s`, which
+      makes `(n_frames - kernel) % s == 0` so the last window ends exactly on the
+      last frame and every input frame is read; this is asserted at construction.
+      Widening removes only the unusable remainder, so `T_out` is unaffected.
+      Over the documented durations (VALIDATION.md, dataset-sizing table):
 
-        | duration @50 FPS | n_frames | s | kernel | T_out                |
-        |------------------|----------|---|--------|----------------------|
-        | 2 s              |      100 | 1 |      3 | 100  (no reduction)  |
-        | 3 s              |      150 | 1 |      3 | 150  (no reduction)  |
-        | 4 s              |      200 | 2 |      3 |  99                  |
-        | 5 s              |      250 | 2 |      3 | 124                  |
-        | 6 s              |      300 | 3 |      3 | 100                  |
-        | 10 s             |      500 | 5 |      5 | 100                  |
+        | duration @50 FPS | n_frames |  s | kernel | T_out               |
+        |------------------|----------|----|--------|---------------------|
+        |  1 s             |       50 |  1 |      3 |  50  (no reduction) |
+        |  2 s             |      100 |  1 |      3 | 100  (no reduction) |
+        |  5 s             |      250 |  2 |      4 | 124                 |
+        | 10 s             |      500 |  5 |      5 | 100                 |
+        | 20 s             |     1000 | 10 |     10 | 100                 |
 
-      Two consequences the plain reading hides. Because `s` is floor division, a
-      video shorter than `2 * target` frames is not reduced at all -- 3 s (150
-      frames) runs the transformer over all 150, so peak memory RISES from 2 s to
-      3 s and then FALLS again at 4 s. And when `(n_frames - kernel) % s != 0`
-      the trailing frames fall past the last window and are never read: at
-      `s = 2` (n_frames 200-299, which includes 5 s @ 50 FPS) exactly one frame,
-      the last, is dropped. For `s >= 3` kernel equals stride and windows tile
-      exactly, so coverage is complete when `n_frames` is a multiple of `s`.
+      5 s is the only documented duration whose remainder is non-zero, hence the
+      only one whose kernel is widened (3 -> 4); the rest are unchanged by the
+      rule. A consequence worth knowing if a campaign picks a non-standard
+      duration: `s` is floor division, so a video shorter than `2 * target`
+      frames is not reduced at all, and peak memory therefore does not increase
+      monotonically with duration.
 
     The network returns the CLS-token embedding directly, which feeds the
     downstream MAF density estimator.

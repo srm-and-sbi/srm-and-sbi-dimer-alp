@@ -803,10 +803,11 @@ posterior over θ from that embedding.
   windows leave no gap — learnable pooling, not decimation. So the transformer
   sequence stays bounded no matter how long the recording is: 10 s (500 frames)
   is summarized over 100 positions, not 500. The target is a factor rather than an
-  exact length, so 5 s (250 frames) reduces to **124**, and a video below twice
-  the target is not reduced at all (3 s = 150 frames stays 150). The exact
-  arithmetic, a per-duration table, and the tail-frame caveat are documented on
-  the `temporal_target_frames` field in `parameterization.py`. At or below the
+  exact length, so 5 s (250 frames) reduces to **124**. The kernel is widened so
+  the last window ends exactly on the last frame, so every input frame is read at
+  every documented duration (asserted at construction). The exact arithmetic and
+  a per-duration table are on the `temporal_target_frames` field in
+  `parameterization.py`. At or below the
   target (1 s, 2 s at 50 FPS) the network is bit-identical to the un-reduced one,
   which is what keeps the 2 s baseline and its checkpoints comparable.
 

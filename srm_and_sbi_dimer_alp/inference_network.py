@@ -296,14 +296,13 @@ class Complex3DCNN(nn.Module):
             `T_out = (n_frames + 2*pad - kernel) // s + 1` with `pad = 0`
             whenever `s > 1`, so the target is a FACTOR and not an exact output
             length: 250 frames with target 100 gives `s = 2` and `T_out = 124`,
-            not 100. Two consequences worth knowing: `s` is floor division, so a
-            video below `2 * target` frames is not reduced at all (150 frames ->
-            `s = 1`); and when `(n_frames - kernel) % s != 0` the final partial
-            window has no output position, so the LAST input frame(s) are not
-            seen -- at `s = 2, kernel = 3` (n_frames 200-299) exactly one tail
-            frame is dropped, verified by construction-time coverage testing.
-            For `s >= 3` the kernel equals the stride and windows tile exactly,
-            so coverage is complete when `n_frames` is a multiple of `s`. Videos with `n_frames <= temporal_target_frames` are left
+            not 100. The kernel is then widened to the smallest value congruent
+            to `n_frames` modulo `s`, which makes `(n_frames - kernel) % s == 0`
+            so the final window ends exactly on the last frame and EVERY input
+            frame is read. This is asserted at construction and costs nothing:
+            the output length is unchanged (it only drops the unusable
+            remainder). Note `s` is floor division, so a video below
+            `2 * target` frames is not reduced at all. Videos with `n_frames <= temporal_target_frames` are left
             unchanged (`s = 1`: the first block reduces to the original
             (3,3,3)/stride-1 conv, so short videos and the 2 s baseline are
             bit-identical to the un-reduced network). Because
@@ -342,21 +341,33 @@ class Complex3DCNN(nn.Module):
             temporal_stride = n_frames // temporal_target_frames
         self.temporal_stride = temporal_stride
         first_kernel_t = max(3, temporal_stride)
+        # Widen the kernel to the smallest size congruent to n_frames modulo the stride, so
+        # that `(n_frames - kernel) % stride == 0` and the final window ends exactly on the
+        # last input frame. Without this the trailing `(n_frames - kernel) % stride` frames
+        # fall past the last window and are never read -- one frame at 5 s @ 50 FPS, the one
+        # documented duration where the remainder is non-zero. Widening costs nothing
+        # downstream: it removes only the unusable remainder, so the output length is
+        # unchanged. Padding was rejected as the alternative because zero or replicated tail
+        # frames would bias precisely the temporal-decay quantities the detector workflow
+        # infers (bleaching drift, flicker rate).
+        if temporal_stride > 1:
+            first_kernel_t += (n_frames - first_kernel_t) % temporal_stride
         first_pad_t = 1 if temporal_stride == 1 else 0
-        # Invariant: kernel >= stride guarantees no GAP between consecutive
-        # windows. (max(3, s) >= s always; asserted to catch regressions.)
-        # It does NOT guarantee full coverage of the input: the number of output
-        # positions is `(n + 2*pad - kernel) // s + 1`, so when
-        # `(n - kernel) % s != 0` the trailing frames fall past the last window
-        # and are never read. With `s = 2, kernel = 3` (n_frames 200-299, which
-        # includes the 5 s @ 50 FPS case, n = 250) exactly one frame -- the
-        # last -- is dropped. This is a 1-in-n boundary effect on the least
-        # informative end of the clip, not a systematic subsampling; it is
-        # recorded here because the invariant below is narrower than it looks.
-        # Padding to `pad = (s * (ceil((n - kernel) / s) + 1) + kernel - n) // 2`
-        # (or simply `ceil_mode`-style handling) would close it, at the cost of
-        # changing every long-video architecture already trained.
+        # Two invariants, and the second is the one that binds. `kernel >= stride`
+        # rules out GAPS between consecutive windows (this is pooling, not
+        # decimation). It does NOT by itself imply that every input frame is read:
+        # the output position count is `(n + 2*pad - kernel) // stride + 1`, so a
+        # non-zero `(n - kernel) % stride` leaves trailing frames past the last
+        # window. That is asserted directly below, because the weaker invariant
+        # passed happily for every duration while 5 s silently dropped a frame.
         assert first_kernel_t >= temporal_stride
+        _t_out = (n_frames + 2 * first_pad_t - first_kernel_t) // temporal_stride + 1
+        _last_frame_seen = ((_t_out - 1) * temporal_stride
+                            - first_pad_t + first_kernel_t - 1)
+        assert _last_frame_seen >= n_frames - 1, (
+            f"temporal reduction would leave the last "
+            f"{n_frames - 1 - _last_frame_seen} input frame(s) unread: "
+            f"n_frames={n_frames}, stride={temporal_stride}, kernel={first_kernel_t}")
 
         # ---- 3D CNN backbone ------------------------------------------------
         layers = []
