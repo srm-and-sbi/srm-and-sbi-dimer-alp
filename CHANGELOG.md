@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.17 - 2026-08-24
+
+The population composition — which fraction of the receptors sits in each modeled state —
+becomes a first-class analysis, reported together with its own accuracy on held-out synthetic data.
+
+### Added
+
+- **Population-composition analysis** (biology workflow). New workflow-agnostic kernel
+  `population_composition.py`, shared engine `population_composition_runner.py`, and the thin shim
+  `Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Experiment_Population_Composition.py` with its
+  companion `.md`. It answers the question the inferred species counts support well, rather than the
+  one they support badly: absolute counts are the worst-identified coordinates the model has (a
+  square-root-of-n limit, plus a trade-off between the two dimer states), but the counts' errors are
+  strongly anti-correlated, so their *ratios* are recovered far better than the counts themselves —
+  on held-out data the total is recovered to 0.012 dex against 0.117—0.158 dex for each count, and
+  the dimer-complex fraction to 2.8 percentage points. Every fraction is formed inside a single
+  posterior draw and only then averaged, because a ratio of correlated coordinates is not a function
+  of their marginals; the analysis therefore requires the Experiment stage's raw per-window draws
+  (`--dump-posterior-samples`) and refuses the stored marginal quantiles with a message naming the
+  re-run, rather than silently reporting a different quantity.
+- **The experimental estimate and its measured error in one report.** The same readout is computed on
+  the held-out synthetic evaluation set, where the truth is known, and reported beside the
+  experimental values — including the accuracy restricted to the dimer-rich region the activated
+  condition actually occupies (selected on truth, never on the estimate). Without a `MAP_Recovery`
+  output the experimental half still runs and the report says the validation column is unavailable.
+- **Robustness reported, not assumed.** The headline is recomputed under prior-support restriction
+  (counts only, then all ten parameters) and under the compositional (closed geometric) center, with
+  the cost of each variant in discarded draws and emptied windows, so the model-conditional bracket
+  on an absolute value is visible beside it. A percentile bootstrap over recordings checks the
+  reported standard errors against a distribution-free interval.
+- **The recording is the replicate unit throughout.** Windows within a recording are not independent
+  measurements, so every interval and every test aggregates recordings and the report states the
+  count it used; the within-recording time course is reported separately, since a span average over a
+  changing population describes no instant of it.
+
+### Notes
+
+- Biology only, by construction: the composition is a function of the three inferred species counts,
+  and the detector workflow infers imaging parameters and treats the population implicitly, so it has
+  nothing to compose — as the detector's `Nuisance_DLI` pool has no biology counterpart. The spec
+  resolver fails loudly for a workflow without count parameters. The engine keeps the shared shape so
+  a future workflow carrying species counts plugs in without touching the body.
+- The kernel reuses the temporal-dynamics grid builder, so the (condition, recording, window) grid
+  has one definition across both analyses.
+- Point-estimate accuracy is what the synthetic half measures. Interval coverage of a fraction needs
+  joint posterior draws on the held-out set, which the recovery artifact does not carry; the report
+  states this rather than leaving it implied.
+
 ## 0.4.16 - 2026-08-20
 
 The temporal-dynamics analysis becomes workflow-general, gains a correlation-preserving central

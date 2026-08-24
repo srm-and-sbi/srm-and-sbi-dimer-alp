@@ -614,6 +614,29 @@ rather than a single monolithic support file. The modules and their roles:
   detector marginalizes the reaction-diffusion block and so is blind to
   biological drift, and the two read the same recordings — each is the other's
   control, and neither attributes a cause alone.
+- **`population_composition.py`** — the workflow-agnostic population-composition
+  kernel: relative species abundance derived from JOINT posterior count draws. It
+  forms each fraction inside a draw and only then averages, because a ratio of
+  correlated coordinates is not a function of their marginals; the three counts
+  trade off inside the posterior, so the composition is a far better identified
+  function of the same estimates than the counts individually are (on held-out
+  data the total is recovered to 0.012 dex against 0.117—0.158 dex for each count
+  separately). It carries the aggregation ladder (draws to window, windows to
+  recording, recordings to condition, with the recording as the replicate unit),
+  the prior-support and compositional-center sensitivity variants, the
+  recording-level rank tests, and the same readout's recovery on held-out
+  synthetic videos.
+- **`population_composition_runner.py`** — the shared engine for the
+  population-composition analysis, reporting the experimental composition and its
+  measured in-model error in one document. Biology only, and the asymmetry is
+  scientific: the composition is a function of the three inferred species counts,
+  and the detector workflow infers imaging parameters and treats the population
+  implicitly, so it has nothing to compose — as the detector's `Nuisance_DLI`
+  pool has no biology counterpart. The spec resolver fails loudly for a workflow
+  without count parameters rather than composing unrelated coordinates. It
+  requires the Experiment stage's raw per-window draws
+  (`--dump-posterior-samples`); the stored marginal quantiles cannot substitute,
+  since a fraction of marginals is a different quantity rather than a coarser one.
 - **`io.py`** — file I/O: transparent loading of `.zarr`/`.npy`/`.npz`, video
   and theta-set writing, and bit-depth conversion. All paths come from the
   configuration helpers, never hardcoded.
@@ -643,6 +666,22 @@ chunk → time), overlays the experimental range for the parameters the source p
 constrains (Li et al. 2026, doi:10.1002/smll.202507115), annotates each figure with
 its held-out recovery quality, and writes figures plus a self-contained `report.md`;
 its companion `Experiment_Temporal_Dynamics.md` gives the full interpretation.
+`SRM_AND_SBI_DIMER_ALP_Experiment_Population_Composition.py` reports the relative
+abundance of the three modeled species across the experimental recordings — the share of
+the population that is monomer, mobile dimer, and immobile dimer — formed inside each
+posterior draw so the count-to-count correlations are carried through, aggregated with the
+recording as the replicate unit, and reported beside the same readout's error on held-out
+synthetic videos with known truth, so an experimental value never appears without the
+measured accuracy of the instrument that produced it. It reports the span-averaged and
+first-window compositions, the within-recording time course, the per-recording spread, a
+bootstrap check of the error bars, the sensitivity of the headline to prior-support
+restriction and to the choice of compositional center, and the recording-level condition
+contrast. Biology only: the detector workflow infers no species counts and so has no
+composition to report. Its companion
+`SRM_AND_SBI_DIMER_ALP_Experiment_Population_Composition.md` documents the derivation, what
+the result does and does not establish, and how it relates to the published
+trajectory-classification and photobleaching-stoichiometry measurements of the same receptor
+system.
 `SRM_AND_SBI_DIMER_ALP_Seeding_Validation.py` checks the RNG / non-determinism
 behavior of the generation stack.
 

@@ -151,7 +151,7 @@ then open the printed `http://localhost:8888/...` URL in your browser and run th
 
 ## Structure
 
-- `Script_Bank/Analysis` — post-hoc diagnostics, run on completed outputs (not pipeline stages): paired `.py`/`.md` scripts (each script ships with a companion `.md` explaining its interpretation) serving both the biology and detector workflows, grouped by family — posterior calibration, estimator comparison, test-loss distribution, embedding-space distance, posterior-predictive video, sample-geometric-median, temporal dynamics, seeding validation, and `Nuisance_DLI` construction
+- `Script_Bank/Analysis` — post-hoc diagnostics, run on completed outputs (not pipeline stages): paired `.py`/`.md` scripts (each script ships with a companion `.md` explaining its interpretation) serving both the biology and detector workflows, grouped by family — posterior calibration, estimator comparison, test-loss distribution, embedding-space distance, posterior-predictive video, sample-geometric-median, temporal dynamics, population composition, seeding validation, and `Nuisance_DLI` construction
 - `Script_Bank/HPC` — HPC-mode submission and orchestration scripts
 - `Script_Bank/Prime` — stage entry points for the biology workflow: simulation (`Simulation_RDS`, `Simulation_DLI`), dataset generation (`Generate_Datasets`), training (`Inference`), and validation (`Evaluation` on synthetic EVAL data, `Experiment` on experimental microscopy) — plus the `DETECTOR_`-prefixed mirrors of the five stage scripts for the Detector calibration workflow
 - `srm_and_sbi_dimer_alp/` — main Python package (modules, support functions)
