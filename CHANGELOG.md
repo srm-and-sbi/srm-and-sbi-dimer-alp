@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.18 - 2026-08-24
+
+Documentation only: the temporal-reduction frame arithmetic is written down, and one overstated
+invariant is corrected. No behavior change — no code path, default, or trained model is affected.
+
+### Fixed
+
+- **`PROJECT_CONTEXT.md` described the un-reduced network.** The video-encoder section still said the
+  encoder's temporal depth is `n_frames` "(100 frames at 2 s, 500 at 10 s)", which stopped being true
+  when `temporal_target_frames` gained its default of 100: a 10 s recording is summarized over 100
+  temporal positions, not 500. The section now states the reduction, its default, and where the exact
+  arithmetic lives.
+- **The "no frame is skipped" claim was too strong** (`inference_network.py` class docstring and the
+  two inline comments on the invariant). `kernel >= stride` guarantees no GAP between consecutive
+  windows — which is what makes the reduction pooling rather than decimation — but it does not
+  guarantee that every input frame is read. The output position count is
+  `(n_frames - kernel) // s + 1`, so when `(n_frames - kernel) % s != 0` the trailing frames fall past
+  the last window. At `s = 2, kernel = 3` (n_frames 200-299, which includes 5 s at 50 FPS, n = 250)
+  exactly one frame — the last — is never read. Verified by direct construction-time coverage
+  testing (unit impulse per input frame through the real conv geometry), not by arithmetic alone. The
+  `assert kernel >= stride` is retained and still correct for what it asserts; the comments now say
+  what it does and does not cover, and record the padding change that would close the gap along with
+  its cost (it would alter every long-video architecture already trained).
+
+### Added
+
+- **The frame arithmetic is documented** on the `temporal_target_frames` field
+  (`parameterization.py`): the output-length formula, a per-duration table for 50 FPS (2 s to 10 s),
+  and the two non-obvious consequences — that the target is a factor and not an exact output length
+  (250 frames gives 124, not 100), and that floor division leaves any video below twice the target
+  unreduced, so peak memory rises from 2 s to 3 s and falls again at 4 s.
+
 ## 0.4.17 - 2026-08-24
 
 The population composition — which fraction of the receptors sits in each modeled state —

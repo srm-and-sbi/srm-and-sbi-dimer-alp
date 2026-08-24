@@ -664,6 +664,28 @@ class InferenceNetwork:
       ~50-200 either over-compress the motion signal (too small) or let memory
       grow again (too large). Set to `None` to disable temporal reduction.
 
+      The target is a FACTOR, not an exact output length. The reduced length is
+      the standard conv output size, `T_out = (n_frames - kernel) // s + 1` with
+      `kernel = max(3, s)` and no padding once `s > 1`:
+
+        | duration @50 FPS | n_frames | s | kernel | T_out                |
+        |------------------|----------|---|--------|----------------------|
+        | 2 s              |      100 | 1 |      3 | 100  (no reduction)  |
+        | 3 s              |      150 | 1 |      3 | 150  (no reduction)  |
+        | 4 s              |      200 | 2 |      3 |  99                  |
+        | 5 s              |      250 | 2 |      3 | 124                  |
+        | 6 s              |      300 | 3 |      3 | 100                  |
+        | 10 s             |      500 | 5 |      5 | 100                  |
+
+      Two consequences the plain reading hides. Because `s` is floor division, a
+      video shorter than `2 * target` frames is not reduced at all -- 3 s (150
+      frames) runs the transformer over all 150, so peak memory RISES from 2 s to
+      3 s and then FALLS again at 4 s. And when `(n_frames - kernel) % s != 0`
+      the trailing frames fall past the last window and are never read: at
+      `s = 2` (n_frames 200-299, which includes 5 s @ 50 FPS) exactly one frame,
+      the last, is dropped. For `s >= 3` kernel equals stride and windows tile
+      exactly, so coverage is complete when `n_frames` is a multiple of `s`.
+
     The network returns the CLS-token embedding directly, which feeds the
     downstream MAF density estimator.
     """

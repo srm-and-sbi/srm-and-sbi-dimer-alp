@@ -289,9 +289,21 @@ class Complex3DCNN(nn.Module):
             videos. The video is reduced by an integer factor
             `s = n_frames // temporal_target_frames`, folded into the first
             conv's temporal stride (with the temporal kernel widened to
-            `max(3, s)` so kernel >= stride and no frame is skipped), so the
-            activations and the transformer sequence stay bounded regardless of
-            duration. Videos with `n_frames <= temporal_target_frames` are left
+            `max(3, s)` so kernel >= stride, i.e. consecutive windows leave no
+            gap -- this is pooling, never decimation), so the activations and the
+            transformer sequence stay bounded regardless of duration. The
+            resulting length is the standard conv output size,
+            `T_out = (n_frames + 2*pad - kernel) // s + 1` with `pad = 0`
+            whenever `s > 1`, so the target is a FACTOR and not an exact output
+            length: 250 frames with target 100 gives `s = 2` and `T_out = 124`,
+            not 100. Two consequences worth knowing: `s` is floor division, so a
+            video below `2 * target` frames is not reduced at all (150 frames ->
+            `s = 1`); and when `(n_frames - kernel) % s != 0` the final partial
+            window has no output position, so the LAST input frame(s) are not
+            seen -- at `s = 2, kernel = 3` (n_frames 200-299) exactly one tail
+            frame is dropped, verified by construction-time coverage testing.
+            For `s >= 3` the kernel equals the stride and windows tile exactly,
+            so coverage is complete when `n_frames` is a multiple of `s`. Videos with `n_frames <= temporal_target_frames` are left
             unchanged (`s = 1`: the first block reduces to the original
             (3,3,3)/stride-1 conv, so short videos and the 2 s baseline are
             bit-identical to the un-reduced network). Because
@@ -321,16 +333,29 @@ class Complex3DCNN(nn.Module):
         # and it is 1 -- a no-op -- whenever the video is already at or below the
         # target, so short videos and the 2 s baseline are left untouched. The
         # first conv's temporal kernel is widened to `max(3, s)` so that
-        # kernel >= stride: every input frame falls inside some window and none
-        # is skipped (learnable temporal pooling, never decimation).
+        # kernel >= stride: consecutive windows leave no gap between them, which
+        # is what makes this learnable pooling rather than decimation. Note this
+        # does NOT imply every input frame is seen -- see the tail-frame note on
+        # the invariant assert below.
         temporal_stride = 1
         if temporal_target_frames and n_frames > temporal_target_frames:
             temporal_stride = n_frames // temporal_target_frames
         self.temporal_stride = temporal_stride
         first_kernel_t = max(3, temporal_stride)
         first_pad_t = 1 if temporal_stride == 1 else 0
-        # Invariant: kernel >= stride guarantees no input frame is dropped
-        # between windows. (max(3, s) >= s always; asserted to catch regressions.)
+        # Invariant: kernel >= stride guarantees no GAP between consecutive
+        # windows. (max(3, s) >= s always; asserted to catch regressions.)
+        # It does NOT guarantee full coverage of the input: the number of output
+        # positions is `(n + 2*pad - kernel) // s + 1`, so when
+        # `(n - kernel) % s != 0` the trailing frames fall past the last window
+        # and are never read. With `s = 2, kernel = 3` (n_frames 200-299, which
+        # includes the 5 s @ 50 FPS case, n = 250) exactly one frame -- the
+        # last -- is dropped. This is a 1-in-n boundary effect on the least
+        # informative end of the clip, not a systematic subsampling; it is
+        # recorded here because the invariant below is narrower than it looks.
+        # Padding to `pad = (s * (ceil((n - kernel) / s) + 1) + kernel - n) // 2`
+        # (or simply `ceil_mode`-style handling) would close it, at the cost of
+        # changing every long-video architecture already trained.
         assert first_kernel_t >= temporal_stride
 
         # ---- 3D CNN backbone ------------------------------------------------

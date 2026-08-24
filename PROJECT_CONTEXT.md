@@ -793,10 +793,22 @@ posterior over θ from that embedding.
 - Input: a `(batch, 1, n_frames, height, width)` video tensor.
 - 3D convolutions over space and time extract hierarchical features (edges,
   textures, motion patterns).
-- Output: a flattened feature map. The encoder's temporal depth is set by
-  `n_frames`, derived from the recording length, so the same architecture serves
-  any duration (100 frames at 2 s, 500 at 10 s); it asserts that the input frame
-  count matches `n_frames` so a duration/data mismatch fails loudly.
+- Output: a flattened feature map. The encoder accepts any duration — the input
+  temporal depth is `n_frames`, derived from the recording length, and it asserts
+  that the input frame count matches `n_frames` so a duration/data mismatch fails
+  loudly.
+- **Long videos are reduced in time before the transformer.** The first conv
+  block strides time by `s = n_frames // temporal_target_frames` (default target
+  **100 frames**), with its temporal kernel widened to `max(3, s)` so consecutive
+  windows leave no gap — learnable pooling, not decimation. So the transformer
+  sequence stays bounded no matter how long the recording is: 10 s (500 frames)
+  is summarized over 100 positions, not 500. The target is a factor rather than an
+  exact length, so 5 s (250 frames) reduces to **124**, and a video below twice
+  the target is not reduced at all (3 s = 150 frames stays 150). The exact
+  arithmetic, a per-duration table, and the tail-frame caveat are documented on
+  the `temporal_target_frames` field in `parameterization.py`. At or below the
+  target (1 s, 2 s at 50 FPS) the network is bit-identical to the un-reduced one,
+  which is what keeps the 2 s baseline and its checkpoints comparable.
 
 **Sequence model (a temporal transformer):**
 - Input: temporal features from the encoder.
