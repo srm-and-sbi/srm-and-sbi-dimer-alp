@@ -15,6 +15,24 @@ the simulator itself, whether that inheritance changes what the estimator report
 
 ### Added
 
+- **Cohort extension with lineage** (`--phase extend --n-extra N`). A draw can be impossible to
+  realize for reasons that belong to the draw rather than the science: two of this cohort's 500
+  theta drove the 20 s render past the machine's memory (>128 GB), and notably NOT because they
+  were the densest -- three completed draws hold more emitters, the largest at 747. What
+  distinguishes them is reaction traffic, since render memory scales with particle identities
+  accumulated across the render. Extension appends fresh prior draws so the cohort can be topped
+  up to its intended size. This is sound rather than a fudge: the completed draws are already a
+  sample of the prior CONDITIONED on being realizable (the failures are by definition absent from
+  it), so drawing further theta from the same prior and keeping those that complete samples that
+  same conditional distribution -- ordinary rejection sampling, which adds draws without moving
+  the distribution. Unrealizable draws are RETAINED in the cohort file: deleting them would erase
+  the record of what could not be simulated, and the audit reports COMPLETED trajectories, which
+  is what the statistics rest on. Appending changes the digest, so the previous id is pushed onto
+  a `lineage` list and artifacts stamped by an ancestor stay valid -- their theta rows are
+  untouched and still checked exactly, so lineage membership alone can never admit a mismatched
+  artifact. Extension draws come from a stream seeded by (master seed, generation), so repeated
+  extensions never re-draw the same theta and each is reproducible. Selftest family 8 covers it.
+
 - **Stratified-margin robustness inside the audit's `analyze` phase** (kernel
   `stratify_by_true_value` + `stratified_margin_table`; `--recovery-artifact`). A single
   prior-averaged equivalence margin can mislead when the estimator's error depends on the true

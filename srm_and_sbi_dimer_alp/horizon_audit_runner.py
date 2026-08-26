@@ -213,6 +213,7 @@ def _load_cohort(spec):
             "n_resets": int(d["n_resets"]),
             "window_seconds": float(d["window_seconds"]),
             "continuous_seconds": float(d["continuous_seconds"]),
+            "lineage": [str(x) for x in d["lineage"]] if "lineage" in d.files else [],
         }
     if cohort["keys"] != spec["keys"]:
         raise SystemExit(f"cohort schema mismatch: stored keys {cohort['keys']} != "
@@ -237,10 +238,16 @@ def _load_cohort(spec):
 def _verify_stamp(npz, cohort, index, what):
     """Assert a per-theta artifact belongs to THIS cohort (digest + exact theta row)."""
     stored_id = str(npz["cohort_id"]) if "cohort_id" in npz.files else "<unstamped>"
-    if stored_id != cohort["cohort_id"]:
+    # The cohort's own id OR any id in its recorded lineage: extending a cohort (--phase extend)
+    # appends draws and therefore changes the digest, but leaves every existing row untouched, so
+    # artifacts stamped by an ancestor remain valid. The theta-row check below is the real
+    # guarantee -- lineage membership alone never admits an artifact whose theta disagrees.
+    lineage = list(cohort.get("lineage", ()))          # absent for a never-extended cohort
+    if stored_id != cohort["cohort_id"] and stored_id not in lineage:
+        known = ", ".join([cohort["cohort_id"]] + lineage)
         raise SystemExit(
-            f"{what} for theta {index:04d} carries cohort_id {stored_id}, but the current "
-            f"cohort is {cohort['cohort_id']}: it belongs to another cohort. Remove the stale "
+            f"{what} for theta {index:04d} carries cohort_id {stored_id}, but this cohort's "
+            f"lineage is {known}: it belongs to another cohort. Remove the stale "
             f"cohort/*.npz files (or move them aside) before continuing.")
     if not np.allclose(np.asarray(npz["theta_log10"], dtype=float),
                        cohort["theta_log10"][index], atol=1e-12):
@@ -296,7 +303,8 @@ def _phase_prepare(spec, args):
         n_resets=args.n_resets,
         window_seconds=spec["window"].total_time_seconds,
         continuous_seconds=spec["continuous"].total_time_seconds,
-        cohort_id=cohort_id)
+        cohort_id=cohort_id,
+        lineage=np.array([], dtype="<U12"))
     print(f"Cohort of {args.n_theta} theta drawn from the training prior and saved:\n"
           f"    {spec['cohort_path']}")
     print(f"  cohort_id  : {cohort_id}   (stamped into every artifact; mismatches are refused)")
@@ -307,6 +315,75 @@ def _phase_prepare(spec, args):
     print(f"  continuous : {spec['continuous'].total_time_seconds:g}s "
           f"({spec['continuous'].frame_count} frames = {spec['n_windows']} windows)")
     print(f"  resets     : {args.n_resets} per theta")
+
+
+
+# =============================================================================
+# Phase: extend
+# =============================================================================
+
+def _phase_extend(spec, args):
+    """Append fresh prior draws to an existing cohort, preserving every completed artifact.
+
+    WHY THIS EXISTS. A draw can be impossible to realize for reasons that are a property of the
+    draw, not of the science: here, two of 500 theta drove the 20 s render past the machine's
+    memory (identity churn during the render, not initial density -- denser draws completed).
+    Those two are dead weight: they can never contribute a result on this hardware.
+
+    WHY APPENDING IS SOUND. The completed draws are already a sample of the prior CONDITIONED on
+    being realizable -- the failures are, by definition, absent from it. Drawing further theta
+    from the same prior and keeping those that complete samples that same conditional
+    distribution, which is ordinary rejection sampling: it adds draws without moving the
+    distribution the cohort represents. What it must NOT do is silently delete the failures --
+    they stay in the cohort file as a permanent record of what could not be realized, and the
+    report's trajectory count is what the statistics actually rest on.
+
+    IDENTITY. Appending changes the cohort digest, so the previous id is pushed onto ``lineage``
+    and artifacts stamped by an ancestor stay valid (their theta rows are untouched and are still
+    checked exactly). The extension draws come from a stream seeded by the master seed and the
+    generation number, so re-running this phase on the same parent reproduces the same theta.
+    """
+    cohort = _load_cohort(spec)
+    theta = cohort["theta_log10"]
+    n_extra = int(args.n_extra)
+    if n_extra < 1:
+        raise SystemExit("--phase extend requires --n-extra >= 1.")
+    generation = len(cohort["lineage"])
+    # Deterministic, generation-indexed stream: independent of the prepare draw and of any other
+    # extension, so repeated extensions never re-draw the same theta.
+    seq = np.random.SeedSequence([cohort["master_seed"], 0xE47E4D, generation])
+    rng = np.random.default_rng(seq)
+    fresh = rng.uniform(spec["lower"], spec["upper"], size=(n_extra, len(spec["keys"])))
+    extended = np.concatenate([theta, fresh], axis=0)
+    new_id = _cohort_digest(extended, cohort["keys"], cohort["window_seconds"],
+                            cohort["continuous_seconds"], cohort["n_resets"],
+                            cohort["master_seed"])
+    np.savez_compressed(
+        str(spec["cohort_path"]),
+        theta_log10=extended,
+        parameter_keys=np.array(spec["keys"]),
+        prior_low=spec["lower"], prior_high=spec["upper"],
+        master_seed=cohort["master_seed"],
+        n_resets=cohort["n_resets"],
+        window_seconds=cohort["window_seconds"],
+        continuous_seconds=cohort["continuous_seconds"],
+        cohort_id=new_id,
+        lineage=np.array(list(cohort["lineage"]) + [cohort["cohort_id"]], dtype="<U12"))
+    done = len(sorted(spec["cohort_dir"].glob("result_*.npz"))) if spec["cohort_dir"].exists() \
+        else 0
+    print(f"Cohort extended by {n_extra} fresh prior draw(s): "
+          f"{theta.shape[0]} -> {extended.shape[0]} theta.")
+    print(f"  new cohort_id : {new_id}  (generation {generation + 1})")
+    print(f"  lineage       : {' -> '.join(list(cohort['lineage']) + [cohort['cohort_id']])}"
+          f" -> {new_id}")
+    print(f"  completed     : {done} result file(s), all still valid "
+          f"(their theta rows are unchanged and are re-checked on every read).")
+    print(f"  new indices   : {theta.shape[0]}..{extended.shape[0] - 1}   generate them with\n"
+          f"      --phase generate --theta-start {theta.shape[0]} "
+          f"--theta-stop {extended.shape[0]}")
+    print("  NOTE: draws that could not be realized are retained in the cohort file on purpose; "
+          "the audit reports the count of COMPLETED trajectories, which is what the statistics "
+          "rest on.")
 
 
 # =============================================================================
@@ -1231,7 +1308,37 @@ def _phase_selftest(spec, args):
     empty = ha.stratified_margin_table(contrast, np.full(120, 1), rec_err, rec_lab, rng=rng_s)
     assert empty[0]["n_cohort"] == 0 and empty[0]["verdict"] == "inconclusive"
     print("  [PASS] stratification: prior-range thirds, per-stratum margins, empty stratum kept")
-    print("SELFTEST OK: 7/7 check families passed.")
+
+    # 8. Cohort lineage: extending a cohort keeps ancestor-stamped artifacts valid (their theta
+    #    row is unchanged) while a theta mismatch and a foreign cohort are still refused.
+    parent = {"cohort_id": "aaaaaaaaaaaa", "lineage": [], "theta_log10": theta}
+    child = {"cohort_id": "bbbbbbbbbbbb", "lineage": ["aaaaaaaaaaaa"],
+             "theta_log10": np.concatenate([theta, theta[:1] + 0.5], axis=0)}
+    with tempfile.TemporaryDirectory() as tmp:
+        anc = Path(tmp) / "a.npz"
+        np.savez(anc, cohort_id="aaaaaaaaaaaa", theta_log10=theta[0])
+        with np.load(str(anc), allow_pickle=False) as d:
+            _verify_stamp(d, child, 0, "ancestor-stamped artifact")   # accepted: theta matches
+        bad = Path(tmp) / "b.npz"
+        np.savez(bad, cohort_id="aaaaaaaaaaaa", theta_log10=theta[0] + 1e-3)
+        try:
+            with np.load(str(bad), allow_pickle=False) as d:
+                _verify_stamp(d, child, 0, "ancestor id, wrong theta")
+            raise AssertionError("lineage admitted a theta-mismatched artifact")
+        except SystemExit:
+            pass
+        foreign = Path(tmp) / "c.npz"
+        np.savez(foreign, cohort_id="cccccccccccc", theta_log10=theta[0])
+        try:
+            with np.load(str(foreign), allow_pickle=False) as d:
+                _verify_stamp(d, child, 0, "foreign cohort")
+            raise AssertionError("an out-of-lineage cohort was accepted")
+        except SystemExit:
+            pass
+        assert parent["lineage"] == []                    # the parent never gains a lineage
+    print("  [PASS] cohort lineage: ancestor artifacts kept, theta mismatch and foreigners "
+          "refused")
+    print("SELFTEST OK: 8/8 check families passed.")
 
 
 # =============================================================================
@@ -1262,7 +1369,8 @@ def run_horizon_audit(cfg, args):
         print(f"    outputs    : {spec['out_dir']}")
         print("[DRY RUN] nothing simulated, inferred, or written.")
         return 0
-    phase = {"prepare": _phase_prepare, "generate": _phase_generate,
+    phase = {"prepare": _phase_prepare, "extend": _phase_extend,
+             "generate": _phase_generate,
              "infer": _phase_infer, "analyze": _phase_analyze,
              "selftest": _phase_selftest}[args.phase]
     phase(spec, args)
@@ -1277,7 +1385,8 @@ def build_parser(description):
     p.add_argument("--continuous-seconds", type=float, default=20.0,
                    help="continuous-simulation length (default 20, matching the experimental "
                         "recordings); must tile into whole model windows and match the cohort.")
-    p.add_argument("--phase", choices=("prepare", "generate", "infer", "analyze", "selftest"),
+    p.add_argument("--phase", choices=("prepare", "extend", "generate", "infer", "analyze",
+                            "selftest"),
                    required=True,
                    help="prepare: draw + persist the stamped theta cohort. generate: simulate + "
                         "render (CPU; parallel over --theta-start/--theta-stop). infer: run the "
@@ -1301,6 +1410,13 @@ def build_parser(description):
                    help="infer: posterior sampler. Default 'unrestricted' (direct flow "
                         "sampling): it matches the experimental-baseline methodology, never "
                         "stalls, and is REQUIRED for the outside-the-box flow-mass diagnostic.")
+    p.add_argument("--n-extra", type=int, default=0,
+                   help="extend: how many fresh theta to draw from the prior and append to an "
+                        "existing cohort. Use when draws are unrealizable on the available "
+                        "hardware and the cohort should be topped up: appending samples the same "
+                        "realizable-conditioned distribution the completed draws already "
+                        "represent. Unrealizable draws are RETAINED in the cohort file as a "
+                        "record; completed artifacts stay valid via the cohort lineage.")
     p.add_argument("--recovery-artifact", default=None,
                    help="analyze: path to the held-out MAP_Recovery .npz used to calibrate the "
                         "PER-STRATUM margins of the stratified robustness table (default: the "
