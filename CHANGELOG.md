@@ -15,6 +15,17 @@ the simulator itself, whether that inheritance changes what the estimator report
 
 ### Added
 
+- **Verdicts decided against the margin, not against zero** (`equivalence_verdict` reworked;
+  new `detectable`; selftest family 6 extended). The previous rule tested the zero criterion
+  first, which made two outcomes overlap: a CI could lie entirely above zero AND entirely inside
+  the equivalence margin, and whichever test ran first won. D_A was the case in point -- added
+  error [0.003, 0.012] dex against a 0.023 dex margin -- reported as "degraded" while being
+  smaller than the error the estimator already carries. The margin is what the audit predeclared
+  as the line that matters, so the margin now decides, and statistical detectability is reported
+  in its own column: with 500 settings almost any nonzero effect is detectable, and "detectable
+  and practically equivalent" is the honest description of a real but negligible loss. The
+  headline reads clean as a result: f_D degraded, kappa_OFF degraded, D_A practically equivalent.
+
 - **Cohort extension with lineage** (`--phase extend --n-extra N`). A draw can be impossible to
   realize for reasons that belong to the draw rather than the science: two of this cohort's 500
   theta drove the 20 s render past the machine's memory (>128 GB), and notably NOT because they

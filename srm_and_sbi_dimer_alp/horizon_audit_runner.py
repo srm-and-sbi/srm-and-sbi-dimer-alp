@@ -931,7 +931,7 @@ def _phase_analyze(spec, args):
                           delta_abs[:, :, i]))
     headers = ["primary estimand", "reset MAE", "cont MAE (w0)",
                f"cont MAE (w{n_windows - 1})", "paired |err| delta (last w)", "95% CI",
-               "margin", "verdict"]
+               "margin", "detectable", "verdict"]
     rows, verdicts = [], {}
     for label, mkey, unit, cont_abs_e, reset_abs_e, d_abs in primaries:
         d_mean, d_lo, d_hi = ha.bootstrap_mean_ci(d_abs[:, -1:], rng=rng)
@@ -944,14 +944,19 @@ def _phase_analyze(spec, args):
                      f"{float(np.nanmean(cont_abs_e[:, -1])):.3f}",
                      f"{float(d_mean[0]):+.3f}",
                      f"[{float(d_lo[0]):+.3f}, {float(d_hi[0]):+.3f}]",
-                     f"{margins[mkey]:g} {unit}", verdict])
+                     f"{margins[mkey]:g} {unit}",
+                     "yes" if ha.detectable(d_lo[0], d_hi[0]) else "no", verdict])
     reporter.table(
         "PRIMARY audit: paired absolute-error contrast with prespecified equivalence margins",
         headers, rows,
-        note="the contrast is |continuous error| minus the same trajectory's mean |reset error| "
-             "at the LAST window (positive = continuous worse); 'equivalent' requires the whole "
-             "CI inside (-margin, +margin) -- a CI merely covering zero is 'inconclusive'. "
-             "Margins default to the estimator's own in-model error on the 10,000-video "
+        note="the contrast is |continuous error| minus the mean |reset error| across the ten "
+             "reset clips generated at the same parameter setting, at the LAST window (positive "
+             "= continuous worse). The MARGIN decides the verdict, not zero: 'degraded' needs "
+             "the whole CI above the margin, 'equivalent' the whole CI inside "
+             "(-margin, +margin). 'Detectable' answers the separate question of whether the "
+             "effect is distinguishable from zero -- a quantity can be detectable AND "
+             "equivalent, which is the honest description of a real but practically negligible "
+             "loss. Margins default to the estimator's own in-model error on the 10,000-video "
              "held-out recovery.")
 
     # ---- first-window exchangeability gate ----
@@ -1307,12 +1312,19 @@ def _phase_selftest(spec, args):
     assert abs_d.mean() > 1.8                                        # degradation is caught
     print("  [PASS] paired statistics: signed misses symmetric degradation, absolute catches it")
 
-    # 6. Equivalence verdicts: three outcomes, and 'CI covers zero' is NOT equivalence.
-    assert ha.equivalence_verdict(0.05, 0.30, margin=0.10) == "degraded"
+    # 6. Verdicts: the MARGIN decides, not zero, and detectability is reported separately.
+    assert ha.equivalence_verdict(0.15, 0.30, margin=0.10) == "degraded"    # whole CI > margin
     assert ha.equivalence_verdict(-0.04, 0.06, margin=0.10) == "equivalent"
     assert ha.equivalence_verdict(-0.30, 0.25, margin=0.10) == "inconclusive"
     assert ha.equivalence_verdict(np.nan, np.nan, margin=0.10) == "inconclusive"
-    print("  [PASS] equivalence: degraded / equivalent / inconclusive; wide CI is inconclusive")
+    # The case that motivated the fix: reliably nonzero yet well inside the margin. Testing zero
+    # first would call this "degraded"; the margin is what was predeclared to matter, so it is
+    # "equivalent" AND detectable -- both reported, neither hidden.
+    assert ha.equivalence_verdict(0.003, 0.012, margin=0.023) == "equivalent"
+    assert ha.detectable(0.003, 0.012) is True
+    assert ha.equivalence_verdict(0.05, 0.30, margin=0.10) == "inconclusive"  # spans the margin
+    assert ha.detectable(-0.04, 0.06) is False
+    print("  [PASS] verdicts: margin decides; detectable-but-equivalent is not called degraded")
 
     # 7. Stratification: fixed prior-range thirds, and a per-stratum margin that a prior-averaged
     #    margin would hide. Construct an estimator that is precise where the truth is large and
@@ -1329,7 +1341,9 @@ def _phase_selftest(spec, args):
     contrast = np.concatenate([np.full(40, 0.30), np.full(40, 0.30), np.full(40, 0.30)])
     rows = ha.stratified_margin_table(contrast, coh_lab, rec_err, rec_lab, rng=rng_s)
     pooled_margin = float(np.mean(rec_err))                          # 0.25: hides both regimes
-    assert rows[0]["verdict"] == "degraded" and rows[0]["margin"] > pooled_margin
+    # The SAME added error is negligible where the estimator is intrinsically poor and important
+    # where it is sharp -- which is the whole reason margins are recomputed per stratum.
+    assert rows[0]["verdict"] == "equivalent" and rows[0]["margin"] > pooled_margin
     assert rows[2]["verdict"] == "degraded" and rows[2]["margin"] < pooled_margin
     assert rows[0]["ratio"] < 1.0 < rows[2]["ratio"]     # same effect, opposite practical weight
     empty = ha.stratified_margin_table(contrast, np.full(120, 1), rec_err, rec_lab, rng=rng_s)

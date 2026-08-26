@@ -247,24 +247,43 @@ def equivalence_verdict(lo, hi, margin):
 
     ``(lo, hi)`` is the bootstrap CI of the mean paired ABSOLUTE-error contrast (positive =
     continuous worse); ``margin`` the prespecified, scientifically meaningful degradation bound.
-    Absence of a detected difference is not evidence of equivalence, so three outcomes:
 
-        ``"degraded"``   -- the CI lies entirely above zero: a reliable accuracy loss.
-        ``"equivalent"`` -- the CI lies entirely inside (-margin, +margin): any effect is
-                            smaller than the margin in either direction.
-        ``"inconclusive"`` -- the CI is too wide to support either conclusion.
+        ``"degraded"``   -- the whole CI lies ABOVE the margin: the loss is larger than the
+                            error the method already carries, so it matters in practice.
+        ``"equivalent"`` -- the whole CI lies inside ``(-margin, +margin)``: whatever the effect
+                            is, it is smaller than that same bound.
+        ``"inconclusive"`` -- the CI spans the margin: too wide to support either conclusion.
 
-    A degradation can be both reliable and small: ``"degraded"`` with ``hi < margin`` reads as
-    real-but-below-margin, and the caller reports the numbers alongside the verdict.
+    STATISTICAL DETECTABILITY IS A SEPARATE QUESTION and is reported alongside, never folded in
+    (see :func:`detectable`). An effect can be reliably nonzero and practically negligible at the
+    same time -- with enough trajectories any nonzero effect becomes detectable -- and an earlier
+    version of this function returned ``"degraded"`` for exactly that case because it tested the
+    zero criterion first. That made the two outcomes overlap: a CI could sit entirely above zero
+    AND entirely inside the margin, and whichever test ran first won. The margin, not zero, is
+    what the audit predeclared as the line that matters, so the margin decides the verdict.
     """
     lo, hi = float(lo), float(hi)
     if not (np.isfinite(lo) and np.isfinite(hi)):
         return "inconclusive"
-    if lo > 0.0:
+    if lo > margin:
         return "degraded"
     if -margin < lo and hi < margin:
         return "equivalent"
     return "inconclusive"
+
+
+def detectable(lo, hi):
+    """Whether the effect is statistically distinguishable from zero -- reported, never a verdict.
+
+    Kept apart from :func:`equivalence_verdict` on purpose: 'we can measure it' and 'it matters'
+    are different claims, and conflating them is what makes a large study call every tiny effect
+    a degradation. A quantity can be ``detectable`` and ``"equivalent"`` at once; that pairing is
+    the honest description of a real but practically negligible loss.
+    """
+    lo, hi = float(lo), float(hi)
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return False
+    return lo > 0.0 or hi < 0.0
 
 
 def stratify_by_true_value(true_values, lower, upper, n_strata=3):
