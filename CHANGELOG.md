@@ -15,6 +15,17 @@ the simulator itself, whether that inheritance changes what the estimator report
 
 ### Added
 
+- **Recording-level audit alongside the per-window one.** The per-window tables answer a local
+  question -- what happens to a single 2 s inference as inherited state accumulates -- but the
+  experimental workflow never reports a window: it averages a recording's windows into one value
+  per cell, and the cell is the biological replicate. Analyze now applies that same production
+  operator to both arms and reports the contrast, at no extra simulation cost. The result
+  sharpens the conclusion: every error falls under aggregation (f_D 8.3 -> 5.6 pp, kappa_OFF
+  x3.02 -> x2.22) because averaging cancels the zero-mean part, yet no verdict changes, because
+  averaging preserves a bias. What survives aggregation is systematic -- and D_A survives it as
+  practically equivalent at both levels, which is a positive validation of the windowed workflow
+  for that estimand rather than a caveat.
+
 - **Verdicts decided against the margin, not against zero** (`equivalence_verdict` reworked;
   new `detectable`; selftest family 6 extended). The previous rule tested the zero criterion
   first, which made two outcomes overlap: a CI could lie entirely above zero AND entirely inside

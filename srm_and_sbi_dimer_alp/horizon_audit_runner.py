@@ -959,6 +959,49 @@ def _phase_analyze(spec, args):
              "loss. Margins default to the estimator's own in-model error on the 10,000-video "
              "held-out recovery.")
 
+    # ---- RECORDING-LEVEL audit: the number the production workflow actually reports ----
+    # The per-window table above is a LOCAL audit: what happens to one 2 s inference as inherited
+    # state accumulates. But the experimental workflow does not report a window -- it aggregates
+    # the windows of a recording into ONE value per cell, and the cell is the biological
+    # replicate. So the operationally relevant question is what the horizon does to that summary.
+    # Applying the production operator (the mean over a recording's windows) to each arm answers
+    # it directly, at no extra simulation cost: averaging cancels the zero-mean part of the error
+    # and leaves whatever is systematic, which is exactly what a bias does.
+    agg_headers = ["primary estimand", "reset recording error", "continuous recording error",
+                   "paired delta", "95% CI", "margin", "verdict"]
+    agg_rows = []
+    aggregates = [("f_D (state, vs window-start truth)", "f_D", "pp",
+                   np.nanmean(fd_err_cont, axis=1), np.nanmean(fd_err_reset, axis=1))]
+    for key in ("diffusivity_alp", "rate_dissociation"):
+        i = keys.index(key)
+        aggregates.append((f"{key} (constant, vs theta)", key, "dex",
+                           np.nanmean(cont_err[:, :, i], axis=1),
+                           np.nanmean(reset_err[:, :, i], axis=1)))
+    for label, mkey, unit, cont_agg, reset_agg in aggregates:
+        d_abs = np.abs(cont_agg) - np.abs(reset_agg)
+        d_mean, d_lo, d_hi = ha.bootstrap_mean_ci(d_abs[:, None], rng=rng)
+        verdict = (ha.equivalence_verdict(d_lo[0], d_hi[0], margins[mkey])
+                   if n_traj >= 2 else "not evaluable (T=1)")
+        agg_rows.append([label,
+                         f"{float(np.nanmean(np.abs(reset_agg))):.3f} {unit}",
+                         f"{float(np.nanmean(np.abs(cont_agg))):.3f}",
+                         f"{float(d_mean[0]):+.3f}",
+                         f"[{float(d_lo[0]):+.3f}, {float(d_hi[0]):+.3f}]",
+                         f"{margins[mkey]:g} {unit}", verdict])
+    reporter.table(
+        "RECORDING-LEVEL audit: the production summary, not the individual window",
+        agg_headers, agg_rows,
+        note="each recording's ten window estimates are averaged with the SAME operator the "
+             "experimental workflow uses, then compared with the recording's truth; the "
+             "contrast is again continuous minus reset at the same parameter setting. This is "
+             "the operationally relevant number: the workflow reports one value per cell and "
+             "treats the cell, never the window, as the biological replicate. A quantity whose "
+             "individual windows degrade can still aggregate to a usable recording summary if "
+             "the added error is zero-mean; one that carries a systematic shift does not, "
+             "because averaging preserves a bias. The margin is the per-window scientific "
+             "tolerance and is applied unchanged, which is conservative here: averaging ten "
+             "windows reduces the noise floor but not the bias.")
+
     # ---- first-window exchangeability gate ----
     if n_traj >= 2:
         gate_ok = True
