@@ -581,6 +581,43 @@ def _scope_met():
     return np.array([MET_CAMERA_PHYSICAL[k] for k in det.DETECTOR_SCOPE_KEYS], dtype=float)
 
 
+def biology_fixed_imaging(data_bank_root, map_label):
+    """The biology render's fixed 11-key imaging vector, resolved from the artifacts.
+
+    Biology holds imaging FIXED at the calibrated vector the training videos were generated
+    with: the six emitter parameters come from the ``Nuisance_DLI`` artifact at run time (its
+    Sample Geometric Median when it pools multiple vectors, so the choice preserves parameter
+    correlations rather than composing per-dimension medians), and the five SCOPE camera
+    parameters are pinned to their correct-source MET values. The values live only in the
+    artifact -- they appear in no source file -- so hardcoding them anywhere would silently
+    drift from whatever the videos were actually built with.
+
+    Shared by the posterior-predictive render and the horizon audit, so both draw the SAME
+    imaging vector from ONE definition. Returns ``(vector, description)`` where ``vector`` is
+    the physical 11-key ``DETECTOR_IMAGING``-order render input.
+    """
+    from .detector_nuisance_dli import artifact_path, require_nuisance_dli
+    det_paths = det.detector_paths(PARAMETERS.paths)
+    nu = require_nuisance_dli(data_bank_root / det_paths.posit_subdir,
+                              det_paths.project_alias, map_label)
+    emitter_log10 = np.asarray(nu.samples, dtype=float)
+    if emitter_log10.shape[0] != 1:
+        # A multi-vector artifact has no single "the" imaging vector; take its SGM so the
+        # choice is the correlation-preserving one rather than an arbitrary row.
+        span = np.ptp(10.0 ** emitter_log10, axis=0)
+        span[span <= 0] = 1.0
+        idx, _m = sample_geometric_median(10.0 ** emitter_log10, span)
+        emitter_log10 = emitter_log10[idx:idx + 1]
+    emitter = 10.0 ** emitter_log10[0]
+    vec = np.concatenate([emitter, _scope_met()])
+    n_pool = int(np.asarray(nu.samples).shape[0])
+    desc = (f"calibrated Nuisance_DLI vector "
+            f"({artifact_path(data_bank_root / det_paths.posit_subdir, det_paths.project_alias, map_label).name}"
+            + ("" if n_pool == 1 else f", SGM of {n_pool} vectors")
+            + ") + MET SCOPE camera")
+    return vec, desc
+
+
 def _ppv_spec(cfg, args):
     """Resolve the workflow-specific half: which block the MAP supplies, and how the other is fixed."""
     paths = cfg.paths
@@ -633,25 +670,11 @@ def _ppv_spec(cfg, args):
         S["rds_desc"] = "full reactive system from the MAP reaction-diffusion parameters"
 
         def imaging_physical(a, map_theta):
-            # Biology holds imaging FIXED at the calibrated vector the training videos were
-            # generated with, read from the Nuisance_DLI artifact at run time. The values live
-            # only in that artifact -- they appear in no source file -- so hardcoding them here
-            # would silently drift from whatever the videos were actually built with.
-            from .detector_nuisance_dli import artifact_path, require_nuisance_dli
-            det_paths = det.detector_paths(PARAMETERS.paths)
-            nu = require_nuisance_dli(data_bank_root / det_paths.posit_subdir,
-                                      det_paths.project_alias, map_label)
-            emitter_log10 = np.asarray(nu.samples, dtype=float)
-            if emitter_log10.shape[0] != 1:
-                # A multi-vector artifact has no single "the" imaging vector; take its SGM so the
-                # choice is the correlation-preserving one rather than an arbitrary row.
-                span = np.ptp(10.0 ** emitter_log10, axis=0)
-                span[span <= 0] = 1.0
-                idx, _m = sample_geometric_median(10.0 ** emitter_log10, span)
-                emitter_log10 = emitter_log10[idx:idx + 1]
-            emitter = 10.0 ** emitter_log10[0]
+            # Biology holds imaging FIXED at the calibrated Nuisance_DLI + MET SCOPE vector,
+            # resolved by the shared module-level helper (one definition, also used by the
+            # horizon audit), with any --set-imaging overrides applied on top.
+            vec, desc = biology_fixed_imaging(data_bank_root, map_label)
             overrides = _parse_kv(a.set_imaging, "--set-imaging")
-            vec = np.concatenate([emitter, _scope_met()])
             if overrides:
                 find = {k: i for i, k in enumerate(det.DETECTOR_IMAGING_KEYS)}
                 for k, v in overrides.items():
@@ -659,11 +682,8 @@ def _ppv_spec(cfg, args):
                         raise ValueError(f"--set-imaging {k!r} is not an imaging parameter; "
                                          f"valid keys are {det.DETECTOR_IMAGING_KEYS}.")
                     vec[find[k]] = v
-            n_pool = int(np.asarray(nu.samples).shape[0])
-            return vec, (f"calibrated Nuisance_DLI vector ({artifact_path(data_bank_root / det_paths.posit_subdir, det_paths.project_alias, map_label).name}"
-                         + ("" if n_pool == 1 else f", SGM of {n_pool} vectors")
-                         + ") + MET SCOPE camera"
-                         + (" [with --set-imaging overrides]" if overrides else ""))
+                desc += " [with --set-imaging overrides]"
+            return vec, desc
 
         def build_rds(a, map_theta):
             # Reactions ARE the inference target here, so the full reactive system is built --

@@ -5,6 +5,92 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.20 - 2026-08-24
+
+The horizon audit: a controlled test of the reset assumption behind the experimental window
+analysis. The estimator trains on independently initialized model-window simulations but is
+deployed on consecutive windows of continuous recordings, whose later windows inherit latent state
+(evolved populations, spatial organization, accumulated photophysics). The audit measures, under
+the simulator itself, whether that inheritance changes what the estimator reports.
+
+### Added
+
+- **Stratified-margin robustness inside the audit's `analyze` phase** (kernel
+  `stratify_by_true_value` + `stratified_margin_table`; `--recovery-artifact`). A single
+  prior-averaged equivalence margin can mislead when the estimator's error depends on the true
+  value -- and it does: held-out recovery error runs from +-68% at 1-7 emitters to +-9% at 46-316,
+  so a pooled margin is dominated by the sparse end. The table recomputes BOTH sides of every
+  comparison inside fixed thirds of the prior range (prespecified geometry, not data-dependent
+  quantiles; the prior is uniform in log10, so thirds carry equal expected mass): the margin
+  becomes the estimator's own held-out error for true values in that stratum, and the statistic
+  the paired contrast for cohort trajectories in the same stratum, bootstrapped within it. f_D is
+  stratified in prespecified composition bins through the SHARED composition kernel. Thinly
+  populated strata are reported with their n, never dropped -- an empty stratum is a coverage
+  statement about the cohort, not an absence of effect. Selftest family 7 covers the logic with an
+  estimator whose pooled margin hides both a hard and an easy regime.
+
+- **Horizon-audit analysis** (`Script_Bank/Analysis/SRM_AND_SBI_DIMER_ALP_Horizon_Audit.py` +
+  companion `.md`; engine `horizon_audit_runner.py`, statistics kernel `horizon_audit.py`). For
+  each theta drawn from the training prior it contrasts two equal-window ensembles: R
+  independently initialized reset simulations (the training factorization) against ONE continuous
+  long simulation sliced into consecutive model-length windows exactly as the Experiment stage
+  slices real recordings, with the imaging vector pinned to the calibrated `Nuisance_DLI` + MET
+  SCOPE vector on both sides so the paired within-trajectory contrast cancels everything but the
+  inherited state. Four resumable phases (`prepare`/`generate`/`infer`/`analyze`), the expensive
+  two embarrassingly parallel over `--theta-start/--theta-stop` ranges with per-theta output
+  files. Constant parameters are audited against the drawn theta (median error, interval coverage,
+  within-trajectory slope, paired last-window contrast with trajectory-bootstrap CIs); the species
+  counts are dynamic state, so the composition readout is audited against the ACTUAL per-window
+  population extracted frame-by-frame from the continuous trajectory (shared
+  `population_composition` kernel). Prior-support exceedance is tracked per position. Estimates
+  are posterior draws (quantiles + raw cloud, default `unrestricted` sampling, matching the
+  experimental-baseline methodology) rather than per-window MAP optimization, which is what makes
+  a few-thousand-window cohort feasible. The trajectory is the independent statistical unit
+  throughout. Post-hoc analysis, biology-only (the detector workflow marginalizes the
+  reaction-diffusion block, so there is nothing to audit), never wired into the stage dispatcher.
+
+### Changed
+
+- **The audit's decision-critical statistics were corrected after external review, before any
+  cohort was generated.** (1) The state truth is the WINDOW-START population -- the estimator's
+  count labels are the initial populations of its training windows; judging the composition
+  against the within-window mean manufactured a ~36 pp estimand-mismatch "error" where the real
+  start-referenced error is ~1 pp (measured on the smoke; mean/end/unrounded-label references
+  retained as labeled sensitivity rows). (2) The primary statistic is the paired ABSOLUTE-error
+  contrast (|cont err| − mean |reset err|); a signed contrast tests bias and can read zero while
+  accuracy collapses symmetrically (signed kept as the secondary bias read). (3) Verdicts are
+  three-outcome (degraded / equivalent / inconclusive) against prespecified equivalence margins
+  (default: the estimator's own in-model error on the 10,000-video held-out recovery) -- a CI
+  merely covering zero is never reported as equivalence. (4) Coverage is disaggregated by
+  estimand kind: constants (R_ON excluded from verdicts), f_D versus start truth from the
+  within-draw fraction distribution, and stale-t=0 count rows labeled as state drift (pooled,
+  they had manufactured an artificial decline: constants 100% / counts 0% on the smoke).
+  (5) Seeds are spawned per (theta, arm, replicate) via ``SeedSequence`` from a persisted master
+  seed -- resets are independently randomized, not copies of one stream (ReaDDy dynamics remain
+  OS-seeded, documented). (6) Every cohort carries a content digest stamped into every artifact
+  and verified before use; a stale or theta-mismatched file is refused, never silently mixed.
+  Primary estimands are predeclared (f_D, D_A, kappa_OFF); everything else is exploratory. A
+  first-window exchangeability gate separates arm-construction artifacts from horizon effects,
+  and the flow-mass diagnostic is named precisely (unrestricted-flow mass outside the training
+  box, not "posterior mass outside the prior"). A ``--phase selftest`` covers the six
+  decision-critical logic families (truth references, seed uniqueness, coverage disaggregation,
+  stale-cohort rejection, absolute-vs-signed contrast, equivalence verdicts).
+- **The audit's generator follows the canonical ReaDDy teardown.** `_simulate_and_render` now
+  releases the ReaDDy kernel (`del tray, smut, stem, tray_poses` + `gc.collect()`) once the
+  trajectory is in numpy and before the render, exactly as the Simulation_RDS stage does between
+  simulations. Measured on a 2 s window: without it every simulation leaves ~48 threads behind
+  (61 -> 109 -> 157 -> 205 -> 253 -> 301 across six sequential runs); with it the count is flat at
+  13. Since the function runs `1 + n_resets` times per theta, a worker covering several theta would
+  otherwise accumulate thousands of threads and stall against the memory cap -- the failure mode
+  the canonical stage already documents (~47 simulations). Placed before `render_dli_video`, which
+  is ~94% of the function's runtime, so the kernel is not held during the render either.
+- **The biology fixed-imaging resolution is now a shared helper**
+  (`posterior_predictive_video_runner.biology_fixed_imaging`): the calibrated `Nuisance_DLI`
+  emitter block (SGM when the artifact pools multiple vectors) + the MET SCOPE camera, previously
+  a closure inside the posterior-predictive spec, now a module-level function used by both the
+  posterior-predictive render and the horizon audit — one definition, so the two cannot drift.
+  Behavior unchanged for the posterior-predictive render.
+
 ## 0.4.19 - 2026-08-24
 
 The temporal reduction now reads every input frame. At 5 s @ 50 FPS it was silently discarding the
