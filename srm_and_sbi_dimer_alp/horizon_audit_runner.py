@@ -1218,6 +1218,11 @@ def _phase_analyze(spec, args):
         fd_cont=fd_cont, fd_reset=fd_reset,
         fd_true_start_cont=ts_cont, fd_true_mean_cont=tm_cont, fd_true_end_cont=te_cont,
         fd_true_start_reset=ts_reset, fd_delta_abs=fd_delta_abs,
+        # f_D interval coverage against the window-START truth. Persisted because it is the
+        # calibration read the write-up quotes (nominal 0.90 falling to 0.39 by the last window)
+        # and a figure must be reproducible from this file alone, not from a re-derivation.
+        fd_cov50_cont=fd_cov["cont_c50"], fd_cov90_cont=fd_cov["cont_c90"],
+        fd_cov50_reset=fd_cov["reset_c50"], fd_cov90_reset=fd_cov["reset_c90"],
         cont_exceed=data["cont_exceed"], reset_exceed=data["reset_exceed"],
         parameter_keys=np.array(keys))
     print(f"Aggregated audit arrays saved to {arrays_path}")
