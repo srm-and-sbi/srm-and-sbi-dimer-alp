@@ -1132,6 +1132,28 @@ def _phase_analyze(spec, args):
                   note="fraction of continuous windows whose TRUE start population leaves "
                        "[10^0, 10^2.5] in any species -- state-support drift, distinct from "
                        "any estimator behavior.")
+    # Extrapolation control: is the degradation merely the estimator being asked about states
+    # outside its training support, or does it persist where the state never leaves the box?
+    # Restricting to trajectories that stay inside for EVERY window separates the two.
+    inside_all = ~outside.any(axis=2).any(axis=1)                    # (T,) never left the box
+    n_inside = int(inside_all.sum())
+    if n_inside >= 2:
+        in_first = float(np.nanmean(np.abs(fd_err_cont[inside_all, 0])))
+        in_last = float(np.nanmean(np.abs(fd_err_cont[inside_all, -1])))
+        d_in, dlo_in, dhi_in = ha.bootstrap_mean_ci(fd_delta_abs[inside_all, -1:], rng=rng)
+        reporter.stat(
+            "f_D degradation on trajectories that NEVER leave the count box",
+            f"{in_first:.2f} -> {in_last:.2f} pp (w0 -> w{n_windows - 1}); "
+            f"paired delta {float(d_in[0]):+.2f} [{float(dlo_in[0]):+.2f}, "
+            f"{float(dhi_in[0]):+.2f}] pp, n = {n_inside}",
+            note="the extrapolation control: these trajectories' TRUE state stays inside the "
+                 "trained count support at every window, so their degradation cannot be "
+                 "explained by the estimator being queried off its training support. A "
+                 "degradation that survives here is a property of the inherited state itself.")
+    else:
+        reporter.stat("f_D degradation on trajectories that NEVER leave the count box",
+                      f"not evaluable (n = {n_inside})",
+                      note="fewer than two trajectories stayed inside the box at every window.")
     reporter.stat("flow mass outside the training box, reset (%)",
                   f"{100 * float(np.nanmean(data['reset_exceed'])):.2f}",
                   note="unrestricted-flow draws outside the training box; a bounded-prior "
