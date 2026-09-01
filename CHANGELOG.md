@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.21 - 2026-09-01
+
+### Documentation
+
+- **Measured label occupancy of the MET probes recorded in `PROJECT_CONTEXT.md`** (dimer
+  brightness model section). The Fab preparation averages 1.64 dyes per fragment (Harwardt et
+  al. 2017, ensemble average). The InlB321-K280C construct carries at most one dye (single
+  engineered attachment site) at a degree of labeling of approximately 50% — measured by the
+  data-owning laboratory (personal communication, 2026-09-01) and not reported in the source
+  publications. The entry states the labeling-statistics consequence (visible dimers: two
+  thirds one dye, one third two dyes; visible-dimer mean 4/3× a single label, not 2×), notes
+  that both dimer brightness combination modes describe fully labeled dimers, and defers a
+  renderer label-occupancy layer to a future sibling as a candidate observation-model
+  extension.
+
 ## 0.4.20 - 2026-08-24
 
 The horizon audit: a controlled test of the reset assumption behind the experimental window

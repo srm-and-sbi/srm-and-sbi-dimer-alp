@@ -247,6 +247,21 @@ is visible on average (a photoswitching dye, whose time-averaged brightness is t
 geometric mean `GM(1×, 2×) = √2`, or ~50% labeling). It shares the `~2×` mean but
 has a heavier upper tail, and is kept for sensitivity checks.
 
+**Label occupancy (measured degrees of labeling):** The MET probes are not fully labeled.
+The Fab preparation carries an average of 1.64 dyes per fragment (an ensemble average;
+Harwardt et al. 2017). The InlB321-K280C construct has a single engineered
+dye-attachment site — at most one dye per ligand — and its degree of labeling is
+approximately 50%, measured by the data-owning laboratory (personal communication,
+2026-09-01) and not reported in the source publications. Under 50% occupancy, dye
+counts on a dimer are binomial: 25% two dyes, 50% one dye, 25% dark. Among visible
+dimers, two thirds carry one dye and one third carries two, so the visible-dimer mean
+brightness is 4/3× a single label rather than 2×. Both combination modes above describe
+fully labeled dimers; the measured occupancy therefore bounds how much of the
+MET-FAB → MET-INLB intensity ratio dimer composition alone can explain, and it renders
+unlabeled ligands and fully dark dimers invisible to the pipeline. A label-occupancy
+layer in the renderer is a candidate observation-model extension, deferred to a future
+sibling.
+
 The condition difference (MET-FAB vs MET-INLB) is carried by the **dimer fraction** (the
 species counts), with the combination model and the per-monomer brightness `mu_pc`
 shared across conditions — not by a per-condition brightness.
