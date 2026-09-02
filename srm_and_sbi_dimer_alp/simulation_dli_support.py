@@ -29,13 +29,18 @@ Module contents:
         compute_intensity         (top-level pixel-grid intensity assembly)
         add_pixel_counts          (helper: integrate Gaussian PSF over pixel grid)
 
-    Brightness state machine (photo-physics)
+    Brightness photo-physics
+        generate_brightness_photons      (stationary continuous per-dye brightness:
+                                          OU log-brightness, exact LogNormal(mu_pc,
+                                          sigma_pc) marginal at every frame, with
+                                          independent state-independent bleaching)
+
+    Retired brightness state machine (kept only as the as-implemented reference arm
+    for the stationarity audit; removed at adoption)
         compute_brightness               (theoretical brightness values at quantiles)
         compute_brightness_probability   (initial state probabilities)
         initialize_emitter_states        (sample initial state per emitter)
         generate_state_trajectories      (Markov-chain state evolution over frames)
-
-    Transition matrices (CTMC and DTMC)
         compute_matrices          (CTMC generator Q and DTMC stochastic matrix P
                                    from photobleaching + neighbor-decay rates)
 
@@ -342,8 +347,7 @@ def add_pixel_counts(intensity: np.ndarray,
 
 
 def compute_intensity(tracks: np.ndarray,
-                      states: np.ndarray,
-                      brightness: np.ndarray,
+                      emitter_photons: np.ndarray,
                       background_photons: np.ndarray,
                       xbounds: np.ndarray,
                       ybounds: np.ndarray,
@@ -351,16 +355,17 @@ def compute_intensity(tracks: np.ndarray,
                       dimer_mask: Optional[np.ndarray] = None,
                       dimer_mule: float = 2.0,
                       dimer_model: str = "sum",
-                      dimer_states: Optional[np.ndarray] = None) -> np.ndarray:
+                      dimer_photons: Optional[np.ndarray] = None) -> np.ndarray:
     """Compute the noise-free per-pixel photon-count image.
 
     Args:
         tracks: Particle coordinates of shape `(n_frames, 2, n_emitters)`,
             in pixel units. NaN for absent particles.
-        states: Emitter state index of shape `(n_frames, n_emitters)` —
-            an integer in `range(n_brightness_states)` per frame per emitter.
-        brightness: 1D array of brightness values (photon counts) indexed by
-            state, length `n_brightness_states`.
+        emitter_photons: Per-emitter, per-frame latent photon values of shape
+            `(n_frames, n_emitters)` (0 where bleached). Produced by
+            `generate_brightness_photons`; any per-frame photon source with this
+            shape is accepted, which is what the stationarity audit uses to run
+            the retired state-grid arm through the identical downstream path.
         background_photons: 2D array of shape `(n_pix_x, n_pix_y)` — the pre-PSF
             per-pixel photon floor added under the emitter signal. Zero by default
             (no background); the detector fills it with the optical background
@@ -383,10 +388,10 @@ def compute_intensity(tracks: np.ndarray,
             brightness is the SUM of two INDEPENDENT monomer brightnesses (photons add; an
             n-mer's intensity distribution is the n-fold convolution of the monomer's, Mutch
             et al. 2007 Biophys J; Digman & Gratton 2008 Number & Brightness) -- same mean
-            as `dimer_mule=2` but a lighter upper tail; requires `dimer_states`. "multiply":
+            as `dimer_mule=2` but a lighter upper tail; requires `dimer_photons`. "multiply":
             brightness is scaled by `dimer_mule` (a fixed factor of one monomer draw).
-        dimer_states: the second label's INDEPENDENT brightness state trajectory (same shape
-            as `states`); used only when `dimer_model="sum"`.
+        dimer_photons: the second label's INDEPENDENT per-frame photon values (same shape
+            as `emitter_photons`); used only when `dimer_model="sum"`.
 
     Returns:
         Intensity array of shape `(n_pix_x, n_pix_y, n_frames)`, in photon
@@ -394,22 +399,22 @@ def compute_intensity(tracks: np.ndarray,
     """
     # Broadcast the photon floor along the frame axis -> (n_pix_x, n_pix_y, n_frames).
     intensity = np.repeat(background_photons[:, :, None], tracks.shape[0], axis=2)
-    # Look up per-emitter, per-frame brightness from the state index.
-    # states.T has shape (n_emitters, n_frames); indexing brightness produces (n_emitters, n_frames);
-    # reshape to (1, n_emitters, n_frames) for broadcast in add_pixel_counts.
-    brightness_array = brightness[states.T].reshape(1, states.shape[1], -1)
+    # emitter_photons has shape (n_frames, n_emitters); transpose to
+    # (n_emitters, n_frames) and reshape to (1, n_emitters, n_frames) for
+    # broadcast in add_pixel_counts.
+    brightness_array = emitter_photons.T.reshape(1, emitter_photons.shape[1], -1).copy()
     if dimer_mask is not None:
         if dimer_model == "sum":
             # Physically-motivated dimer: two co-located labels, photons ADD, so the merged
             # brightness is the SUM of two INDEPENDENT monomer brightnesses -- an n-mer's
             # intensity distribution is the n-fold convolution of the monomer's (Mutch et al.
             # 2007 Biophys J; Digman & Gratton 2008 Number & Brightness). Same mean as
-            # dimer_mule=2 but a lighter upper tail than doubling one draw. dimer_states is the
-            # second label's INDEPENDENT flicker trajectory.
-            if dimer_states is None:
-                raise ValueError("dimer_model='sum' requires dimer_states (the second label's "
-                                 "independent brightness state trajectory).")
-            second = brightness[dimer_states.T].reshape(1, dimer_states.shape[1], -1)
+            # dimer_mule=2 but a lighter upper tail than doubling one draw. dimer_photons is
+            # the second label's INDEPENDENT flicker trajectory.
+            if dimer_photons is None:
+                raise ValueError("dimer_model='sum' requires dimer_photons (the second label's "
+                                 "independent per-frame photon values).")
+            second = dimer_photons.T.reshape(1, dimer_photons.shape[1], -1)
             brightness_array[dimer_mask] += second[dimer_mask]
         else:
             # 'multiply': merged-spot brightness = monomer * dimer_mule. A dimer is
@@ -422,7 +427,81 @@ def compute_intensity(tracks: np.ndarray,
 
 
 # =============================================================================
-# Brightness state machine (photo-physics)
+# Brightness photo-physics (stationary continuous per-dye process)
+# =============================================================================
+
+def generate_brightness_photons(nframes: int,
+                                nemitters: int,
+                                mu_pc: float,
+                                sigma_pc: float,
+                                lambda_rate: float,
+                                prob_photo_bleach: float,
+                                numb_photo_bleach: int,
+                                delta_frame: float,
+                                seed: Optional[int] = None) -> np.ndarray:
+    """Stationary continuous per-dye brightness with independent bleaching.
+
+    Per-dye log-brightness follows a stationary Ornstein-Uhlenbeck process,
+    updated per frame as an AR(1):
+
+        z_0 ~ N(0, sigma_pc^2)
+        z_{t+1} = rho * z_t + sigma_pc * sqrt(1 - rho^2) * eps_t,   rho = exp(-lambda_rate * delta_frame)
+        photons_t = mu_pc * exp(z_t)
+
+    By induction the per-frame marginal is exactly LogNormal(ln mu_pc, sigma_pc^2)
+    at EVERY frame: no initialization transient, no finite-grid ceiling, and
+    sigma_pc carries its documented marginal meaning. `lambda_rate` is the
+    correlation-decay rate of ln-brightness (ACF(lag) = exp(-lambda_rate * lag)),
+    NOT a jump-event rate; brightness is constant within a frame (per-frame draws,
+    the same sampling convention as the retired state grid).
+
+    Photobleaching is the same state-independent law as before, extracted from the
+    retired generator into the equivalent independent per-frame Bernoulli:
+
+        prob_1 = 1 - (1 - prob_photo_bleach) ** (1 / numb_photo_bleach)
+
+    A bleached dye emits 0 photons from its bleach frame onward (absorbing), and
+    every dye is active at the first frame, exactly as in the retired chain.
+    Because bleaching is state-independent, the brightness law among active dyes
+    is unchanged by it.
+
+    Args:
+        nframes: Number of frames.
+        nemitters: Number of independent dyes (one process per dye; a dimer's
+            second label gets its own independent call).
+        mu_pc, sigma_pc: Median (photons) and ln-spread of the per-frame
+            single-dye brightness law.
+        lambda_rate: Correlation-decay rate of ln-brightness, in 1/s.
+        prob_photo_bleach: Bleaching probability over `numb_photo_bleach` frames.
+        numb_photo_bleach: FIXED reference-frame count (100), not the clip's
+            frame count (see `compute_matrices` for the rationale).
+        delta_frame: Time between frames in seconds.
+        seed: Optional RNG seed.
+
+    Returns:
+        Array of shape `(nframes, nemitters)`: latent photon values per dye per
+        frame (float, 0.0 where bleached).
+    """
+    rng = np.random.default_rng(seed)
+    rho = np.exp(-lambda_rate * delta_frame)
+    innovation = sigma_pc * np.sqrt(1.0 - rho * rho)
+    z = np.empty((nframes, nemitters), dtype=float)
+    z[0] = rng.normal(0.0, sigma_pc, size=nemitters)
+    noise = rng.normal(0.0, innovation, size=(max(nframes - 1, 0), nemitters))
+    for t in range(1, nframes):
+        z[t] = rho * z[t - 1] + noise[t - 1]
+    photons = mu_pc * np.exp(z)
+    prob_1 = 1.0 - (1.0 - prob_photo_bleach) ** (1.0 / numb_photo_bleach)
+    bleach_draws = rng.random(size=(nframes, nemitters)) < prob_1
+    bleach_draws[0, :] = False
+    active = np.cumprod(~bleach_draws, axis=0).astype(bool)
+    return photons * active
+
+
+# =============================================================================
+# Retired brightness state machine (photo-physics). Retired from the render
+# path by the stationarity fix; retained ONLY as the as-implemented reference
+# arm for the stationarity audit, and removed at adoption.
 # =============================================================================
 
 def compute_brightness(brightness_quantile: np.ndarray,
@@ -728,7 +807,7 @@ def render_dli_video(pro_tray_poses: np.ndarray,
     artifact, camera from the SCOPE box); the Detector stage draws the six emitter parameters
     as its learnable target and the five camera as the SCOPE nuisance (which re-exports this
     renderer as ``render_detector_video``). The fixed hyperparameters that are not part of the
-    vector (``brightness_quantile``, ``numb_photo_bleach``, ``dimer_mule``) are read from the
+    vector (``numb_photo_bleach``, ``dimer_mule``) are read from the
     canonical parameter table; ``delta_frame`` is the fixed camera cadence
     (``PARAMETERS.simulation.timing``). The lower-level building blocks are reused unchanged.
 
@@ -744,8 +823,8 @@ def render_dli_video(pro_tray_poses: np.ndarray,
             mean, lighter tail than doubling; an n-mer's brightness is the n-fold
             convolution of the monomer, Mutch et al. 2007). "multiply" scales one draw by
             ``dimer_mule`` (heavier tail; retained as an option).
-        seed: optional RNG seed for PSF widths, states, and EMCCD noise.
-        verbose: forwarded to ``compute_matrices``.
+        seed: optional RNG seed for PSF widths, brightness, and EMCCD noise.
+        verbose: print the resolved OU brightness quantities.
 
     Returns:
         Frames of shape ``(root_size_px, root_size_px, n_frames)`` in ADU.
@@ -784,40 +863,41 @@ def render_dli_video(pro_tray_poses: np.ndarray,
     )
     PSF = Gaussian(per_emitter_sqrt2sigma)
 
-    # --- Photo-physics + CTMC/DTMC matrices --------------------------------
-    # mu_pc, sigma_pc, prob_photo_bleach, lambda_rate from the vector; flicker locality
-    # (kappa_penalty) derived from the brightness scale. brightness_quantile + numb_photo_bleach
-    # fixed; delta_frame = fixed cadence.
+    # --- Photo-physics: stationary continuous per-dye brightness -----------
+    # mu_pc, sigma_pc, prob_photo_bleach, lambda_rate from the vector;
+    # numb_photo_bleach fixed; delta_frame = fixed cadence. The per-frame
+    # marginal is exactly LogNormal(mu_pc, sigma_pc) at every frame and
+    # lambda_rate is the correlation-decay rate of ln-brightness
+    # (see generate_brightness_photons).
     mu_pc = img["mu_pc"]
     sigma_pc = img["sigma_pc"]
-    brightness_quantile = np.asarray(_fixed("brightness_quantile"))
     delta_frame = PARAMETERS.simulation.timing.frame_time_seconds
-    _Q, P = compute_matrices(
+    if verbose:
+        rho = np.exp(-img["lambda_rate"] * delta_frame)
+        print(f"[render_dli_video] OU brightness: mu_pc={mu_pc:.4g} photons, "
+              f"sigma_pc={sigma_pc:.4g} (ln), lambda_rate={img['lambda_rate']:.4g}/s "
+              f"(per-frame rho={rho:.4f}), prob_photo_bleach={img['prob_photo_bleach']:.4g} "
+              f"per {_fixed('numb_photo_bleach')} frames")
+    emitter_photons = generate_brightness_photons(
+        nframes=nframes, nemitters=nemitters,
         mu_pc=mu_pc, sigma_pc=sigma_pc,
-        brightness_quantile=brightness_quantile,
+        lambda_rate=img["lambda_rate"],
         prob_photo_bleach=img["prob_photo_bleach"],
         numb_photo_bleach=_fixed("numb_photo_bleach"),
-        delta_frame=delta_frame,
-        lambda_rate=img["lambda_rate"],
-        verbose=verbose,
+        delta_frame=delta_frame, seed=seed,
     )
-
-    # --- Brightness state trajectories -------------------------------------
-    states = generate_state_trajectories(
-        nframes=nframes, nemitters=nemitters, P=P,
-        brightness_quantile=brightness_quantile,
-        scale=mu_pc, shape=sigma_pc, loc=0, seed=seed,
-    )
-    brightness = compute_brightness(brightness_quantile, scale=mu_pc, shape=sigma_pc, loc=0)
     # For dimer_model="sum", each dimer's SECOND label needs its OWN independent flicker
     # trajectory (a dimer = two labels, brightness = X1 + X2). Independent seed so it is not
     # identical to the first label's; None stays non-deterministic.
-    dimer_states = None
+    dimer_photons = None
     if dimer_model == "sum":
-        dimer_states = generate_state_trajectories(
-            nframes=nframes, nemitters=nemitters, P=P,
-            brightness_quantile=brightness_quantile,
-            scale=mu_pc, shape=sigma_pc, loc=0,
+        dimer_photons = generate_brightness_photons(
+            nframes=nframes, nemitters=nemitters,
+            mu_pc=mu_pc, sigma_pc=sigma_pc,
+            lambda_rate=img["lambda_rate"],
+            prob_photo_bleach=img["prob_photo_bleach"],
+            numb_photo_bleach=_fixed("numb_photo_bleach"),
+            delta_frame=delta_frame,
             seed=(None if seed is None else seed + 1),
         )
 
@@ -839,10 +919,10 @@ def render_dli_video(pro_tray_poses: np.ndarray,
 
     # --- Noise-free intensity + EMCCD noise --------------------------------
     intensity = compute_intensity(
-        tracks=tracks_pixels, states=states, brightness=brightness,
+        tracks=tracks_pixels, emitter_photons=emitter_photons,
         background_photons=optical_background, xbounds=xbounds, ybounds=ybounds, PSF=PSF,
         dimer_mask=dimer_mask, dimer_mule=_fixed("dimer_mule"),
-        dimer_model=dimer_model, dimer_states=dimer_states,
+        dimer_model=dimer_model, dimer_photons=dimer_photons,
     )
     frames = generate_frames(intensity, detector, seed=seed)
     return frames

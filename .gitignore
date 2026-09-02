@@ -64,3 +64,9 @@ Script_Bank/HPC/hpc_local.env
 
 # Local recovery-codes signpost (points to ~/.config/recovery-codes/; contains NO codes; stays local)
 RECOVERY_CODES.md
+
+# Audit-worktree shadow data bank (symlinked canonical inputs + local render outputs)
+Data_Bank_Audit/
+
+# Lossless video outputs (large; regenerable from the persisted npz clips)
+*.mkv
