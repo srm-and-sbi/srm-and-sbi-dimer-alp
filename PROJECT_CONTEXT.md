@@ -535,8 +535,9 @@ rather than a single monolithic support file. The modules and their roles:
   `build_simulation` by import, and draws the six reaction-diffusion nuisance
   values (three species counts, three diffusivities) per simulation.
 - **`simulation_dli_support.py`** — the imaging pipeline: Gaussian PSF, EMCCD
-  detector, intensity accumulation, the brightness state machine, the transition
-  matrices (including photobleaching), and the top-level imaging orchestrator.
+  detector, intensity accumulation, the brightness photo-physics (stationary OU
+  ln-brightness flicker with absorbing photobleaching), and the top-level
+  imaging orchestrator.
 - **`detector_simulation_dli_support.py`** — the detector DLI forward model:
   re-exports the shared, source-agnostic renderer `render_dli_video` under the
   detector-facing name `render_detector_video`, so both DLI stages render
@@ -775,7 +776,7 @@ shared runner, and produces a defined on-disk artifact. Module paths are relativ
 | DIMER reaction system (`A + A ↔ B`, `B ↔ C`): species, diffusion coefficients, reaction rates, simulation box | `simulation_rds_support.py` → `build_system()`; the ReaDDy simulation is then assembled by `build_simulation()` | (in-memory ReaDDy system/simulation; trajectory written below) |
 | RDS trajectory recording (particle positions, species, time over the recording length) | entry point `SRM_AND_SBI_DIMER_ALP_Simulation_RDS.py` (drives `build_system()` → `build_simulation()`) | trajectory `.h5` (HDF5, ReaDDy convention); sampled theta set `.zarr` (via `io.py` → `save_theta_set()`) |
 | Trajectory extraction (per-frame poses and the dimer mask) | `simulation_rds_support.py` → `extract_trajectory_poses()` (reused by the imaging stage, which requests the dimer mask) | (per-frame pose arrays passed to imaging) |
-| Diffraction-limited imaging forward model: Gaussian PSF, Poisson + EMCCD readout noise, dimer-brightness scaling, photobleaching | `simulation_dli_support.py` → `render_dli_video()` (source-agnostic renderer of an assembled 11-key imaging vector; shared by both DLI stages), with `Gaussian` / `sample_psf_width()` (PSF), `compute_intensity()` + `add_pixel_counts()` (intensity accumulation), `compute_brightness()` / `compute_brightness_probability()` and `generate_state_trajectories()` (brightness state machine), `compute_matrices()` (transition matrices incl. photobleaching), `EMCCD` / `add_noise()` / `generate_frames()` (detector noise) | (noised video array passed to writer below) |
+| Diffraction-limited imaging forward model: Gaussian PSF, Poisson + EMCCD readout noise, dimer-brightness scaling, photobleaching | `simulation_dli_support.py` → `render_dli_video()` (source-agnostic renderer of an assembled 11-key imaging vector; shared by both DLI stages), with `Gaussian` / `sample_psf_width()` (PSF), `compute_intensity()` + `add_pixel_counts()` (intensity accumulation), `generate_brightness_photons()` (brightness photo-physics: stationary OU ln-brightness flicker + absorbing photobleaching), `EMCCD` / `add_noise()` / `generate_frames()` (detector noise) | (noised video array passed to writer below) |
 | DLI video output (chunked, bit-depth-converted) | entry point `SRM_AND_SBI_DIMER_ALP_Simulation_DLI.py` (drives `extract_trajectory_poses()` → `render_dli_video()`, with the imaging block marginalized from `Nuisance_DLI` + the SCOPE box) | `.zarr` video set, shape `(frame_count, height, width)` (via `io.py` → `convert_video_dtype()`, `save_video_set()`) |
 | Parameter prior and specification (ranges, log flags, units, labels; log-uniform prior and bounds) | `parameterization.py` → `PARAMETERS` (a `Parameters` singleton) with `build_prior()`, `theta_lower_bound()`, `theta_upper_bound()`, `parameter_find()` | (configuration in code; sampled theta persisted in the RDS theta-set `.zarr`) |
 | NPE + MAF estimator with 3D-CNN + temporal-transformer embedding | `inference_network.py` → `Complex3DCNN` (video encoder), `TemporalTransformer` (with `AttentionBlock`, `PositionalEncoding`); training wired in `inference_support.py` → `setup_training()`, `train_loop()` (with the resurrect branch) | (in-memory network; checkpoint + posterior written below) |
@@ -867,8 +868,8 @@ reference run element-by-element. Three pillars carry this:
    theta.
 3. **Imaging-pipeline functional equivalence.** The Gaussian PSF (erf-based
    pixel integration), the EMCCD model (Poisson photoelectrons, stochastic Gamma
-   multiplication, Gaussian readout), the
-   brightness state machine, and the duration-independent photobleaching model
+   multiplication, Gaussian readout), the stationary brightness photo-physics,
+   and the duration-independent photobleaching model
    produce videos of the correct shape, dtype, and value distribution.
 
 ### Reproducibility characteristics
@@ -1045,9 +1046,9 @@ localizations per frame undercount the receptors, both because dim or overlappin
 emitters are missed and because a fraction of emitters are dark or bleached at any
 instant. The bleached fraction follows from the calibrated photobleaching
 probability through the fixed hundred-frame survival law; the blinking rate enters
-only to second order, since the dimmest non-dark brightness state lies above the
-localizer's photon-acceptance floor and flicker therefore does not manufacture
-apparent darkness. Diffusion coefficients come from the tracked trajectories by
+only to second order, since at the calibrated brightness law only of order one
+percent of emitter-frames falls below the localizer's photon-acceptance floor,
+so flicker barely manufactures apparent darkness. Diffusion coefficients come from the tracked trajectories by
 mean-squared displacement (`MSD(τ) = 4·D·τ` for two-dimensional free diffusion,
 reported in µm²/s). Once the RDS estimator is trained it supplies the counts and
 diffusion directly, closing the loop without the localization step.

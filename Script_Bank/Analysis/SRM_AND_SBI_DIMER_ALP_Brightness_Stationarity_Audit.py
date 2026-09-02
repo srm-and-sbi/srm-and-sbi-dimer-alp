@@ -1,10 +1,10 @@
 """Brightness stationarity audit: retired state grid versus the continuous stationary process.
 
-Two-arm audit of the emitter-brightness photo-physics, run entirely inside the
-`brightness-stationarity-audit` worktree. Arm GRID is the retired seven-state quantile
-chain exactly as implemented (symmetric generator, interval-weight initialization); arm OU
-is the stationary continuous per-dye process that replaces it
-(`generate_brightness_photons`). The verification protocol and its acceptance criteria are
+Two-arm audit of the emitter-brightness photo-physics. Arm GRID is the retired seven-state
+quantile chain exactly as implemented (symmetric generator, interval-weight
+initialization), embedded VERBATIM in this script as its permanent reference arm -- the
+package itself carries only the replacement; arm OU is the stationary continuous per-dye
+process (`generate_brightness_photons`). The verification protocol and its acceptance criteria are
 prespecified in the companion report this script writes; the design decision it validates
 is the 2026-09-01 amendment in `MET_NEXT_MODEL_DESIGN_PLAN.md` (workspace root).
 
@@ -43,8 +43,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.linalg import expm
 from scipy.signal import fftconvolve
-from scipy.stats import kstest, linregress, norm
+from scipy.stats import kstest, linregress, lognorm, norm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -75,7 +76,91 @@ CAMERA = dict(gamma=41.95, kappa_o=28.7, kappa_b=175.0, kappa_s=10.5, kappa_q=0.
 PSF_MU_R, PSF_SIGMA_R = 1.60, 0.15   # Fab-condition detector MAPs (DETECTOR_WORKFLOW.md sec. 8)
 
 BRIGHTNESS_QUANTILE = np.asarray([0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95])
-INTERVAL_WEIGHTS = dli.compute_brightness_probability(BRIGHTNESS_QUANTILE)[1:]  # live states
+
+
+# ----------------------------------------------------------------------------------------------
+# Retired grid chain, embedded VERBATIM as the reference arm. This is the seven-state
+# quantile brightness machine exactly as it shipped in the package before the stationarity
+# fix (docstrings trimmed, code byte-identical); it lives here so the audit's positive
+# control -- the suite must flag this mechanism's defect -- keeps running after the package
+# dropped it.
+# ----------------------------------------------------------------------------------------------
+
+def compute_brightness(brightness_quantile, scale, shape, loc=0):
+    """Brightness values at the given lognormal quantiles, rounded to integer photons."""
+    return np.round(lognorm.ppf(q=brightness_quantile, s=shape, loc=loc, scale=scale), 0)
+
+
+def compute_brightness_probability(brightness_quantile):
+    """Initial state probabilities: interval widths around each quantile node; state 0 gets 0."""
+    q = brightness_quantile
+    prob = np.empty_like(q, dtype=float)
+    prob[0] = 0
+    prob[1] = q[1] + (q[2] - q[1]) / 2
+    for i in range(2, len(q) - 1):
+        prob[i] = ((q[i] - q[i - 1]) + (q[i + 1] - q[i])) / 2
+    prob[-1] = (1 - q[-1]) + (q[-1] - q[-2]) / 2
+    return prob / np.sum(prob)
+
+
+def initialize_emitter_states(n_emitters, brightness_quantile, scale, shape, loc=0, seed=None):
+    """Sample each emitter's initial state from the interval-weight distribution."""
+    rng = np.random.default_rng(seed)
+    brightness = compute_brightness(brightness_quantile, scale, shape, loc)
+    brightness_probability = compute_brightness_probability(brightness_quantile)
+    initial_states = rng.choice(a=len(brightness), size=n_emitters, p=brightness_probability)
+    return initial_states, brightness, brightness_probability
+
+
+def _propagate_chain(states, P, rng):
+    """Fill state trajectories in place from the DTMC transition matrix."""
+    n_frames, n_emitters = states.shape
+    for i in range(1, n_frames):
+        prev_states = states[i - 1, :]
+        cum_probs = np.cumsum(P[prev_states, :], axis=1)
+        u = rng.uniform(0, 1, size=n_emitters)[:, None]
+        states[i, :] = (u < cum_probs).argmax(axis=1)
+    return states
+
+
+def generate_state_trajectories(nframes, nemitters, P, brightness_quantile, scale, shape,
+                                loc=0, seed=None):
+    """Initial states from the interval weights, then DTMC evolution."""
+    rng = np.random.default_rng(seed)
+    states = np.full(shape=(nframes, nemitters), fill_value=-1, dtype=int)
+    initial_states, _, _ = initialize_emitter_states(
+        nemitters, brightness_quantile, scale, shape, loc, seed=seed,
+    )
+    states[0, :] = initial_states
+    _propagate_chain(states, P, rng)
+    return states
+
+
+def compute_matrices(mu_pc, sigma_pc, brightness_quantile, prob_photo_bleach,
+                     numb_photo_bleach, delta_frame, lambda_rate, kappa_penalty=1.0,
+                     verbose=False):
+    """CTMC generator Q (symmetric brightness-distance rates + absorbing bleach) and P = expm."""
+    brightness = np.round(
+        lognorm.ppf(q=brightness_quantile, s=sigma_pc, loc=0, scale=mu_pc), 0,
+    )
+    sigma_bright = lognorm.std(s=sigma_pc, loc=0, scale=mu_pc)
+    numb_states = len(brightness)
+    Q = np.zeros((numb_states, numb_states))
+    prob_1 = 1 - np.power((1 - prob_photo_bleach), 1 / numb_photo_bleach)
+    epsilon_rate = -np.log(1 - prob_1) / delta_frame
+    for i in range(1, numb_states):
+        Q[i, 0] = epsilon_rate
+        j_indices = range(1, numb_states)
+        distances = np.abs(brightness[i] - brightness[list(j_indices)])
+        Q[i, list(j_indices)] = lambda_rate * np.exp(-kappa_penalty * distances / sigma_bright)
+    np.fill_diagonal(Q, 0)
+    diag_indices = np.diag_indices(numb_states)
+    Q[diag_indices] = -np.sum(Q, axis=1)
+    P = expm(Q * delta_frame)
+    return Q, P
+
+
+INTERVAL_WEIGHTS = compute_brightness_probability(BRIGHTNESS_QUANTILE)[1:]  # live states
 
 # Acceptance criteria (prespecified; see the protocol section of the report).
 TOL_KS = 0.005          # per-frame sup-CDF distance, OU arm (KS sampling floor ~0.003 at n=2e5)
@@ -118,14 +203,14 @@ def save(fig, name: str) -> None:
 def grid_photons(nframes: int, nemitters: int, prob_bleach: float,
                  seed: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """The retired chain exactly as implemented: (photons, states)."""
-    _Q, P = dli.compute_matrices(
+    _Q, P = compute_matrices(
         mu_pc=MU_PC, sigma_pc=SIGMA_PC, brightness_quantile=BRIGHTNESS_QUANTILE,
         prob_photo_bleach=prob_bleach, numb_photo_bleach=NUMB_BLEACH,
         delta_frame=DELTA_FRAME, lambda_rate=LAMBDA_RATE)
-    states = dli.generate_state_trajectories(
+    states = generate_state_trajectories(
         nframes=nframes, nemitters=nemitters, P=P,
         brightness_quantile=BRIGHTNESS_QUANTILE, scale=MU_PC, shape=SIGMA_PC, loc=0, seed=seed)
-    brightness = dli.compute_brightness(BRIGHTNESS_QUANTILE, scale=MU_PC, shape=SIGMA_PC, loc=0)
+    brightness = compute_brightness(BRIGHTNESS_QUANTILE, scale=MU_PC, shape=SIGMA_PC, loc=0)
     return brightness[states], states
 
 

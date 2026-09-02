@@ -26,9 +26,8 @@ moves to the ``VALUE`` field via two reserved string sentinels:
 
 Three design constraints (enforced at import by ``_validate_table``):
   1. Role dispatch is sentinel-based (``VALUE in {NUISANCE, POSTERIOR}``); it
-     never tests whether ``VALUE`` is numeric, because a list-valued fixed
-     parameter (``brightness_quantile``) already exists and a numeric test would
-     misclassify it.
+     never tests whether ``VALUE`` is numeric, so a list-valued fixed parameter
+     would be classified correctly should one exist.
   2. The learnable subset is ``VALUE-not-a-sentinel AND PRIOR_RANGE-not-None``.
      A nuisance-from-spec row also carries a range, so a ``PRIOR_RANGE is not
      None`` test alone (the canonical filter) would pull nuisance rows into the
@@ -174,9 +173,7 @@ _DETECTOR_RAW_NESTED: dict[str, list[dict]] = {
         {'KEY': 'sigma_pc', 'VALUE': 10**(-0.375), 'PRIOR_RANGE': (-0.75, 0.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\sigma_{pc}$',
          'NOTE': 'Log-spread of the per-emitter (monomer) brightness parent distribution. Learnable; with mu_pc it sets the lognormal brightness population. The ThunderSTORM fitted spread (Fab 0.61 / InlB 0.55) is upper-biased by fit error (sec. 6.5 caveat 1); the fixed-imaging histogram check indicates ~0.5. Prior broad-but-capped [0.178, 1.0]: contains the fitted 0.61, capped to exclude the heavy-brightness-tail regime. See DETECTOR_WORKFLOW.md.'},
     ],
-    'transitivity': [  # emitter brightness state machine (CTMC generator + DTMC)
-        {'KEY': 'brightness_quantile', 'VALUE': [0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95], 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': None,
-         'NOTE': 'Quantile grid defining the discrete emitter brightness states of the flicker state machine. Fixed hyperparameter (a modeling choice, not inferred).'},
+    'transitivity': [  # brightness photo-physics (stationary OU ln-brightness flicker + absorbing bleach)
         {'KEY': 'delta_frame', 'VALUE': 0.020, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': 'Second', 'LABEL': r'$\delta_{f}$',
          'NOTE': 'Camera frame interval (s); 0.020 = 50 FPS. Fixed acquisition constant. Duration-general: n_frames is supplied per run, this is only the per-frame time.'},
         {'KEY': 'numb_photo_bleach', 'VALUE': 100, 'PRIOR_RANGE': None, 'LOG_FLAG': None, 'LOG_BASE': None, 'UNIT': None, 'LABEL': r'$\psi_{pb}$',
@@ -186,7 +183,7 @@ _DETECTOR_RAW_NESTED: dict[str, list[dict]] = {
         {'KEY': 'prob_photo_bleach', 'VALUE': 10**(-1.25), 'PRIOR_RANGE': (-2.0, -0.5), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\rho_{pb}$',
          'NOTE': 'Probability an emitter enters the absorbing bleached state over numb_photo_bleach (100) frames. Learnable photophysics target; drawn from [10^-2, 10^-0.5].'},
         {'KEY': 'lambda_rate', 'VALUE': 10**0.5, 'PRIOR_RANGE': (0.0, 1.0), 'LOG_FLAG': True, 'LOG_BASE': 10, 'UNIT': None, 'LABEL': r'$\lambda$',
-         'NOTE': 'Base rate of inter-state (flicker) transitions in the brightness CTMC generator: Q[i,j] = lambda_rate * exp(-|d_brightness| / sigma_bright); locality derived from the brightness scale. Learnable; drawn from [10^0, 10^1] = [1, 10]. Reference ~5, derived from the flicker correlation-time of the MET track intensity[photon] autocorrelation (tau_corr ~0.13 s; see DETECTOR_WORKFLOW.md sec. 6.3).'},
+         'NOTE': 'Correlation-decay rate of the stationary OU ln-brightness flicker: ACF(lag) = exp(-lambda_rate * lag), so tau_corr = 1/lambda_rate (generate_brightness_photons). Learnable; drawn from [10^0, 10^1] = [1, 10]. Reference ~5 (log10 ~0.7), shape-matched to the flicker correlation-time of the MET track intensity[photon] autocorrelation (tau_corr ~0.135 s; the bare 1/tau_corr ~7 is biased high by per-track detrending -- see DETECTOR_WORKFLOW.md sec. 6.3 and the Flicker_Rate_Derivation utility).'},
     ],
 }
 

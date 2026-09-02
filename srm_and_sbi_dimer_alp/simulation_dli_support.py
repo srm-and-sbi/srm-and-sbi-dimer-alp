@@ -6,8 +6,8 @@ into synthetic fluorescence-microscopy videos. The pipeline:
     particle positions (per frame, per particle)
         -> Gaussian point-spread function rendered at each emitter
         -> per-pixel photon-count integrals via erf
-        -> emitter brightness modulated by a Markov-chain state machine
-           (photo-physics: blinking, photobleaching, multiple intensity levels)
+        -> emitter brightness from a stationary continuous per-dye process
+           (photo-physics: OU log-brightness flicker + absorbing photobleaching)
         -> corrected EMCCD noise chain (Poisson thinning -> stochastic Gamma EM
            register -> gain-independent Gaussian read noise -> bias)
         -> output video frames in ADU (analog-to-digital units)
@@ -35,15 +35,6 @@ Module contents:
                                           sigma_pc) marginal at every frame, with
                                           independent state-independent bleaching)
 
-    Retired brightness state machine (kept only as the as-implemented reference arm
-    for the stationarity audit; removed at adoption)
-        compute_brightness               (theoretical brightness values at quantiles)
-        compute_brightness_probability   (initial state probabilities)
-        initialize_emitter_states        (sample initial state per emitter)
-        generate_state_trajectories      (Markov-chain state evolution over frames)
-        compute_matrices          (CTMC generator Q and DTMC stochastic matrix P
-                                   from photobleaching + neighbor-decay rates)
-
     Top-level renderer
         render_dli_video          (particle poses + a physical 11-key imaging vector
                                    -> fully noised video). Source-agnostic: it reads
@@ -56,10 +47,9 @@ Module contents:
 """
 
 from abc import ABC
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
-from scipy.linalg import expm
 from scipy.special import erf
 from scipy.stats import lognorm
 
@@ -364,8 +354,8 @@ def compute_intensity(tracks: np.ndarray,
         emitter_photons: Per-emitter, per-frame latent photon values of shape
             `(n_frames, n_emitters)` (0 where bleached). Produced by
             `generate_brightness_photons`; any per-frame photon source with this
-            shape is accepted, which is what the stationarity audit uses to run
-            the retired state-grid arm through the identical downstream path.
+            shape is accepted (the stationarity audit exploits this to drive
+            reference arms through the identical downstream path).
         background_photons: 2D array of shape `(n_pix_x, n_pix_y)` — the pre-PSF
             per-pixel photon floor added under the emitter signal. Zero by default
             (no background); the detector fills it with the optical background
@@ -449,21 +439,21 @@ def generate_brightness_photons(nframes: int,
         photons_t = mu_pc * exp(z_t)
 
     By induction the per-frame marginal is exactly LogNormal(ln mu_pc, sigma_pc^2)
-    at EVERY frame: no initialization transient, no finite-grid ceiling, and
+    at EVERY frame: no initialization transient, no brightness ceiling, and
     sigma_pc carries its documented marginal meaning. `lambda_rate` is the
     correlation-decay rate of ln-brightness (ACF(lag) = exp(-lambda_rate * lag)),
-    NOT a jump-event rate; brightness is constant within a frame (per-frame draws,
-    the same sampling convention as the retired state grid).
+    NOT a jump-event rate; brightness is constant within a frame (one draw per
+    frame per dye).
 
-    Photobleaching is the same state-independent law as before, extracted from the
-    retired generator into the equivalent independent per-frame Bernoulli:
+    Photobleaching is state-independent, applied as an independent per-frame
+    Bernoulli whose rate accrues `prob_photo_bleach` over `numb_photo_bleach`
+    frames:
 
         prob_1 = 1 - (1 - prob_photo_bleach) ** (1 / numb_photo_bleach)
 
     A bleached dye emits 0 photons from its bleach frame onward (absorbing), and
-    every dye is active at the first frame, exactly as in the retired chain.
-    Because bleaching is state-independent, the brightness law among active dyes
-    is unchanged by it.
+    every dye is active at the first frame. Because bleaching is
+    state-independent, the brightness law among active dyes is unchanged by it.
 
     Args:
         nframes: Number of frames.
@@ -474,7 +464,9 @@ def generate_brightness_photons(nframes: int,
         lambda_rate: Correlation-decay rate of ln-brightness, in 1/s.
         prob_photo_bleach: Bleaching probability over `numb_photo_bleach` frames.
         numb_photo_bleach: FIXED reference-frame count (100), not the clip's
-            frame count (see `compute_matrices` for the rationale).
+            frame count. Pinning it makes the per-frame bleach probability
+            constant across clip durations, so a longer clip simply accumulates
+            more bleaching (see the photobleaching model in PROJECT_CONTEXT.md).
         delta_frame: Time between frames in seconds.
         seed: Optional RNG seed.
 
@@ -496,280 +488,6 @@ def generate_brightness_photons(nframes: int,
     bleach_draws[0, :] = False
     active = np.cumprod(~bleach_draws, axis=0).astype(bool)
     return photons * active
-
-
-# =============================================================================
-# Retired brightness state machine (photo-physics). Retired from the render
-# path by the stationarity fix; retained ONLY as the as-implemented reference
-# arm for the stationarity audit, and removed at adoption.
-# =============================================================================
-
-def compute_brightness(brightness_quantile: np.ndarray,
-                       scale: float,
-                       shape: float,
-                       loc: float = 0) -> np.ndarray:
-    """Theoretical brightness values at given quantiles of a lognormal distribution.
-
-    Each emitter at each frame is in one of `len(brightness_quantile)`
-    discrete brightness states. The state-`i` brightness is the
-    `brightness_quantile[i]`-th quantile of a lognormal distribution
-    `LogNormal(s=shape, loc=loc, scale=scale)`, rounded to the nearest integer
-    photon count.
-
-    Args:
-        brightness_quantile: 1D array of probabilities in [0, 1] specifying
-            the brightness states (typically e.g. [0, 0.05, 0.1, 0.25, 0.5,
-            0.75, 0.9, 0.95]). The state-0 quantile is conventionally 0
-            (photobleached state).
-        scale, shape, loc: Lognormal distribution parameters
-            (`scipy.stats.lognorm` parameterization).
-
-    Returns:
-        Array of integer brightness values, one per quantile.
-    """
-    return np.round(lognorm.ppf(q=brightness_quantile, s=shape, loc=loc, scale=scale), 0)
-
-
-def compute_brightness_probability(brightness_quantile: np.ndarray) -> np.ndarray:
-    """Stationary probability of each brightness state, partitioned from the quantile vector.
-
-    Given `brightness_quantile` as a partition of [0, 1] (e.g. [0, 0.05,
-    0.1, 0.25, 0.5, 0.75, 0.9, 0.95]), this assigns each state a probability
-    proportional to its surrounding interval width. The state-0 (photo-
-    bleached) state gets probability 0 (no emitter starts photobleached).
-    The result is normalized to sum to 1.
-
-    Args:
-        brightness_quantile: 1D array of quantile values.
-
-    Returns:
-        1D probability vector, same length as `brightness_quantile`,
-        summing to 1.
-    """
-    q = brightness_quantile
-    prob = np.empty_like(q, dtype=float)
-    prob[0] = 0
-    prob[1] = q[1] + (q[2] - q[1]) / 2
-    for i in range(2, len(q) - 1):
-        prob[i] = ((q[i] - q[i - 1]) + (q[i + 1] - q[i])) / 2
-    prob[-1] = (1 - q[-1]) + (q[-1] - q[-2]) / 2
-    return prob / np.sum(prob)
-
-
-def initialize_emitter_states(n_emitters: int,
-                              brightness_quantile: np.ndarray,
-                              scale: float,
-                              shape: float,
-                              loc: float = 0,
-                              seed: Optional[int] = None
-                              ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Sample an initial brightness state for each emitter.
-
-    Each emitter's initial state is drawn from the stationary probability
-    distribution computed from `brightness_quantile` (state 0, the
-    photobleached state, has probability 0; remaining states are partitioned
-    by interval width).
-
-    Args:
-        n_emitters: Number of emitters.
-        brightness_quantile: Quantile partition (see `compute_brightness`).
-        scale, shape, loc: Lognormal parameters.
-        seed: Optional RNG seed for reproducibility.
-
-    Returns:
-        (initial_states, brightness, brightness_probability) where:
-            - initial_states has shape `(n_emitters,)`, integer state index.
-            - brightness has shape `(n_states,)`, brightness value per state.
-            - brightness_probability has shape `(n_states,)`, stationary
-              probability per state.
-    """
-    rng = np.random.default_rng(seed)
-    brightness = compute_brightness(brightness_quantile, scale, shape, loc)
-    brightness_probability = compute_brightness_probability(brightness_quantile)
-    initial_states = rng.choice(a=len(brightness), size=n_emitters, p=brightness_probability)
-    return initial_states, brightness, brightness_probability
-
-
-def generate_state_trajectories(nframes: int,
-                                nemitters: int,
-                                P: np.ndarray,
-                                brightness_quantile: np.ndarray,
-                                scale: float,
-                                shape: float,
-                                loc: float = 0,
-                                seed: Optional[int] = None) -> np.ndarray:
-    """Sample state trajectories from a discrete-time Markov chain.
-
-    Initial states are sampled from the stationary brightness distribution
-    (`initialize_emitter_states`); subsequent states are sampled from the
-    DTMC transition matrix `P[i, j] = P(state_{t+1}=j | state_t=i)`.
-
-    Args:
-        nframes: Number of frames (length of each trajectory).
-        nemitters: Number of emitters (number of independent trajectories).
-        P: DTMC stochastic matrix, shape `(n_states, n_states)`. Each row
-            sums to 1.
-        brightness_quantile, scale, shape, loc: Parameters for the initial
-            state distribution (see `initialize_emitter_states`).
-        seed: Optional RNG seed.
-
-    Returns:
-        Array of shape `(nframes, nemitters)` of integer state indices.
-    """
-    rng = np.random.default_rng(seed)
-    states = np.full(shape=(nframes, nemitters), fill_value=-1, dtype=int)
-    initial_states, _, _ = initialize_emitter_states(
-        nemitters, brightness_quantile, scale, shape, loc, seed=seed,
-    )
-    states[0, :] = initial_states
-    _propagate_chain(states, P, rng)
-    return states
-
-
-# =============================================================================
-# Transition matrices (CTMC and DTMC)
-# =============================================================================
-
-def compute_matrices(mu_pc: float,
-                     sigma_pc: float,
-                     brightness_quantile: np.ndarray,
-                     prob_photo_bleach: float,
-                     numb_photo_bleach: int,
-                     delta_frame: float,
-                     lambda_rate: float,
-                     kappa_penalty: float = 1.0,
-                     verbose: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-    """Build the CTMC generator `Q` and DTMC stochastic matrix `P` for the
-    emitter brightness state machine.
-
-    The state space is the set of brightness levels indexed by `brightness_quantile`,
-    with state 0 being the photobleached state.
-
-    Rate model:
-        - Photobleaching: each non-zero state `i` has a rate
-          `epsilon_rate` into the photobleached state (0).
-          `epsilon_rate` is derived from the discrete-time
-          per-`numb_photo_bleach`-frames bleaching probability:
-
-              prob_1 = 1 - (1 - prob_photo_bleach)^(1 / numb_photo_bleach)
-              epsilon_rate = -ln(1 - prob_1) / delta_frame
-
-          giving a continuous-time rate that yields `prob_photo_bleach`
-          probability of bleaching over `numb_photo_bleach` frames.
-        - Inter-state transitions: between non-zero states `i` and `j`, the
-          rate is
-
-              Q[i, j] = lambda_rate * exp(-kappa_penalty * |brightness[i] - brightness[j]| / sigma_bright)
-
-          where `sigma_bright` is the photon-space standard deviation of the
-          brightness lognormal, so the penalty acts on the brightness change in
-          units of its own spread. Fast for neighboring levels, slow for
-          far-apart ones; `kappa_penalty` (fixed 1.0) sets the locality — a
-          larger value penalizes far jumps more strongly.
-        - Diagonal: `Q[i, i] = -sum_j Q[i, j]` (CTMC row-sum convention).
-        - State 0 (photobleached) is absorbing: no transitions OUT of state 0.
-
-    The DTMC stochastic matrix `P` is the matrix exponential
-    `P = exp(Q * delta_frame)`. Each entry `P[i, j]` is the probability that
-    an emitter in state `i` at frame `t` is in state `j` at frame `t + 1`.
-
-    Args:
-        mu_pc, sigma_pc: Lognormal parameters (scale and shape) for the
-            brightness distribution.
-        brightness_quantile: Quantile vector defining the brightness states.
-        prob_photo_bleach: Probability that an emitter enters the absorbing
-            bleached state over `numb_photo_bleach` frames.
-        numb_photo_bleach: FIXED reference-frame count (100), not the clip's
-            frame count. It sets a per-frame bleach probability that is
-            constant across clip durations; do not set it to the movie
-            frame count.
-        delta_frame: Time between frames in seconds.
-        lambda_rate: Base rate for inter-state transitions.
-        kappa_penalty: Dimensionless locality of the brightness-distance penalty,
-            in units of the brightness standard deviation (fixed 1.0: the rate
-            e-folds per one `sigma_bright` of brightness change).
-        verbose: If True, print the generator and stochastic matrices.
-
-    Returns:
-        (Q, P) — both arrays of shape `(n_states, n_states)`.
-    """
-    brightness = np.round(
-        lognorm.ppf(q=brightness_quantile, s=sigma_pc, loc=0, scale=mu_pc), 0,
-    )
-    # Photon-space standard deviation of the brightness lognormal; the penalty
-    # below acts on brightness change measured in units of this spread.
-    sigma_bright = lognorm.std(s=sigma_pc, loc=0, scale=mu_pc)
-    numb_states = len(brightness)
-    Q = np.zeros((numb_states, numb_states))
-
-    # Photobleaching rate (continuous-time rate from the discrete-time prob over numb_photo_bleach frames).
-    # numb_photo_bleach = 100 is a FIXED calibration constant (the reference-frame
-    # count over which prob_photo_bleach accrues), not the clip's frame count.
-    # Pinning it to 100 makes the per-frame bleach probability prob_1 constant
-    # across clip durations, so a longer clip simply accumulates more bleaching
-    # through repeated application of the same per-frame transition.
-    # See the photobleaching model in PROJECT_CONTEXT.md.
-    prob_1 = 1 - np.power((1 - prob_photo_bleach), 1 / numb_photo_bleach)
-    epsilon_rate = -np.log(1 - prob_1) / delta_frame
-
-    # Off-diagonal entries:
-    #   Q[i, 0] = epsilon_rate (bleaching) for i in [1, numb_states - 1]
-    #   Q[i, j] = lambda_rate * exp(-kappa_penalty * |brightness[i] - brightness[j]| / sigma_bright) for i, j in [1, ...], i != j
-    for i in range(1, numb_states):
-        Q[i, 0] = epsilon_rate
-        j_indices = range(1, numb_states)
-        distances = np.abs(brightness[i] - brightness[list(j_indices)])
-        Q[i, list(j_indices)] = lambda_rate * np.exp(-kappa_penalty * distances / sigma_bright)
-    # Reset the diagonal to 0 before computing the row-sum-negation diagonal.
-    np.fill_diagonal(Q, 0)
-    diag_indices = np.diag_indices(numb_states)
-    Q[diag_indices] = -np.sum(Q, axis=1)
-
-    # DTMC: P = exp(Q * delta_frame).
-    P = expm(Q * delta_frame)
-
-    if verbose:
-        import textwrap
-        default_print_opts = np.get_printoptions()
-        np.set_printoptions(precision=3, suppress=True)
-        print(textwrap.indent(f"Q (generator):\n{Q}\nP (stochastic):\n{P}", "  "))
-        np.set_printoptions(**default_print_opts)
-
-    return Q, P
-
-
-# =============================================================================
-# Private helpers
-# =============================================================================
-
-def _propagate_chain(states: np.ndarray,
-                     P: np.ndarray,
-                     rng: np.random.Generator) -> np.ndarray:
-    """Fill in state trajectories step by step using a DTMC transition matrix.
-
-    Modifies `states` in place: for each frame `i in [1, n_frames)` and each
-    emitter `c`, samples the next state from `P[states[i-1, c], :]`.
-
-    Vectorised across emitters: at each frame, builds the cumulative
-    probability matrix `cumsum(P[prev_states, :], axis=1)` and samples each
-    emitter's next state by comparing a single uniform draw against the cumsum.
-
-    Args:
-        states: Array of shape `(n_frames, n_emitters)`. The first row must
-            already be filled with initial states.
-        P: DTMC stochastic matrix of shape `(n_states, n_states)`.
-        rng: NumPy random Generator.
-
-    Returns:
-        The modified `states` array (same reference).
-    """
-    n_frames, n_emitters = states.shape
-    for i in range(1, n_frames):
-        prev_states = states[i - 1, :]                            # shape (n_emitters,)
-        cum_probs = np.cumsum(P[prev_states, :], axis=1)           # shape (n_emitters, n_states)
-        u = rng.uniform(0, 1, size=n_emitters)[:, None]            # shape (n_emitters, 1)
-        states[i, :] = (u < cum_probs).argmax(axis=1)
-    return states
 
 
 # =============================================================================

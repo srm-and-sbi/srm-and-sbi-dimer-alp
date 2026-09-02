@@ -5,6 +5,78 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.22 - 2026-09-02
+
+The brightness stationarity fix: the emitter-brightness photo-physics is now a stationary
+continuous per-dye process. The seven-state quantile chain it replaces relaxed from its
+documented interval-weight initialization to uniform state occupancy within about ten frames
+(total variation to the documented weights 0.05 by frame 10, 0.01 by frame 33 at the
+calibrated operating point), so the documented brightness law held only at the first frames
+of every clip.
+
+### Changed
+
+- **Brightness photo-physics: stationary OU ln-brightness flicker** (`generate_brightness_photons`,
+  `simulation_dli_support.py`). Per-dye ln-brightness follows a stationary Ornstein-Uhlenbeck
+  process discretized per frame as an AR(1); the per-frame marginal is exactly
+  `LogNormal(ln mu_pc, sigma_pc^2)` at every frame and for every clip duration, with no
+  initialization transient and no brightness ceiling. Photobleaching is unchanged in law:
+  the same state-independent absorbing per-frame Bernoulli
+  (`prob_1 = 1 - (1 - prob_photo_bleach)^(1/numb_photo_bleach)`).
+- **`lambda_rate` redefined: correlation-decay rate.** `ACF(lag) = exp(-lambda_rate * lag)`,
+  so `tau_corr = 1/lambda_rate`; under the retired chain the same number was a jump-event
+  base rate, so the same value does not mean the same tempo across the two mechanisms. The
+  data-anchored reference survives the redefinition: the OU shape-match against the MET
+  track autocorrelation gives `lambda_rate = 5.1` (Fab) / `4.7` (InlB) with the prior
+  log-uniform `[1, 10]` unchanged (`Flicker_Rate_Derivation`, rewritten to the OU model:
+  the bare closed form `1/tau_corr ~ 7` is biased high by per-track detrending).
+- **`compute_intensity` takes per-frame photon inputs** (`emitter_photons`, and
+  `dimer_photons` for the second label under `dimer_model="sum"`) instead of state
+  trajectories plus a node table.
+- Parameter disposition: `mu_pc`, `sigma_pc`, `prob_photo_bleach`, `numb_photo_bleach`
+  unchanged (with `sigma_pc` recovering its documented per-frame marginal meaning);
+  `lambda_rate` redefined as above; no new parameters.
+
+### Removed
+
+- The brightness state machine: `compute_brightness`, `compute_brightness_probability`,
+  `initialize_emitter_states`, `generate_state_trajectories`, `compute_matrices`,
+  `_propagate_chain`, the `brightness_quantile` rows of both parameter tables, the fixed
+  locality `kappa_penalty`, and the `plot_transitions` heatmap helper. The retired chain
+  survives verbatim inside the stationarity audit as its reference arm.
+
+### Added
+
+- **Brightness stationarity audit** (`Script_Bank/Analysis/
+  SRM_AND_SBI_DIMER_ALP_Brightness_Stationarity_Audit.py`; its report, figures, and summary
+  JSON are analysis results and are written to
+  `Data_Bank/Posit/SRM_AND_SBI_DIMER_ALP_Brightness_Stationarity_Audit/`, never the
+  codebase): two-arm,
+  prespecified acceptance suite -- per-frame law (KS, drift, sd), autocorrelation decay,
+  survivor conditioning under bleaching, dimer-sum convolution, and render-level
+  time-invariance through the identical PSF/EMCCD path, with the retired chain embedded as
+  the positive control the suite must flag. All nine checks pass; the control is flagged.
+- **Extreme-tail structure analysis** (`.../SRM_AND_SBI_DIMER_ALP_Brightness_Tail_Structure.py`;
+  report and figures to the same Data_Bank destination): experimental pixels above 10,000 ADU
+  form PSF-shaped, persistent
+  spots; the retired chain's occasional extreme pixels are single-pixel one-frame EMCCD gain
+  fluctuations above its hard 760-photon (p95-node) ceiling; the stationary process
+  reproduces the experimental structure. The `sigma_pc = 0.53` probe brackets the imaging
+  recalibration.
+- **Side-by-side assembler and three-panel viewer notebook** for
+  experimental | retired-chain | fixed renders (shared color windows, full-range and
+  percentile modes); the assembled videos and figures go to the same Data_Bank destination.
+
+### Provenance
+
+- Every dataset, trained estimator, and the frozen `Nuisance_DLI` artifact produced under
+  versions up to 0.4.21 predates this fix: they encode the retired chain's brightness law
+  and its `lambda_rate` semantics. The first post-adoption step before any new production
+  rendering or inference is the detector recalibration of `Nuisance_DLI` under the
+  stationary model (the tail-structure analysis quantifies why: the frozen
+  `sigma_pc = 0.674` matches the deep tail but overshoots the extreme; `0.53` does the
+  reverse).
+
 ## 0.4.21 - 2026-09-01
 
 ### Documentation

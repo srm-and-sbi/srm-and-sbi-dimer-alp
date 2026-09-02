@@ -7,9 +7,6 @@ Functions:
         quantile markers.
     animate_video(video)
         Matplotlib FuncAnimation playback of a single video.
-    plot_transitions(Q, P, ...)
-        Paired heatmaps of the CTMC generator Q and the DTMC stochastic
-        matrix P.
     figure_sample_frame(video, frame_index)
         Build and return a headless Figure showing one frame of a video,
         without a display backend (for diagnostic reports).
@@ -135,55 +132,6 @@ def animate_video(video: np.ndarray):
     )
     plt.show()
     return anim
-
-
-def plot_transitions(Q: np.ndarray,
-                     P: np.ndarray,
-                     fig_size: tuple = (16, 9),
-                     font_size: int = 17,
-                     color_map: str = "viridis",
-                     format_Q: str = ".2F",
-                     format_P: str = ".2F",
-                     color_bar: bool = True,
-                     color_bar_dit: Optional[dict] = None,
-                     fig_title: Optional[str] = None) -> None:
-    """Display the CTMC generator Q and DTMC stochastic matrix P as paired heatmaps.
-
-    Both matrices are square, indexed by emitter brightness state (state 0 =
-    photobleached). The heatmaps annotate each cell with its numeric value,
-    formatted via the `format_Q` / `format_P` format strings.
-
-    Args:
-        Q: CTMC generator matrix.
-        P: DTMC stochastic matrix.
-        fig_size: Figure size in inches (width, height).
-        font_size: Font size for labels and titles.
-        color_map: Matplotlib color map name.
-        format_Q, format_P: Format strings for in-cell annotations.
-        color_bar: Whether to show color bars.
-        color_bar_dit: Optional kwargs dict for seaborn's `cbar_kws`.
-        fig_title: Optional figure-level title.
-    """
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    fig, (axe_Q, axe_P) = plt.subplots(1, 2, figsize=fig_size)
-    sns.heatmap(data=Q, cmap=color_map, annot=True, fmt=format_Q,
-                cbar=color_bar, cbar_kws=color_bar_dit, square=True, ax=axe_Q)
-    axe_Q.set_xlabel(xlabel=rf"TO STATE{' ' * 4}$\mathbf{{j}}$", fontsize=font_size)
-    axe_Q.set_ylabel(ylabel=rf"FROM STATE{' ' * 4}$\mathbf{{i}}$", fontsize=font_size)
-    axe_Q.set_title(label=rf"Transition-Rate Matrix{' ' * 4}$\mathbf{{Q}}$",
-                    fontsize=font_size)
-    sns.heatmap(data=P, vmin=0, vmax=1, cmap=color_map, annot=True, fmt=format_P,
-                cbar=color_bar, cbar_kws=color_bar_dit, square=True, ax=axe_P)
-    axe_P.set_xlabel(xlabel=rf"TO STATE{' ' * 4}$\mathbf{{j}}$", fontsize=font_size)
-    axe_P.set_ylabel(ylabel=rf"FROM STATE{' ' * 4}$\mathbf{{i}}$", fontsize=font_size)
-    axe_P.set_title(label=rf"Transition-Probability Matrix{' ' * 4}$\mathbf{{P}}$",
-                    fontsize=font_size)
-    if fig_title:
-        fig.suptitle(t=fig_title, fontsize=font_size)
-    plt.tight_layout()
-    plt.show()
 
 
 # =============================================================================

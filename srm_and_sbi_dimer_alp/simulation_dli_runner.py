@@ -77,8 +77,8 @@ _DTYPE_FOR_BITS = {8: np.uint8, 16: np.uint16}
 _DLI_PARAM_GROUPS = {
     "PSF (Point Spread Function)": ["mu_r", "sigma_r", "mu_pc", "sigma_pc"],
     "EMCCD camera (SCOPE nuisance)": ["gamma", "kappa_o", "kappa_b", "kappa_s", "kappa_q", "kappa_g", "kappa_c"],
-    "State machine (brightness transitivity)": [
-        "brightness_quantile", "delta_frame", "prob_photo_bleach",
+    "Brightness photo-physics (stationary OU flicker)": [
+        "delta_frame", "prob_photo_bleach",
         "numb_photo_bleach", "lambda_rate",
     ],
 }
@@ -635,7 +635,7 @@ def run_dli(cfg: WorkflowConfig, args: argparse.Namespace) -> None:
                     note="Non-learnable parameters held constant across all "
                          "simulations (Known scientific constants + tuning "
                          "Hyperparameters): camera, PSF, photophysics, capture "
-                         "radius, brightness quantiles.",
+                         "radius.",
                 )
                 if reporter.dump:
                     from srm_and_sbi_dimer_alp.visualization_dli import (
@@ -736,8 +736,8 @@ def build_dli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--verbose", action="store_true",
-        help="Print diagnostic info during setup (CTMC/DTMC matrices, "
-             "trajectory shapes).",
+        help="Print diagnostic info during setup (brightness photo-physics "
+             "quantities, trajectory shapes).",
     )
     parser.add_argument(
         "--show", action="store_true",

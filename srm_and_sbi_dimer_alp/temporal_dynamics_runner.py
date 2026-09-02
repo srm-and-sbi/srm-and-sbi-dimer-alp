@@ -155,9 +155,10 @@ _REFERENCE_DETECTOR = {
         "applies_to": None,
         "note": "derived from the flicker correlation time of the track intensity[photon] series "
                 "(log-detrended, pooled autocorrelation, lag-0 fit-noise drop excluded): "
-                "tau_corr ~ 0.13 s maps through the monotone tau_corr(lambda_rate) of the model's "
-                "own brightness chain to lambda_rate ~ 5. A photophysical quantity, "
-                "condition-independent, so it applies to both. DETECTOR_WORKFLOW.md 6.3",
+                "tau_corr ~ 0.135 s shape-matched against the stationary OU ln-brightness "
+                "flicker (matched track lengths null the detrend bias) gives lambda_rate ~ 5. "
+                "A photophysical quantity, condition-independent, so it applies to both. "
+                "DETECTOR_WORKFLOW.md 6.3",
     },
     # prob_photo_bleach deliberately absent: no public anchor exists (DETECTOR_WORKFLOW.md 6.2).
 }

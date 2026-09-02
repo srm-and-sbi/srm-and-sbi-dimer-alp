@@ -1,8 +1,8 @@
 # Flicker-rate derivation — method and usage
 
-Companion to `SRM_AND_SBI_DIMER_ALP_DETECTOR_Flicker_Rate_Derivation.py`. The Detector's
-emitter-brightness flicker is a continuous-time Markov chain whose base rate is `lambda_rate`
-(`DETECTOR_WORKFLOW.md` §6.3). This utility fixes the prior on `lambda_rate` by measuring the
+Companion to `SRM_AND_SBI_DIMER_ALP_DETECTOR_Flicker_Rate_Derivation.py`. The emitter-brightness
+flicker is a stationary Ornstein-Uhlenbeck (OU) process on ln-brightness whose correlation-decay
+rate is `lambda_rate` (`DETECTOR_WORKFLOW.md` §6.3). This utility fixes the prior on `lambda_rate` by measuring the
 flicker timescale directly from the public single-molecule localization tables, so the value is
 reproducible from data rather than assumed. This note explains what it computes, how to run it, and
 how to read the result, without reading the code.
@@ -26,22 +26,23 @@ steps.
    the remaining autocorrelation is the physical flicker correlation time `tau_corr` (≈ 0.13 s for
    MET).
 
-2. **Model.** The autocorrelation of the model's own brightness chain (`compute_matrices` →
-   `generate_state_trajectories`, `simulation_dli_support.py`) decays on the timescale set by the
-   generator's spectral gap (Norris 1997). The utility measures it the *same* way over a grid of
-   `lambda_rate`, giving `tau_model(lambda_rate)`. To null the finite-track-length detrend bias, the
-   model trajectories are cut to the empirical track-length distribution and detrended identically.
+2. **Model.** Under the stationary OU flicker (`generate_brightness_photons`,
+   `simulation_dli_support.py`) the model autocorrelation is exact and closed-form,
+   `ACF(lag) = exp(−lambda_rate·lag)`, so `lambda_rate = 1/tau_corr` up to the finite-track detrend
+   bias. To null that bias, the utility simulates OU trajectories over a grid of `lambda_rate`, cuts
+   them to the empirical track-length distribution, and detrends them identically to the data.
 
 3. **Map.** The early autocorrelation *shape* of data and model is matched (a window-independent
-   summary), inverting the monotone `tau_model` to convert `tau_corr → lambda_rate`; the 1/e
-   crossing is reported as a cross-check. The mapping is evaluated across the `sigma_pc` prior (the
-   flicker length scale is `sigma_bright`, which depends mildly on `sigma_pc`) and for each condition
-   — the rate is photophysical and should be condition-independent.
+   summary) to convert `tau_corr → lambda_rate`; the 1/e crossing and the bare closed form
+   `1/tau_corr` are reported as cross-checks, for each condition — the rate is photophysical and
+   should be condition-independent. `mu_pc` shifts ln-brightness additively and `sigma_pc` scales it
+   linearly, so both cancel exactly in the normalized ln-autocorrelation: no parameter sweep is
+   needed.
 
 ## Requirements
 
-- The `SRM_AND_SBI_ENVY_V0` environment. The utility imports the project package for the CTMC
-  building blocks; it needs no GPU and no trained estimator.
+- The `SRM_AND_SBI_ENVY_V0` environment. The utility imports the project package for the OU
+  brightness generator; it needs no GPU and no trained estimator.
 - Read access to the MET single-molecule localization tables: per condition and cell, a ThunderSTORM
   `.tracked.csv` carrying the `frame`, `intensity [photon]`, and `track.id` columns (see **Data
   source**).
@@ -55,17 +56,18 @@ MACHINE_PROFILE=<profile> python SRM_AND_SBI_DIMER_ALP_DETECTOR_Flicker_Rate_Der
 
 `--data-root` points at the localization root holding `<condition>/<cell>/tracks/*.tracked.csv`;
 `--conditions` selects which condition subdirectories to derive (default `Fab InlB`). The utility
-prints, per condition, the number of tracks, the measured `tau_corr`, and the derived `lambda_rate`
-at each `sigma_pc` (shape-match, with the 1/e crossing as a cross-check).
+prints, per condition, the number of tracks, the measured `tau_corr` with its bare closed form
+`1/tau_corr`, and the derived `lambda_rate` (shape-match, with the 1/e crossing as a cross-check).
 
 ## Result and interpretation
 
-For MET (`S-BSST712`), `tau_corr ≈ 0.13–0.14 s → lambda_rate ≈ 5`, with Fab and InlB agreeing within
-the cell-to-cell scatter — the expected signature of a photophysical rate that does not depend on the
-biological condition. Read the value at the Fab reference `sigma_pc = 0.60` (`DETECTOR_WORKFLOW.md`
-§6.5); the `sigma_pc` sweep quantifies the residual dependence (under ±0.1 in log10). The prior is
-locked to log-uniform `(0.0, 1.0)` = `[1, 10]`, bracketing the measured value and excluding the slow
-regime a fixed-imaging posterior-predictive render rules out.
+For MET (`S-BSST712`), `tau_corr(1/e) ≈ 0.135 s` (Fab, 31,161 tracks) / `0.145 s` (InlB, 61,884
+tracks); shape-matched `lambda_rate = 5.1` (Fab) / `4.7` (InlB), agreeing within the cell-to-cell
+scatter — the expected signature of a photophysical rate that does not depend on the biological
+condition. The bare closed form `1/tau_corr ≈ 7` overestimates the rate because the per-track linear
+detrend removes low-frequency power and shortens the apparent correlation time on finite tracks; the
+matched-length model arm absorbs exactly that bias, which is why the shape match is the primary
+number. The prior is locked to log-uniform `(0.0, 1.0)` = `[1, 10]`, bracketing the measured value.
 
 ## Essential notes
 
@@ -74,8 +76,8 @@ regime a fixed-imaging posterior-predictive render rules out.
   ground truth.
 - **Reads only.** No file under the data root is modified; the utility emits a printed report, not an
   artifact.
-- **`mu_pc` is immaterial** to the result — it cancels in the flicker dynamics (`|Δb| / sigma_bright`,
-  `DETECTOR_WORKFLOW.md` §6.3) — so only `sigma_pc` (swept) enters the mapping.
+- **`mu_pc` and `sigma_pc` are immaterial** to the result — the additive shift and the linear scale
+  of ln-brightness both cancel in the normalized ln-autocorrelation (`DETECTOR_WORKFLOW.md` §6.3).
 - **Reproducible from the public accession alone**: no bundled data and no trained model are needed.
 
 ## Data source
@@ -95,7 +97,6 @@ et al. 2017 (see References), and is the same source that supplies the imaging r
   8(12):1027–1036.
 - Ha, T., Tinnefeld, P. (2012). Photophysics of Fluorescent Probes for Single-Molecule Biophysics and
   Super-Resolution Imaging. *Annual Review of Physical Chemistry* 63:595–617.
-- Norris, J.R. (1997). *Markov Chains.* Cambridge University Press.
 - Ovesný, M., Křížek, P., Borkovec, J., Švindrych, Z., Hagen, G.M. (2014). ThunderSTORM: a
   comprehensive ImageJ plug-in for PALM and STORM data analysis and super-resolution imaging.
   *Bioinformatics* 30(16):2389–2390.

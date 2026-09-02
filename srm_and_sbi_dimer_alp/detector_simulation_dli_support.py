@@ -10,9 +10,8 @@ renderer. That renderer lives in the canonical ``simulation_dli_support`` module
 analysis, which call it with the six imaging parameters drawn as the learnable inference
 target (Theta_Set) and the five SCOPE camera parameters drawn as the marginalized camera
 nuisance (Nuisance_SCOPE). The renderer sources its fixed hyperparameters
-(``brightness_quantile``, ``numb_photo_bleach``, ``dimer_mule``) from the canonical parameter
-table; those values equal the Detector table's, so the Detector's rendered output is
-unchanged.
+(``numb_photo_bleach``, ``dimer_mule``) from the canonical parameter table; those values
+equal the Detector table's, so the Detector's rendered output is unchanged.
 """
 
 from .simulation_dli_support import render_dli_video as render_detector_video

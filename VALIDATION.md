@@ -568,8 +568,8 @@ against any particular reference run. Equivalence rests on three pillars:
 
 3. **Imaging-pipeline functional equivalence.** The DLI stage applies a Gaussian
    point-spread function (erf-based pixel integration), an EMCCD detector model
-   (Poisson photoelectrons, stochastic Gamma electron multiplication, and gain-independent Gaussian read noise), a brightness state
-   machine, and the duration-independent photobleaching model. The verbose DLI
+   (Poisson photoelectrons, stochastic Gamma electron multiplication, and gain-independent Gaussian read noise), the stationary
+   OU brightness flicker, and the duration-independent photobleaching model. The verbose DLI
    banner (`--verbose`) prints the detector parameters, and a rendered video
    (via `--show`) shows sparse fluorescent spots on a near-zero background with
    plausible pixel-value ranges. The pipeline produces videos of the correct

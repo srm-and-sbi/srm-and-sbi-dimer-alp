@@ -11,18 +11,23 @@ Method (DETECTOR_WORKFLOW.md sec. 6.3):
      the log. A gap-aware temporal autocorrelation is formed and pooled over tracks. The lag-0 ->
      lag-1 drop is per-localization white fit noise (confined to lag 0); the decay of ``rho(k>=1)``
      is the physical flicker correlation time ``tau_corr``.
-  2. Model. The autocorrelation of the model brightness chain (``compute_matrices`` ->
-     ``generate_state_trajectories``) decays on the generator's spectral-gap timescale
-     (Norris 1997, Markov Chains, CUP). It is measured the SAME way over a grid of ``lambda_rate``
-     -> ``tau_model(lambda_rate)``. To null the finite-track-length detrend bias, the model
-     trajectories are cut to the EMPIRICAL track-length distribution and detrended identically.
+  2. Model. Under the stationary OU ln-brightness flicker (``generate_brightness_photons``)
+     the model autocorrelation is exact and closed-form, ``ACF(lag) = exp(-lambda_rate * lag)``,
+     so ``lambda_rate = 1/tau_corr`` up to the finite-track detrend bias. To null that bias, the
+     model arm simulates OU trajectories over a grid of ``lambda_rate``, cuts them to the
+     EMPIRICAL track-length distribution, and detrends them identically to the data.
+     ``sigma_pc`` scales ln-brightness linearly and cancels exactly in the normalized ln-ACF,
+     so no ``sigma_pc`` sweep is needed.
   3. Map. Match the early autocorrelation SHAPE (window-independent) of data and model to convert
-     ``tau_corr -> lambda_rate``; the 1/e crossing is reported as a cross-check. The mapping is
-     evaluated across the ``sigma_pc`` prior and per condition (Fab, InlB) -- the rate is a
-     photophysical quantity and should be condition-independent.
+     ``tau_corr -> lambda_rate``; the 1/e crossing and the closed-form ``1/tau_corr`` are
+     reported as cross-checks, per condition (Fab, InlB) -- the rate is a photophysical
+     quantity and should be condition-independent.
 
-Result (MET S-BSST712): ``tau_corr ~ 0.13 s`` -> ``lambda_rate ~ 5``, Fab and InlB consistent;
-prior locked to log-uniform (0.0, 1.0) == [1, 10].
+Result (MET S-BSST712, stationary OU flicker): ``tau_corr(1/e) ~ 0.135 s`` (Fab) / ``0.145 s``
+(InlB); shape-matched ``lambda_rate = 5.1`` (Fab) / ``4.7`` (InlB), consistent across
+conditions. The bare closed form ``1/tau_corr ~ 7`` overestimates because per-track linear
+detrending shortens the apparent correlation time; the matched-length model arm absorbs that
+bias. Reference ``lambda_rate ~ 5`` (log10 ~ 0.7); prior log-uniform (0.0, 1.0) == [1, 10].
 
 Provenance: MET S-BSST712 (BioImage Archive / EBI BioStudies), ThunderSTORM ``.tracked.csv``
 ``intensity[photon]`` column. Run under the SRM_AND_SBI_ENVY_V0 environment.
@@ -37,16 +42,14 @@ import glob
 
 import numpy as np
 
-from srm_and_sbi_dimer_alp.simulation_dli_support import (
-    compute_brightness, compute_matrices, generate_state_trajectories)
+from srm_and_sbi_dimer_alp.simulation_dli_support import generate_brightness_photons
 
-# Fixed CTMC structure (identical to generation): brightness-state quantile grid, the bleaching
-# reference-frame window, and the 50 FPS frame cadence. mu_pc cancels in the flicker dynamics, so
-# its value is immaterial; sigma_pc (the flicker length scale) is swept over its prior below.
-BQ = np.array([0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95])
-MU_PC, DT, PB, NPB = 386.0, 0.02, 1e-4, 100
+# Fixed structure (identical to generation): the bleaching reference-frame window and the
+# 50 FPS frame cadence. mu_pc shifts ln-brightness additively and sigma_pc scales it
+# linearly; both cancel exactly in the detrended, normalized ln-ACF, so their values are
+# immaterial here (bleaching is off in the model arm -- the data arm detrends it away).
+MU_PC, SIGMA_PC, DT, NPB = 386.0, 0.60, 0.02, 100
 KMAX, MIN_LEN, MIN_PAIRS, KFIT, NF, NE = 40, 40, 2000, 12, 300, 4000
-SIGMA_PC_GRID = (0.42, 0.60, 0.80)   # spans the sigma_pc prior; 0.60 is the Fab reference
 
 
 def read_tracked(path):
@@ -125,15 +128,13 @@ def data_decay(tracks):
     return d, _one_over_e(d) * DT, np.array(spans)
 
 
-def model_decay(lam, sigma_pc, spans, nfmax):
-    """Matched-length model flicker decay at (lambda_rate, sigma_pc): the trajectories are cut to
-    the empirical span distribution and detrended identically, nulling the finite-length bias."""
-    bright = compute_brightness(BQ, MU_PC, sigma_pc, 0)
-    _q, p = compute_matrices(MU_PC, sigma_pc, BQ, PB, NPB, DT, float(lam))
-    st = generate_state_trajectories(nfmax, NE, p, BQ, MU_PC, sigma_pc, 0, seed=0)
-    b = bright[st]
-    good = np.all(b > 0, axis=0)
-    x = np.log(b[:, good])
+def model_decay(lam, spans, nfmax):
+    """Matched-length OU flicker decay at lambda_rate: the trajectories are cut to the
+    empirical span distribution and detrended identically, nulling the finite-length bias."""
+    photons = generate_brightness_photons(
+        nframes=nfmax, nemitters=NE, mu_pc=MU_PC, sigma_pc=SIGMA_PC, lambda_rate=float(lam),
+        prob_photo_bleach=0.0, numb_photo_bleach=NPB, delta_frame=DT, seed=0)
+    x = np.log(photons)
     ne = x.shape[1]
     rng = np.random.default_rng(123)
     lens = np.clip(rng.choice(spans, ne), 10, nfmax)
@@ -155,26 +156,25 @@ def derive(condition, tracks):
         print(f"  {condition}: insufficient data")
         return
     nfmax = int(min(np.percentile(spans, 99), 400)) + 5
-    lams = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0])
+    lams = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0, 14.0])
     ll = np.log(lams)
-    print(f"  {condition}: {len(spans)} tracks, tau_corr(1/e) = {tau_data:.3f} s")
-    for spc in SIGMA_PC_GRID:
-        dm = {lam: model_decay(lam, spc, spans, nfmax) for lam in lams}
-        l2 = np.array([np.sum((dm[lam][:KFIT] - d_data[:KFIT]) ** 2) for lam in lams])
-        i = int(np.argmin(l2))
-        if 0 < i < len(lams) - 1:
-            a, b, c = l2[i - 1], l2[i], l2[i + 1]
-            denom = a - 2 * b + c
-            off = 0.5 * (a - c) / denom if denom != 0 else 0.0
-            lam_shape = float(np.exp(ll[i] + off * (ll[i + 1] - ll[i])))
-        else:
-            lam_shape = float(lams[i])
-        oes = np.array([_one_over_e(dm[lam]) for lam in lams])
-        order = np.argsort(oes)
-        lam_oe = float(np.exp(np.interp(_one_over_e(d_data), oes[order], ll[order])))
-        tag = "  <- Fab reference" if abs(spc - 0.60) < 1e-9 else ""
-        print(f"    sigma_pc={spc:.2f}: shape-match lambda_rate={lam_shape:5.2f} "
-              f"(log10 {np.log10(lam_shape):+.2f}) ; 1/e cross-check={lam_oe:5.2f}{tag}")
+    print(f"  {condition}: {len(spans)} tracks, tau_corr(1/e) = {tau_data:.3f} s "
+          f"(closed-form 1/tau_corr = {1.0 / tau_data:5.2f}/s)")
+    dm = {lam: model_decay(lam, spans, nfmax) for lam in lams}
+    l2 = np.array([np.sum((dm[lam][:KFIT] - d_data[:KFIT]) ** 2) for lam in lams])
+    i = int(np.argmin(l2))
+    if 0 < i < len(lams) - 1:
+        a, b, c = l2[i - 1], l2[i], l2[i + 1]
+        denom = a - 2 * b + c
+        off = 0.5 * (a - c) / denom if denom != 0 else 0.0
+        lam_shape = float(np.exp(ll[i] + off * (ll[i + 1] - ll[i])))
+    else:
+        lam_shape = float(lams[i])
+    oes = np.array([_one_over_e(dm[lam]) for lam in lams])
+    order = np.argsort(oes)
+    lam_oe = float(np.exp(np.interp(_one_over_e(d_data), oes[order], ll[order])))
+    print(f"    shape-match lambda_rate={lam_shape:5.2f} (log10 {np.log10(lam_shape):+.2f}) ; "
+          f"1/e cross-check={lam_oe:5.2f}")
 
 
 def main(argv=None):
