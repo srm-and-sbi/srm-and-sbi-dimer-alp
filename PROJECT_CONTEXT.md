@@ -6,6 +6,25 @@ question, the molecular system, the two-stage inference architecture, the data
 and computational flow, the inference network, the validation methodology, and
 the design rationale that shapes the implementation.
 
+**Repository status.** The repository is feature-complete (frozen at 0.4.23)
+and receives corrections only. The measured degree of labeling (DOL) of the MET
+probes makes the labeling statistics an explicit part of the observation model;
+that change is fundamental — it redefines what the receptor-count parameters
+mean (true receptor abundance rather than visible-spot abundance) — and
+proceeds in the new sibling repository `srm-and-sbi-monomer-dimer-alp`. The
+recalibration of the `Nuisance_DLI` imaging artifact under the stationary
+brightness model is carried out there under the DOL-explicit observation model;
+the artifact frozen here remains as calibrated, with its documented caveats.
+
+**Legacy condition tokens.** In experimental data and derived artifact
+filenames, `ALP` names the MET-FAB (Fab-labeled) condition and `BET` the
+MET-INLB (InlB-labeled) condition — a historical namespace fixed when the
+recordings were first staged, unrelated to the repo-iteration suffixes
+`alp`/`bet`. Archived filenames keep these tokens because data files are
+provenance; the code maps them to the scientific names (`CONDITION_DISPLAY` in
+`experiment_support.py`), and every user-facing surface says
+MET-FAB / MET-INLB.
+
 ---
 
 ## §1. Research Question

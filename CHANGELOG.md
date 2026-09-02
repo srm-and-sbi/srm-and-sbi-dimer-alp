@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.23 - 2026-09-02
+
+Freeze release: the repository is feature-complete and receives corrections only.
+
+### Documentation
+
+- **Repository status** recorded in `README.md` and `PROJECT_CONTEXT.md`: this repository is the
+  reference implementation of the three-species DIMER model, frozen at this version. The measured
+  degree of labeling (DOL) of the MET probes makes the labeling statistics an explicit part of the
+  observation model; that change is fundamental — it redefines the receptor-count estimand from
+  visible-spot abundance to true receptor abundance — and proceeds in the new sibling repository
+  `srm-and-sbi-monomer-dimer-alp` rather than as an increment here. Accordingly, the 0.4.22
+  provenance note's recalibration of `Nuisance_DLI` under the stationary brightness model is
+  carried out there, under the DOL-explicit observation model; the artifact frozen here remains as
+  calibrated, with its documented caveats.
+- **Legacy condition tokens documented**: in experimental data and derived artifact filenames,
+  `ALP` = MET-FAB and `BET` = MET-INLB — a historical namespace fixed when the recordings were
+  first staged, unrelated to the repo-iteration suffixes `alp`/`bet`. Archived filenames keep the
+  tokens as provenance; the code maps them to the scientific names (`CONDITION_DISPLAY`).
+
 ## 0.4.22 - 2026-09-02
 
 The brightness stationarity fix: the emitter-brightness photo-physics is now a stationary

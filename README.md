@@ -4,6 +4,24 @@ Simulation-based inference of reaction-diffusion parameters for the **DIMER** mo
 
 This repository is a self-contained pipeline within the `srm-and-sbi` project: it simulates the DIMER reaction-diffusion system, renders the trajectories as diffraction-limited microscopy videos, and trains a neural posterior to recover the underlying rate and diffusion parameters from a video. It pairs that inference with a leak-proof train/test/eval data split, held-out MAP-recovery validation on synthetic data with known ground truth, and application of the trained posterior to experimental microscopy recordings (no ground truth). See **[`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md)** for the full scientific treatment.
 
+## Repository status
+
+**Feature-complete (frozen at 0.4.23).** This repository is the reference implementation of the
+three-species DIMER model, including the stationary OU brightness photo-physics adopted in 0.4.22
+and the detector-calibration workflow whose production artifacts remain the calibration of record
+for this model. It receives corrections only. The measured degree of labeling (DOL) of the MET
+probes makes the labeling statistics an explicit part of the observation model, and that change is
+fundamental — it redefines what the receptor-count parameters mean — so it proceeds in a new
+sibling repository, `srm-and-sbi-monomer-dimer-alp`, rather than as an increment here.
+
+**Legacy condition tokens.** In this repository's experimental data and derived artifact
+filenames, `ALP` names the MET-FAB (Fab-labeled) condition and `BET` the MET-INLB (InlB-labeled)
+condition — a historical namespace fixed when the recordings were first staged, unrelated to the
+repo-iteration suffixes `alp`/`bet`. Archived filenames keep these tokens because data files are
+provenance; the code maps them to the scientific names (`CONDITION_DISPLAY` in
+`srm_and_sbi_dimer_alp/experiment_support.py`), and every user-facing surface says
+MET-FAB / MET-INLB.
+
 ## Naming conventions
 
 Names are consistent across the surfaces a user touches:
